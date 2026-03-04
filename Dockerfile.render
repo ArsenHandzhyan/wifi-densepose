@@ -12,8 +12,12 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.render.txt .
 RUN pip install --no-cache-dir -r requirements.render.txt
 
-# Copy application
-COPY . .
+# Copy application source
+COPY v1/ /app/v1/
+COPY . /app/
+
+# Create src symlink manually (symlinks don't copy well in Docker)
+RUN ln -sf /app/v1/src /app/src || true
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -24,4 +28,4 @@ ENV RENDER=true
 EXPOSE 8000
 
 # Run application
-CMD ["uvicorn", "v1.src.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]

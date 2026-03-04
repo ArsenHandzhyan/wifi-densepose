@@ -183,19 +183,16 @@ def setup_exception_handlers(app: FastAPI):
 def setup_routers(app: FastAPI, settings: Settings):
     """Setup API routers."""
     
-    # Health check router (no prefix) - legacy path
+    # Health check router under /health and /api/v1
     app.include_router(
         health.router,
         prefix="/health",
         tags=["Health"]
     )
-
-    # Health check router also under /api/v1
     app.include_router(
         health.router,
         prefix=f"{settings.api_prefix}",
-        tags=["Health"],
-        include_in_schema=False
+        tags=["Health v1"]
     )
     
     # API routers with prefix

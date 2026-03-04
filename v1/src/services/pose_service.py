@@ -69,6 +69,12 @@ class PoseService:
         try:
             self.logger.info("Initializing pose service...")
             
+            if not ML_AVAILABLE:
+                self.logger.warning("ML modules not available (no PyTorch), running in mock mode")
+                self.is_initialized = True
+                self.logger.info("Pose service initialized in mock mode")
+                return
+            
             # Initialize CSI processor
             csi_config = {
                 'buffer_size': self.settings.csi_buffer_size,

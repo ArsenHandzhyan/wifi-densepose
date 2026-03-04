@@ -233,14 +233,24 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
     @app.get(f"{settings.api_prefix}/health", tags=["Health v1"])
     async def api_v1_health(request: Request):
         """Health check alias under /api/v1/health."""
-        from src.api.routers.health import health_check
-        return await health_check(request)
+        try:
+            from src.api.routers.health import health_check
+            return await health_check(request)
+        except Exception as e:
+            import traceback
+            logger.error(f"/api/v1/health error: {e}\n{traceback.format_exc()}")
+            return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
 
     @app.get(f"{settings.api_prefix}/ready", tags=["Health v1"])
     async def api_v1_ready(request: Request):
         """Readiness check alias under /api/v1/ready."""
-        from src.api.routers.health import readiness_check
-        return await readiness_check(request)
+        try:
+            from src.api.routers.health import readiness_check
+            return await readiness_check(request)
+        except Exception as e:
+            import traceback
+            logger.error(f"/api/v1/ready error: {e}\n{traceback.format_exc()}")
+            return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
     
     @app.get(f"{settings.api_prefix}/info")
     async def api_info(request: Request):

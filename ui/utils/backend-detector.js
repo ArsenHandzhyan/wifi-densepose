@@ -20,30 +20,38 @@ export class BackendDetector {
 
     try {
       console.log('🔍 Checking backend availability...');
-      
-      // Try to connect to the health endpoint with a short timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
-      
-      const response = await fetch(`${API_CONFIG.BASE_URL}/health/live`, {
-        method: 'GET',
-        signal: controller.signal,
-        headers: {
-          'Accept': 'application/json'
+
+      const candidates = [
+        API_CONFIG.BASE_URL,
+        'http://127.0.0.1:8000',
+        'http://localhost:8000'
+      ].filter((v, i, a) => a.indexOf(v) === i);
+
+      for (const baseUrl of candidates) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+          const response = await fetch(`${baseUrl}/health/live`, {
+            method: 'GET',
+            signal: controller.signal,
+            headers: { 'Accept': 'application/json' }
+          });
+
+          clearTimeout(timeoutId);
+
+          if (response.ok) {
+            this.isBackendAvailable = true;
+            this.lastCheck = now;
+            console.log(`✅ Real backend is available at ${baseUrl}`);
+            return true;
+          }
+        } catch (_candidateError) {
+          // Try next candidate
         }
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        this.isBackendAvailable = true;
-        this.lastCheck = now;
-        console.log('✅ Real backend is available');
-        return true;
-      } else {
-        throw new Error(`Backend responded with status ${response.status}`);
       }
-      
+
+      throw new Error('All backend candidates are unavailable');
     } catch (error) {
       this.isBackendAvailable = false;
       this.lastCheck = now;

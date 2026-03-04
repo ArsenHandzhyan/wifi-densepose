@@ -1,7 +1,7 @@
 // API Configuration for WiFi-DensePose UI
 
 export const API_CONFIG = {
-  BASE_URL: 'http://localhost:8000',  // FastAPI backend port
+  BASE_URL: 'http://127.0.0.1:8000',  // FastAPI backend port
   API_VERSION: '/api/v1',
   WS_PREFIX: 'ws://',
   WSS_PREFIX: 'wss://',
@@ -9,7 +9,7 @@ export const API_CONFIG = {
   // Mock server configuration (only for testing)
   MOCK_SERVER: {
     ENABLED: false,  // Set to true only for testing without backend
-    AUTO_DETECT: true,  // Automatically detect if backend is available
+    AUTO_DETECT: false,  // Disabled: always use real backend in local FP2 mode
   },
   
   // API Endpoints
@@ -54,6 +54,15 @@ export const API_CONFIG = {
       // WebSocket endpoints
       WS_POSE: '/api/v1/stream/pose',
       WS_EVENTS: '/api/v1/stream/events'
+    },
+
+    // FP2
+    FP2: {
+      STATUS: '/api/v1/fp2/status',
+      CURRENT: '/api/v1/fp2/current',
+      ENTITIES: '/api/v1/fp2/entities',
+      RECOMMENDED: '/api/v1/fp2/recommended-entity',
+      WS: '/api/v1/fp2/ws'
     },
     
     // Development (only in dev mode)
@@ -111,8 +120,8 @@ export function buildWsUrl(endpoint, params = {}) {
     ? API_CONFIG.WSS_PREFIX 
     : API_CONFIG.WS_PREFIX;
   
-  // Use localhost:8000 for WebSocket connections to match FastAPI backend
-  const host = 'localhost:8000';
+  // Use 127.0.0.1:8000 for WebSocket connections to match FastAPI backend
+  const host = '127.0.0.1:8000';
   let url = `${protocol}${host}${endpoint}`;
   
   // Add query parameters

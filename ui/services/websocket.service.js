@@ -309,8 +309,8 @@ export class WebSocketService {
       clearTimeout(connection.reconnectTimer);
     }
 
-    // Clear ping interval
-    this.clearPingInterval(connection.url);
+    // Clear heartbeat/reconnect timers
+    this.clearConnectionTimers(connection.url);
 
     // Close WebSocket
     if (connection.ws.readyState === WebSocket.OPEN) {
@@ -490,6 +490,11 @@ export class WebSocketService {
       clearTimeout(connection.connectionTimer);
       connection.connectionTimer = null;
     }
+  }
+
+  // Backward compatibility for older call sites.
+  clearPingInterval(url) {
+    this.clearConnectionTimers(url);
   }
 
   cleanupConnection(url) {

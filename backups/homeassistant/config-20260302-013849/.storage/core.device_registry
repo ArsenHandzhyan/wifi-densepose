@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "minor_version": 12,
+  "key": "core.device_registry",
+  "data": {
+    "devices": [
+      {"area_id":null,"config_entries":["01KJMQHCYTTBCSDPJQAHJHMEEP"],"config_entries_subentries":{"01KJMQHCYTTBCSDPJQAHJHMEEP":[null]},"configuration_url":null,"connections":[],"created_at":"2026-03-01T12:56:25.820439+00:00","disabled_by":null,"entry_type":"service","hw_version":null,"id":"c3368d2eb17270ef078ce7bf889b2b0a","identifiers":[["sun","01KJMQHCYTTBCSDPJQAHJHMEEP"]],"labels":[],"manufacturer":null,"model":null,"model_id":null,"modified_at":"2026-03-01T12:56:25.820471+00:00","name_by_user":null,"name":"Sun","primary_config_entry":"01KJMQHCYTTBCSDPJQAHJHMEEP","serial_number":null,"sw_version":null,"via_device_id":null},
+      {"area_id":null,"config_entries":["01KJMQHDSPE1C3H9YTKCG4M2SP"],"config_entries_subentries":{"01KJMQHDSPE1C3H9YTKCG4M2SP":[null]},"configuration_url":"homeassistant://config/backup","connections":[],"created_at":"2026-03-01T12:56:26.686226+00:00","disabled_by":null,"entry_type":"service","hw_version":null,"id":"7b8654d956261b49b5e0ce72ed7210b6","identifiers":[["backup","backup_manager"]],"labels":[],"manufacturer":"Home Assistant","model":"Home Assistant Backup","model_id":null,"modified_at":"2026-03-01T12:56:26.686245+00:00","name_by_user":null,"name":"Backup","primary_config_entry":"01KJMQHDSPE1C3H9YTKCG4M2SP","serial_number":null,"sw_version":"2026.2.3","via_device_id":null}
+    ],
+    "deleted_devices": [
+      {"area_id":null,"config_entries":[],"config_entries_subentries":{},"connections":[["mac","47:9f:8d:b9:3d:6b"]],"created_at":"2026-03-01T17:40:53.828671+00:00","disabled_by":null,"disabled_by_undefined":false,"identifiers":[["homekit","01KJN7T8XYCMQJKVJNWHEW0ZH1","homekit.bridge"]],"id":"484cbb701445f2783bc6a76134b23d37","labels":[],"modified_at":"2026-03-01T18:13:27.808488+00:00","name_by_user":null,"orphaned_timestamp":1772388807.8084679}
+    ]
+  }
+}

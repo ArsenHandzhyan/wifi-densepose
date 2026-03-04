@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     mock_hardware: bool = Field(default=False, description="Use mock hardware for development")
     mock_pose_data: bool = Field(default=False, description="Use mock pose data for development")
     enable_test_endpoints: bool = Field(default=False, description="Enable test endpoints")
+
+    # Home Assistant / FP2 sensor settings
+    ha_url: str = Field(default="http://localhost:8123", description="Home Assistant URL")
+    ha_token: str = Field(default="", description="Home Assistant long-lived access token")
+    fp2_entity_id: str = Field(default="binary_sensor.fp2_presence", description="FP2 presence entity ID in HA")
+    fp2_poll_interval: float = Field(default=1.0, description="FP2 polling interval in seconds")
+    fp2_enabled: bool = Field(default=False, description="Enable FP2 sensor integration")
     
     # Cleanup settings
     csi_data_retention_days: int = Field(default=30, description="CSI data retention in days")
@@ -156,7 +163,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=False
+        case_sensitive=False,
+        extra="ignore"
     )
     
     @field_validator("environment")

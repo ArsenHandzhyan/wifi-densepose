@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: wifi-densepose-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: HA_URL
+        value: ${HA_URL}
+      - key: HA_TOKEN
+        value: ${HA_TOKEN}
+      - key: FP2_ENABLED
+        value: "true"
+      - key: FP2_ENTITY_ID
+        value: ${FP2_ENTITY_ID}
+      - key: DATABASE_URL
+        value: ${DATABASE_URL}
+      - key: REDIS_URL
+        value: ${REDIS_URL}
+    healthCheckPath: /health
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.app:app --host 0.0.0.0 --port $PORT

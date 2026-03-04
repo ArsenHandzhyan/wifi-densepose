@@ -20,7 +20,7 @@ from src.middleware.auth import AuthenticationMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from src.middleware.rate_limit import RateLimitMiddleware
 from src.middleware.error_handler import ErrorHandlingMiddleware
-from src.api.routers import pose, stream, health
+from src.api.routers import pose, stream, health, fp2
 from src.api.websocket.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,12 @@ async def lifespan(app: FastAPI):
         
         # Start all services
         await orchestrator.start()
+
+        # Expose service references for endpoints that read app.state directly.
+        app.state.hardware_service = orchestrator.hardware_service
+        app.state.pose_service = orchestrator.pose_service
+        app.state.stream_service = orchestrator.stream_service
+        app.state.fp2_service = orchestrator.fp2_service
         
         logger.info("WiFi-DensePose API started successfully")
         
@@ -195,6 +201,12 @@ def setup_routers(app: FastAPI, settings: Settings):
         stream.router,
         prefix=f"{settings.api_prefix}/stream",
         tags=["Streaming"]
+    )
+
+    app.include_router(
+        fp2.router,
+        prefix=f"{settings.api_prefix}/fp2",
+        tags=["FP2"]
     )
 
 

@@ -13,7 +13,8 @@ from src.services.metrics import MetricsService
 from src.api.dependencies import (
     get_hardware_service,
     get_pose_service,
-    get_stream_service
+    get_stream_service,
+    get_fp2_service
 )
 from src.api.websocket.connection_manager import connection_manager
 from src.api.websocket.pose_stream import PoseStreamHandler
@@ -39,6 +40,7 @@ class ServiceOrchestrator:
         self.hardware_service = None
         self.pose_service = None
         self.stream_service = None
+        self.fp2_service = None
         self.pose_stream_handler = None
     
     async def initialize(self):
@@ -67,6 +69,8 @@ class ServiceOrchestrator:
                 'pose_stream_handler': self.pose_stream_handler,
                 'connection_manager': connection_manager
             }
+            if self.fp2_service:
+                self._services['fp2'] = self.fp2_service
             
             self._initialized = True
             logger.info("All services initialized successfully")
@@ -93,6 +97,12 @@ class ServiceOrchestrator:
             self.stream_service = get_stream_service()
             await self.stream_service.initialize()
             logger.info("Stream service initialized")
+
+            # Initialize FP2 service (optional)
+            if self.settings.fp2_enabled:
+                self.fp2_service = get_fp2_service()
+                await self.fp2_service.initialize()
+                logger.info("FP2 service initialized")
             
             # Initialize pose stream handler
             self.pose_stream_handler = PoseStreamHandler(
@@ -150,6 +160,10 @@ class ServiceOrchestrator:
             # Start stream service
             if hasattr(self.stream_service, 'start'):
                 await self.stream_service.start()
+
+            # Start FP2 service (optional)
+            if self.fp2_service and hasattr(self.fp2_service, 'start'):
+                await self.fp2_service.start()
             
             logger.info("Application services started")
             
@@ -252,7 +266,10 @@ class ServiceOrchestrator:
             # Shutdown services in reverse order
             if self.stream_service and hasattr(self.stream_service, 'shutdown'):
                 await self.stream_service.shutdown()
-            
+
+            if self.fp2_service and hasattr(self.fp2_service, 'shutdown'):
+                await self.fp2_service.shutdown()
+
             if self.pose_service and hasattr(self.pose_service, 'shutdown'):
                 await self.pose_service.shutdown()
             

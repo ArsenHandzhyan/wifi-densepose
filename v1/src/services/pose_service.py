@@ -177,13 +177,45 @@ class PoseService:
         from src.hardware.csi_extractor import CSIData
         
         # Create CSIData object with proper fields
-        # For mock data, create amplitude and phase from input
+        # Ensure amplitude is 2D: (num_antennas, num_subcarriers)
         if csi_data.ndim == 1:
-            amplitude = np.abs(csi_data)
-            phase = np.angle(csi_data) if np.iscomplexobj(csi_data) else np.zeros_like(csi_data)
+            # 1D data: reshape to (1, N)
+            amplitude = np.abs(csi_data).reshape(1, -1)
+            phase = np.angle(csi_data) if np.iscomplexobj(csi_data) else np.zeros_like(amplitude)
+        elif csi_data.ndim == 2:
+            # 2D data: use as-is (num_antennas, num_subcarriers)
+            amplitude = csi_data.astype(np.float32)
+            phase = np.zeros_like(amplitude)
         else:
-            amplitude = csi_data
-            phase = np.zeros_like(csi_data)
+            # 3D or higher: flatten to 2D
+            amplitude = csi_data.reshape(csi_data.shape[0], -1).astype(np.float32)
+            phase = np.zeros_like(amplitude)
+        
+        # Ensure amplitude has correct shape for CSIProcessor
+        num_subcarriers = metadata.get("num_subcarriers", 56)
+        num_antennas = amplitude.shape[0] if amplitude.ndim >= 2 else metadata.get("num_antennas", 3)
+        
+        # Validate/fix amplitude shape
+        if amplitude.shape[-1] != num_subcarriers:
+            if amplitude.shape[-1] < num_subcarriers:
+                # Pad with zeros
+                padding = num_subcarriers - amplitude.shape[-1]
+                amplitude = np.pad(amplitude, ((0, 0), (0, padding)), mode='constant')
+            else:
+                # Truncate
+                amplitude = amplitude[:, :num_subcarriers]
+        
+        if amplitude.shape[0] != num_antennas:
+            # Reshape if antenna count doesn't match
+            if amplitude.size >= num_antennas * num_subcarriers:
+                amplitude = amplitude.reshape(num_antennas, -1)[:, :num_subcarriers]
+            else:
+                # Pad antennas dimension
+                padding = num_antennas - amplitude.shape[0]
+                amplitude = np.vstack([amplitude, np.zeros((padding, num_subcarriers))])
+        
+        # Regenerate phase with correct shape
+        phase = np.zeros_like(amplitude)
         
         csi_data_obj = CSIData(
             timestamp=metadata.get("timestamp", datetime.now()),
@@ -191,8 +223,8 @@ class PoseService:
             phase=phase,
             frequency=metadata.get("frequency", 5.0),  # 5 GHz default
             bandwidth=metadata.get("bandwidth", 20.0),  # 20 MHz default
-            num_subcarriers=metadata.get("num_subcarriers", 56),
-            num_antennas=metadata.get("num_antennas", 3),
+            num_subcarriers=num_subcarriers,
+            num_antennas=num_antennas,
             snr=metadata.get("snr", 20.0),  # 20 dB default
             metadata=metadata
         )
@@ -211,16 +243,22 @@ class PoseService:
                 # Apply phase sanitization if we have phase data
                 if hasattr(detection_result.features, 'phase_difference'):
                     phase_data = detection_result.features.phase_difference
-                    sanitized_phase = self.phase_sanitizer.sanitize(phase_data)
+                    # Reshape phase data to 2D if needed
+                    if phase_data.ndim == 1:
+                        phase_data = phase_data.reshape(1, -1)
+                    sanitized_phase = self.phase_sanitizer.sanitize_phase(phase_data)
                     # Combine amplitude and phase data
-                    return np.concatenate([amplitude_data, sanitized_phase])
+                    return np.concatenate([amplitude_data, sanitized_phase.flatten()])
                 
                 return amplitude_data
             
         except Exception as e:
             self.logger.warning(f"CSI processing failed, using raw data: {e}")
+            # Return normalized raw data as fallback
+            if isinstance(csi_data, np.ndarray):
+                return csi_data.flatten() if csi_data.size > 0 else np.zeros(56)
         
-        return csi_data
+        return np.zeros(56)
     
     async def _estimate_poses(self, csi_data: np.ndarray, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Estimate poses from processed CSI data."""
@@ -428,12 +466,15 @@ class PoseService:
         """Estimate poses with API parameters."""
         try:
             # Generate mock CSI data for estimation
-            mock_csi = np.random.randn(64, 56, 3)  # Mock CSI data
+            # Shape: (num_antennas, num_subcarriers) = (3, 56) for proper processing
+            mock_csi = np.random.randn(3, 56).astype(np.float32)
             metadata = {
                 "timestamp": datetime.now(),
                 "zone_ids": zone_ids or ["zone_1"],
                 "confidence_threshold": confidence_threshold or self.settings.pose_confidence_threshold,
-                "max_persons": max_persons or self.settings.pose_max_persons
+                "max_persons": max_persons or self.settings.pose_max_persons,
+                "num_subcarriers": 56,
+                "num_antennas": 3
             }
             
             # Process the data

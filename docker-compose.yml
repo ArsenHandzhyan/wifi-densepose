@@ -24,14 +24,19 @@ services:
       - ENABLE_RATE_LIMITING=false
       - DATABASE_URL=postgresql://wifi_user:wifi_pass@postgres:5432/wifi_densepose
       - REDIS_URL=redis://redis:6379/0
+      - HA_URL=http://homeassistant:8123
+      - HA_TOKEN=${HA_TOKEN}
+      - FP2_ENTITY_ID=${FP2_ENTITY_ID:-input_boolean.fp2_presence}
+    command: uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       - postgres
       - redis
+      - homeassistant
     networks:
       - wifi-densepose-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -112,6 +117,38 @@ services:
     depends_on:
       - prometheus
 
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: wifi-densepose-ha
+    volumes:
+      - ha_config:/config
+    environment:
+      - TZ=Europe/Moscow
+    ports:
+      - "8123:8123"
+    networks:
+      - wifi-densepose-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  homebridge:
+    image: homebridge/homebridge:latest
+    container_name: wifi-densepose-homebridge
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - ./homebridge:/var/lib/homebridge
+    ports:
+      - "8581:8581"
+    networks:
+      - wifi-densepose-network
+    restart: unless-stopped
+
   nginx:
     image: nginx:alpine
     container_name: wifi-densepose-nginx
@@ -132,6 +169,7 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
+  ha_config:
   wifi_densepose_logs:
   wifi_densepose_data:
   wifi_densepose_models:

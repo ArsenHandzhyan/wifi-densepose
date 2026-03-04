@@ -59,6 +59,15 @@ ui/
 - Pose detection visualization
 - Interactive controls
 
+### FP2 Monitor
+- Live polling and WebSocket stream from Home Assistant FP2 endpoints
+- Presence status (`PRESENT/ABSENT`)
+- Current zone detection from `persons`, `zone_summary`, or raw attributes
+- Movement events timeline (`ENTER`, `EXIT`, `MOVE`)
+- Presence duration counter for real local validation
+- Auto-select of best FP2 entity from Home Assistant
+- Live movement projection canvas (`Live Movement Map`)
+
 ### API Integration
 - Complete REST API coverage
 - WebSocket streaming support
@@ -95,6 +104,13 @@ The UI integrates with all WiFi DensePose API endpoints:
 - `POST /api/v1/stream/stop` - Stop streaming
 - `GET /api/v1/stream/clients` - Connected clients
 - `DELETE /api/v1/stream/clients/{client_id}` - Disconnect client
+
+### FP2 Integration
+- `GET /api/v1/fp2/status` - FP2 integration status
+- `GET /api/v1/fp2/current` - Current FP2 snapshot (pose-like format)
+- `GET /api/v1/fp2/entities` - FP2-like entities discovered in HA
+- `GET /api/v1/fp2/recommended-entity` - Best-effort FP2 entity recommendation
+- `WS /api/v1/fp2/ws` - Real-time FP2 stream
 
 ## 🧪 Testing
 

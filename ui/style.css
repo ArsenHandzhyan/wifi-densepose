@@ -1654,3 +1654,191 @@ canvas {
   font-weight: var(--font-weight-semibold);
   color: var(--color-primary);
 }
+
+/* FP2 monitor */
+.fp2-toolbar {
+  display: flex;
+  gap: var(--space-12);
+  margin-bottom: var(--space-16);
+}
+
+.fp2-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-16);
+  margin-bottom: var(--space-16);
+}
+
+.fp2-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-16);
+  box-shadow: var(--shadow-sm);
+}
+
+.fp2-kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-6) 0;
+  border-bottom: 1px dashed var(--color-card-border-inner);
+}
+
+.fp2-kv:last-of-type {
+  border-bottom: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  padding: var(--space-2) var(--space-10);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  background: var(--color-secondary);
+  color: var(--color-text);
+}
+
+.chip.ok {
+  background: rgba(var(--color-success-rgb), 0.16);
+  color: var(--color-success);
+}
+
+.chip.warn {
+  background: rgba(var(--color-warning-rgb), 0.16);
+  color: var(--color-warning);
+}
+
+.chip.err {
+  background: rgba(var(--color-error-rgb), 0.16);
+  color: var(--color-error);
+}
+
+.presence-pill {
+  font-weight: var(--font-weight-bold);
+  border-radius: var(--radius-full);
+  padding: var(--space-4) var(--space-10);
+  letter-spacing: 0.03em;
+  font-size: var(--font-size-xs);
+}
+
+.presence-pill.present {
+  background: rgba(var(--color-success-rgb), 0.2);
+  color: var(--color-success);
+}
+
+.presence-pill.absent {
+  background: rgba(var(--color-error-rgb), 0.2);
+  color: var(--color-error);
+}
+
+.fp2-history-list {
+  margin: var(--space-10) 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.fp2-history-item {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-8);
+  border-bottom: 1px solid var(--color-card-border-inner);
+  padding: var(--space-6) 0;
+  font-size: var(--font-size-sm);
+}
+
+.fp2-history-item .ok {
+  color: var(--color-success);
+}
+
+.fp2-history-item .muted {
+  color: var(--color-text-secondary);
+}
+
+.fp2-movement-list .fp2-history-item {
+  align-items: center;
+}
+
+.fp2-event {
+  font-weight: var(--font-weight-semibold);
+  border-radius: var(--radius-full);
+  padding: 2px 10px;
+  font-size: var(--font-size-xs);
+}
+
+.fp2-event-enter {
+  background: rgba(var(--color-success-rgb), 0.16);
+  color: var(--color-success);
+}
+
+.fp2-event-exit {
+  background: rgba(var(--color-error-rgb), 0.16);
+  color: var(--color-error);
+}
+
+.fp2-event-move {
+  background: rgba(var(--color-primary-rgb), 0.16);
+  color: var(--color-primary);
+}
+
+.fp2-event-presence {
+  background: rgba(var(--color-warning-rgb), 0.16);
+  color: var(--color-warning);
+}
+
+.fp2-raw-output {
+  margin: 0;
+  padding: var(--space-12);
+  border-radius: var(--radius-base);
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--color-card-border-inner);
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+#fp2MovementCanvas {
+  border: 1px solid var(--color-card-border-inner);
+  border-radius: var(--radius-base);
+  background: linear-gradient(180deg, rgba(30, 40, 55, 0.85), rgba(16, 22, 30, 0.95));
+}
+
+/* FP2 Real-time Graph */
+#fp2RealtimeGraph {
+  border: 1px solid var(--color-card-border-inner);
+  border-radius: var(--radius-base);
+}
+
+.fp2-graph-legend {
+  display: flex;
+  gap: var(--space-16);
+  margin-top: var(--space-8);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.fp2-graph-legend .legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.fp2-graph-legend .legend-color {
+  width: 16px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.fp2-graph-legend .legend-color.present {
+  background: #4ade80;
+}
+
+.fp2-graph-legend .legend-color.absent {
+  background: #6b7280;
+}

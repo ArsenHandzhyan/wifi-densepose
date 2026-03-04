@@ -2,6 +2,7 @@
 
 import { TabManager } from './components/TabManager.js';
 import { DashboardTab } from './components/DashboardTab.js';
+import { FP2Tab } from './components/FP2Tab.js?v=20260301-fix5';
 import { HardwareTab } from './components/HardwareTab.js';
 import { LiveDemoTab } from './components/LiveDemoTab.js';
 import { apiService } from './services/api.service.js';
@@ -43,6 +44,15 @@ class WiFiDensePoseApp {
 
   // Initialize services
   async initializeServices() {
+    // Compatibility shim: older cached websocket module may call clearPingInterval().
+    if (typeof wsService.clearPingInterval !== 'function') {
+      wsService.clearPingInterval = (url) => {
+        if (typeof wsService.clearConnectionTimers === 'function') {
+          wsService.clearConnectionTimers(url);
+        }
+      };
+    }
+
     // Add request interceptor for error handling
     apiService.addResponseInterceptor(async (response, url) => {
       if (!response.ok && response.status === 401) {
@@ -107,6 +117,15 @@ class WiFiDensePoseApp {
       this.components.dashboard = new DashboardTab(dashboardContainer);
       this.components.dashboard.init().catch(error => {
         console.error('Failed to initialize dashboard:', error);
+      });
+    }
+
+    // Hardware tab
+    const fp2Container = document.getElementById('fp2');
+    if (fp2Container) {
+      this.components.fp2 = new FP2Tab(fp2Container);
+      this.components.fp2.init().catch(error => {
+        console.error('Failed to initialize FP2 tab:', error);
       });
     }
 

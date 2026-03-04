@@ -14,6 +14,7 @@ from src.config.domains import get_domain_config
 from src.services.pose_service import PoseService
 from src.services.stream_service import StreamService
 from src.services.hardware_service import HardwareService
+from src.services.fp2_service import FP2Service
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,13 @@ def get_hardware_service() -> HardwareService:
         settings=settings,
         domain_config=domain_config
     )
+
+
+@lru_cache()
+def get_fp2_service() -> FP2Service:
+    """Get FP2 service instance."""
+    settings = get_settings()
+    return FP2Service(settings=settings)
 
 
 # Authentication dependencies

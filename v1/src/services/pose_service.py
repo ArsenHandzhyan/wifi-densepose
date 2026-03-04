@@ -8,14 +8,29 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 
 import numpy as np
-import torch
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
 
 from src.config.settings import Settings
 from src.config.domains import DomainConfig
-from src.core.csi_processor import CSIProcessor
-from src.core.phase_sanitizer import PhaseSanitizer
-from src.models.densepose_head import DensePoseHead
-from src.models.modality_translation import ModalityTranslationNetwork
+
+try:
+    from src.core.csi_processor import CSIProcessor
+    from src.core.phase_sanitizer import PhaseSanitizer
+    from src.models.densepose_head import DensePoseHead
+    from src.models.modality_translation import ModalityTranslationNetwork
+    ML_AVAILABLE = True
+except (ImportError, Exception):
+    CSIProcessor = None
+    PhaseSanitizer = None
+    DensePoseHead = None
+    ModalityTranslationNetwork = None
+    ML_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 

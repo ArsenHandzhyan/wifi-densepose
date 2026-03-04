@@ -281,6 +281,9 @@ class PoseService:
             return self._generate_mock_poses()
         
         try:
+            if not TORCH_AVAILABLE or not ML_AVAILABLE:
+                return self._generate_mock_poses()
+            
             # Convert CSI data to tensor
             csi_tensor = torch.from_numpy(csi_data).float()
             
@@ -318,7 +321,7 @@ class PoseService:
             self.logger.error(f"Error in pose estimation: {e}")
             return []
     
-    def _parse_pose_outputs(self, outputs: torch.Tensor) -> List[Dict[str, Any]]:
+    def _parse_pose_outputs(self, outputs: Any) -> List[Dict[str, Any]]:
         """Parse neural network outputs into pose detections."""
         poses = []
         
@@ -404,7 +407,7 @@ class PoseService:
             "height": height
         }
     
-    def _classify_activity(self, features: torch.Tensor) -> str:
+    def _classify_activity(self, features: Any) -> str:
         """Classify activity from features."""
         # Simple mock classification
         import random

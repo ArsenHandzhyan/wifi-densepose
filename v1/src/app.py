@@ -183,16 +183,11 @@ def setup_exception_handlers(app: FastAPI):
 def setup_routers(app: FastAPI, settings: Settings):
     """Setup API routers."""
     
-    # Health check router under /health and /api/v1
+    # Health check router under /health
     app.include_router(
         health.router,
         prefix="/health",
         tags=["Health"]
-    )
-    app.include_router(
-        health.router,
-        prefix=f"{settings.api_prefix}",
-        tags=["Health v1"]
     )
     
     # API routers with prefix
@@ -234,6 +229,18 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
                 "real_time_processing": settings.enable_real_time_processing
             }
         }
+
+    @app.get(f"{settings.api_prefix}/health", tags=["Health v1"])
+    async def api_v1_health(request: Request):
+        """Health check alias under /api/v1/health."""
+        from src.api.routers.health import health_check
+        return await health_check(request)
+
+    @app.get(f"{settings.api_prefix}/ready", tags=["Health v1"])
+    async def api_v1_ready(request: Request):
+        """Readiness check alias under /api/v1/ready."""
+        from src.api.routers.health import readiness_check
+        return await readiness_check(request)
     
     @app.get(f"{settings.api_prefix}/info")
     async def api_info(request: Request):

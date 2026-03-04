@@ -11,6 +11,8 @@ from fastapi import Request, Response, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from src.config.settings import Settings
 from src.logger import set_request_context
@@ -161,16 +163,17 @@ class UserManager:
         return False
 
 
-class AuthenticationMiddleware:
+class AuthenticationMiddleware(BaseHTTPMiddleware):
     """Authentication middleware for FastAPI."""
     
-    def __init__(self, settings: Settings):
+    def __init__(self, app: ASGIApp, settings: Settings):
+        super().__init__(app)
         self.settings = settings
         self.token_manager = TokenManager(settings)
         self.user_manager = UserManager()
         self.enabled = settings.enable_authentication
     
-    async def __call__(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process request through authentication middleware."""
         start_time = time.time()
         

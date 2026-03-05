@@ -316,3 +316,55 @@ FP2 привязан к Aqara Cloud. HAP (HomeKit) на нём выключен 
 Шаг 3 (максимальные данные): Нативный HomeKit
 - Полные данные FP2: зоны, координаты, активность
 - Требует решения по поводу потери Aqara Home
+
+---
+
+## Update - 2026-03-05 ~21:30 (HomeKit Pairing Preparation)
+
+### Что сделано в этой сессии
+
+1. **Полный анализ проблемы** — задокументировано почему UI не видит реальное движение:
+   - FP2 привязан к Aqara Cloud, HAP выключен
+   - `input_boolean.fp2_presence` — кнопка-заглушка, не связана с реальным FP2
+   - Aqara Home не поддерживает HTTP/webhook действия в автоматизациях
+
+2. **Homebridge интеграция (WIP)**:
+   - Установлен плагин `homebridge-http-webhooks`
+   - Добавлена платформа с motion sensor `fp2_motion`
+   - Проблема: Homebridge UI Supervisor перезаписывает config при старте
+   - Порт 51828 проброшен в docker-compose.yml
+
+3. **Созданы скрипты**:
+   - `scripts/fp2_discovery_monitor.py` — мониторинг сети для поиска FP2 после сброса
+   - `scripts/fp2_homebridge_bridge.py` — мост HA → Homebridge webhook
+
+4. **Подготовка к HomeKit pairing**:
+   - Удалены все `homekit_controller` entries из HA
+   - HA готов к приёму FP2 как HomeKit Device
+   - Монитор запущен и ждёт FP2 в pairing mode
+
+### Текущий статус (готов к сбросу FP2)
+
+| Компонент | Статус |
+|-----------|--------|
+| FP2 в Aqara Home | ⏳ Ожидает удаления пользователем |
+| HA HomeKit Controller | ✅ Очищен, готов к pairing |
+| Монитор сети | ✅ Готов (скрипт создан) |
+| Homebridge | ⚠️ Нестабилен (Supervisor перезаписывает config) |
+| Cloudflare Tunnel | ✅ Работает (ephemeral URL) |
+| Render бэкенд | ✅ Опросы идут |
+
+### Следующий шаг (требует действия пользователя)
+
+**Удалить FP2 из Aqara Home:**
+1. Открыть Aqara Home app
+2. Найти FP2 Presence → Настройки → Удалить устройство
+3. Дождаться мигания LED (pairing mode)
+4. Запустить монитор: `python3 scripts/fp2_discovery_monitor.py`
+5. Как только FP2 найден — добавить в HA через Settings → Devices → Add Integration → HomeKit Device
+
+### Альтернативы если HomeKit не сработает
+
+1. **Aqara Hub M2/M3** (~$50) — LAN API, стабильно, без сброса FP2
+2. **Оставить как есть** — UI работает с `input_boolean.fp2_presence` (ручное/автоматическое переключение)
+

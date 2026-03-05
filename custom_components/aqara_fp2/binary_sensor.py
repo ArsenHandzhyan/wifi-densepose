@@ -60,16 +60,28 @@ class AqaraDataCoordinator(DataUpdateCoordinator):
         """Fetch data from Aqara API."""
         try:
             async with aiohttp.ClientSession() as session:
-                # Get device state
-                result = await self._request(session, "config.device.getState", {
-                    "did": self.device_id
-                })
+                # Try different intent formats
+                intents_to_try = [
+                    "config.device.getState",  # Standard format
+                    "device.getState",  # Short format
+                    "getDeviceState",  # CamelCase
+                    "Config.device.getState",  # Capitalized
+                ]
                 
-                if result and result.get("code") == 0:
-                    return result.get("result", {})
-                else:
-                    _LOGGER.error(f"API error: {result}")
-                    return {}
+                for intent in intents_to_try:
+                    result = await self._request(session, intent, {
+                        "did": self.device_id
+                    })
+                    
+                    if result and result.get("code") == 0:
+                        _LOGGER.info(f"Success with intent: {intent}")
+                        return result.get("result", {})
+                    else:
+                        _LOGGER.debug(f"Failed with intent: {intent} - {result}")
+                
+                # If all failed, log error
+                _LOGGER.error(f"All intents failed for device {self.device_id}")
+                return {}
                     
         except Exception as err:
             _LOGGER.error(f"Error fetching data: {err}")
@@ -81,7 +93,7 @@ class AqaraDataCoordinator(DataUpdateCoordinator):
         import time
         import random
         
-        # App credentials (need to be configured by user)
+        # App credentials
         app_id = "14781250729668648963a0b3"
         app_key = "uyx84zj5aym4itdkibvecakrfakm8nlp"
         key_id = "K.1478125073038168064"
@@ -93,41 +105,62 @@ class AqaraDataCoordinator(DataUpdateCoordinator):
         sign_str = f"{app_key}{nonce}{timestamp}"
         sign = hashlib.md5(sign_str.encode()).hexdigest()
         
-        # Build URL with ALL parameters in query string
-        params = {
-            "appid": app_id,
-            "keyid": key_id,
-            "nonce": nonce,
-            "time": timestamp,
-            "sign": sign,
-        }
+        # Try TWO different request formats:
+        # Format 1: Parameters in URL (original)
+        # Format 2: Parameters in body (alternative)
         
-        # Manually build URL to ensure correct order
+        # Format 1 - URL parameters
         query_string = f"appid={app_id}&keyid={key_id}&nonce={nonce}&time={timestamp}&sign={sign}"
         url = f"{self.base_url}?{query_string}"
         
-        # Headers - add Appid as both param and header
         headers = {
             "Content-Type": "application/json",
             "Accesstoken": self.access_token,
             "Appid": app_id,
         }
         
-        # Request body
         payload = {
             "intent": intent,
             "data": data or {},
         }
         
-        _LOGGER.debug(f"URL: {url}")
+        _LOGGER.debug(f"Format 1 - URL: {url}")
         _LOGGER.debug(f"Intent: {intent}")
-        _LOGGER.debug(f"Data: {data}")
         
         async with session.post(url, headers=headers, json=payload) as resp:
             result = await resp.json()
-            _LOGGER.debug(f"Response code: {result.get('code')}")
-            _LOGGER.debug(f"Response msg: {result.get('messageDetail')}")
-            return result
+            _LOGGER.debug(f"Response: {result.get('code')} - {result.get('messageDetail')}")
+            
+            # If successful, return
+            if result.get('code') == 0:
+                return result
+        
+        # If Format 1 failed with error 302, try Format 2
+        if result.get('code') == 302:
+            _LOGGER.info("Trying Format 2 - parameters in body")
+            
+            # Format 2 - All parameters in request body
+            body_payload = {
+                "appid": app_id,
+                "keyid": key_id,
+                "nonce": nonce,
+                "time": timestamp,
+                "sign": sign,
+                "intent": intent,
+                "data": data or {},
+            }
+            
+            headers_body = {
+                "Content-Type": "application/json",
+                "Accesstoken": self.access_token,
+            }
+            
+            async with session.post(self.base_url, headers=headers_body, json=body_payload) as resp:
+                result = await resp.json()
+                _LOGGER.debug(f"Format 2 Response: {result.get('code')} - {result.get('messageDetail')}")
+                return result
+        
+        return result
 
 
 class AqaraFp2OccupancySensor(CoordinatorEntity, BinarySensorEntity):

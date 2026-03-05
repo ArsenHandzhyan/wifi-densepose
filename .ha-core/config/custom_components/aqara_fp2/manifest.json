@@ -1,0 +1,13 @@
+{
+  "domain": "aqara_fp2",
+  "name": "Aqara FP2 Cloud",
+  "version": "1.0.0",
+  "config_flow": true,
+  "documentation": "https://github.com/arsen/fp2-cloud-hass",
+  "requirements": [],
+  "codeowners": ["@arsen"],
+  "iot_class": "cloud_polling",
+  "quality_scale": {
+    "gold": false
+  }
+}

@@ -18,7 +18,7 @@ import aiohttp
 APP_ID = "14781250729668648963a0b3"
 APP_KEY = "uyx84zj5aym4itdkibvecakrfakm8nlp"
 KEY_ID = "K.1478125073038168064"  # Europe
-ACCESS_TOKEN = "a234cd38d5c388b23fc5fe8975eb5bc3"
+ACCESS_TOKEN = "928a72b8088cac5c79473fca295d5523"  # Europe token (expires 2026-03-11)
 
 # Server endpoints
 DOMAINS = {
@@ -30,7 +30,7 @@ DOMAINS = {
     "Korea": "open-kor.aqara.com",
 }
 
-DOMAIN = DOMAINS["Europe"]  # Выберите ваш регион
+DOMAIN = DOMAINS["Europe"]  # Europe region
 BASE_URL = f"https://{DOMAIN}/v3.0/open/api"
 
 

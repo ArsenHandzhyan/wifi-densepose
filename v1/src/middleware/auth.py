@@ -245,6 +245,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/v1/health",
             "/api/v1/ready",
             "/api/v1/live",
+            "/api/v1/fp2",
+            "/api/v1/pose",
+            "/api/v1/stream",
+            "/api/v1/info",
         ]
         
         return any(path.startswith(skip_path) for skip_path in skip_paths)

@@ -18,10 +18,8 @@ export class FP2Service {
         : null;
 
     this.baseUrls = [
-      origin,
-      'http://127.0.0.1:8000',
-      'http://localhost:8000'
-    ].filter((v, i, a) => Boolean(v) && a.indexOf(v) === i);
+      API_CONFIG.BASE_URL
+    ].filter(Boolean);
     this.selectedEntityId = localStorage.getItem('fp2_selected_entity_id') || null;
   }
 

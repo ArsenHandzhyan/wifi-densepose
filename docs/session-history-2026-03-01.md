@@ -74,6 +74,96 @@ Symptoms seen:
 
 ---
 
+## Update - 2026-03-05 (Render + Cloudflare Tunnel + HA trusted_proxies)
+
+### Контекст
+
+Бэкенд задеплоен на Render.com (`https://wifi-densepose-qtgc.onrender.com`).  
+Для доступа к локальному HA из интернета используется Cloudflare Tunnel (ephemeral, `trycloudflare.com`).
+
+### Что пробовали и не сработало
+
+#### FP2 HomeKit паринг — бесконечный цикл
+- Попытки подключить FP2 напрямую через HomeKit Accessory Protocol (`scripts/fp2_hap_client.py`):
+  - FP2 находится по адресу `192.168.1.52`, порт **443** — это Aqara Cloud, не HAP.
+  - HAP активируется только если удалить устройство из Aqara Home → устройство сбрасывается до заводских.
+  - После сброса: нужно заново привязать к WiFi → добавить в Aqara → HAP снова отключается.
+  - **Вывод: паринг через HAP без удаления из Aqara Home невозможен. Цикл без выхода.**
+- `aiohomekit` библиотека: `CharacteristicCacheMemory` переименован/удалён в новых версиях → `ImportError`.
+  - Фикс: использовать пустой dict `{}` вместо `CharacteristicCacheMemory`.
+  - Но даже с фиксом → `AccessoryDisconnectedError` (порт 443 = Aqara Cloud).
+
+#### Aqara Cloud API
+- Регион Россия (`open-ru.aqara.com`) — недоступен.
+- Регион Европа (`open-ger.aqara.com`) — 403 (нет прав проекта).
+- **Вывод: Aqara Cloud API не подходит.**
+
+#### Render PATCH env-vars
+- `PATCH /services/{id}/env-vars` — не обновляет существующие переменные.
+- Правильный способ: `PUT /services/{id}/env-vars` с **полным списком** всех переменных.
+
+#### HA Docker volume vs `.ha-core/config/`
+- HA читает конфиг из Docker-тома `wifi-densepose_ha_config/_data`, смонтированного как `/config`.
+- Редактирование `.ha-core/config/configuration.yaml` на хосте **не влияет** на запущенный контейнер.
+- Правильный способ: `docker cp file.yaml wifi-densepose-ha:/config/configuration.yaml`.
+
+#### `homekit_controller:` в YAML
+- Запись `homekit_controller:` в `configuration.yaml` вызывает ошибку при старте HA:
+  ```
+  ERROR: The homekit_controller integration does not support YAML setup
+  ```
+- Интеграция настраивается только через UI, не через YAML.
+
+#### HA Auth Middleware блокировал FP2 endpoints
+- `/api/v1/fp2/*` возвращал 500 — `AuthenticationMiddleware` не пропускал запросы без токена.
+- Фикс: добавить `/api/v1/fp2`, `/api/v1/pose`, `/api/v1/stream`, `/api/v1/info` в `skip_paths` в `v1/src/middleware/auth.py`.
+
+### Что сработало и работает сейчас
+
+#### Workaround: `input_boolean.fp2_presence`
+- FP2 не подключён через HomeKit напрямую.
+- Используется HA helper-сущность `input_boolean.fp2_presence` как proxy для состояния присутствия.
+- Render-бэкенд опрашивает HA через Cloudflare Tunnel каждые несколько секунд.
+
+#### Cloudflare Tunnel (ephemeral)
+- Команда запуска: `cloudflared tunnel --url http://localhost:8123`
+- Текущий URL: `https://walnut-receptors-operating-inc.trycloudflare.com`
+- **Внимание:** URL меняется при каждом перезапуске. После перезапуска нужно обновить `HA_URL` в Render через PUT env-vars API.
+
+#### HA trusted_proxies
+- Добавлены в `configuration.yaml`:
+  - `192.168.65.0/24` — Docker gateway (IP который HA видит от тоннеля)
+  - Все Cloudflare IP-диапазоны (`103.21.244.0/22`, `104.16.0.0/13` и др.)
+  - `use_x_forwarded_for: true`
+- Без этого HA возвращает `400 Bad Request` на все запросы через прокси.
+
+### Текущее состояние (2026-03-05)
+
+| Компонент | Статус |
+|-----------|--------|
+| Render backend | ✅ `https://wifi-densepose-qtgc.onrender.com` |
+| HA Docker | ✅ запущен, `healthy`, порт 8123 |
+| Cloudflare Tunnel | ✅ работает (ephemeral URL) |
+| `input_boolean.fp2_presence` | ✅ state: "on" |
+| `/api/v1/fp2/status` | ✅ `successful: 17/17, failed: 0` |
+| `/api/v1/fp2/current` | ✅ возвращает данные присутствия |
+| FP2 нативный HomeKit | ❌ не подключён (Aqara Cloud блокирует HAP) |
+
+### Файлы изменённые в этой сессии
+
+- `v1/src/middleware/auth.py` — добавлены skip_paths для FP2/pose/stream/info
+- `.ha-core/config/configuration.yaml` — добавлены trusted_proxies + удалён homekit_controller
+
+### Что нужно для следующей разработки
+
+1. **Постоянный Cloudflare Tunnel** — сейчас ephemeral (URL меняется при перезапуске).  
+   Решение: завести бесплатный аккаунт Cloudflare Zero Trust и создать именованный тоннель.
+2. **Авто-обновление HA_URL на Render** — при смене тоннель-URL нужно вручную обновлять env var.
+3. **FP2 нативные данные** — сейчас только `on/off` присутствие. Реальный FP2 даёт зоны, координаты, скорость.  
+   Для получения: нужен HA с нативной HomeKit интеграцией FP2 (требует удаления из Aqara Home).
+
+---
+
 ## Update - 2026-03-02 02:47 MSK
 
 Additional state was validated and fixed in ops flow:

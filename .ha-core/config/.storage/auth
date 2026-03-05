@@ -81,9 +81,9 @@
         "access_token_expiration": 1800.0,
         "token": "60394368d2584305b6eadd38986ab7ec567b56f0b73f2e14eb5397040db7cc883f5391a09d7648a42ca70de825a50cbcf27d3326e0c5128b4c664753c07590c0",
         "jwt_key": "542034e993fe58805b4eb83a689f47902ff8e12c0900c7242fc3a678b92051577d5d81de93d4a07425a08318d3fde6f0a69c1fcae510cb706a1e41dee19fa5b1",
-        "last_used_at": "2026-03-01T19:06:31.330446+00:00",
-        "last_used_ip": "172.67.68.90",
-        "expire_at": 1780167991.330446,
+        "last_used_at": "2026-03-04T23:13:18.912255+00:00",
+        "last_used_ip": "::1",
+        "expire_at": 1780441998.912255,
         "credential_id": "7b7991f6c5c94eccbdb802181977b905",
         "version": "2026.2.3"
       },
@@ -204,6 +204,23 @@
         "last_used_ip": "::1",
         "expire_at": 1780434976.046869,
         "credential_id": "7b7991f6c5c94eccbdb802181977b905",
+        "version": "2026.2.3"
+      },
+      {
+        "id": "061a17ed45aa4fa88350355f65b1f34f",
+        "user_id": "4358e6f7e9714e9493c535661e07c339",
+        "client_id": null,
+        "client_name": "Qoder",
+        "client_icon": null,
+        "token_type": "long_lived_access_token",
+        "created_at": "2026-03-04T23:14:33.903272+00:00",
+        "access_token_expiration": 315360000.0,
+        "token": "9227a6bea3d85ab2fffb69e50428d848081b2c31631af108cac777dcbbaecc71310c4bfe521dbd922a286dc6090d1ed83485a60b62266adb06c4d26e2373c610",
+        "jwt_key": "663cea2deaa843d2bc7faf8c6ca2b9307feba97186e34d726c66dd741581e0598ebdfe4f80dcbaa963f6a5cbacb358964172a485ee35720ff6e9e0ec87d85bf4",
+        "last_used_at": "2026-03-04T23:14:33.903370+00:00",
+        "last_used_ip": null,
+        "expire_at": null,
+        "credential_id": null,
         "version": "2026.2.3"
       }
     ]

@@ -124,8 +124,11 @@ export class FP2Tab {
       const selectedEntity = this.state.selectedEntity || status.entity_id || '-';
       this.elements.entityId.textContent = selectedEntity;
     } catch (_error) {
-      this.elements.apiStatus.textContent = 'Error';
-      this.elements.apiStatus.className = 'chip err';
+      // Don't show Error if we already had successful data before
+      if (!this.state.apiEnabled) {
+        this.elements.apiStatus.textContent = 'Error';
+        this.elements.apiStatus.className = 'chip err';
+      }
     }
   }
 
@@ -209,12 +212,8 @@ export class FP2Tab {
   }
 
   async startStreaming() {
-    try {
-      this.updateStreamState('connecting');
-      await fp2Service.startStream();
-    } catch (_error) {
-      this.updateStreamState('error');
-    }
+    // WebSocket не поддерживается на Render free tier — используем REST polling
+    this.updateStreamState('polling');
   }
 
   startPolling() {
@@ -264,8 +263,10 @@ export class FP2Tab {
   updateStreamState(state) {
     this.state.streamState = state;
     this.elements.streamStatus.textContent = state;
-    this.elements.streamStatus.className =
-      `chip ${state === 'connected' ? 'ok' : state === 'error' ? 'err' : 'warn'}`;
+    const cls = state === 'connected' ? 'ok'
+              : state === 'error'    ? 'err'
+              : 'warn';
+    this.elements.streamStatus.className = `chip ${cls}`;
 
     if (this.elements.streamBtn) {
       this.elements.streamBtn.textContent = state === 'connected' ? 'Stop Stream' : 'Start Stream';
@@ -289,10 +290,10 @@ export class FP2Tab {
     this.elements.zonesCount.textContent = String(zonesCount);
     this.elements.currentZone.textContent = currentZone || '-';
 
-    this.elements.updatedAt.textContent = data?.timestamp || '-';
+    this.elements.updatedAt.textContent = new Date().toLocaleTimeString();
     this.elements.rawOutput.textContent = JSON.stringify(data, null, 2);
 
-    const ts = data?.timestamp || new Date().toISOString();
+    const ts = new Date().toLocaleTimeString();
     this.trackMovement({
       timestamp: ts,
       presence,
@@ -300,7 +301,7 @@ export class FP2Tab {
     });
 
     if (presence && !this.state.presenceStartedAt) {
-      this.state.presenceStartedAt = ts;
+      this.state.presenceStartedAt = Date.now();
     }
     if (!presence) {
       this.state.presenceStartedAt = null;
@@ -308,7 +309,11 @@ export class FP2Tab {
     this.elements.presenceDuration.textContent = this.getPresenceDuration();
 
     this.state.lastUpdate = ts;
-    this.pushHistory({ timestamp: ts, presence });
+
+    // Записываем в историю только при смене состояния
+    if (this.state.lastPresence !== presence) {
+      this.pushHistory({ timestamp: ts, presence });
+    }
 
     this.updateTrajectory(data);
     this.drawMovementMap(data);
@@ -354,9 +359,8 @@ export class FP2Tab {
       this.pushMovementEvent(event.timestamp, 'exit', `Left ${prevZone || 'detection area'}`);
     } else if (event.presence && prevZone && event.zone && prevZone !== event.zone) {
       this.pushMovementEvent(event.timestamp, 'move', `${prevZone} -> ${event.zone}`);
-    } else if (event.presence) {
-      this.pushMovementEvent(event.timestamp, 'presence', `In ${event.zone || 'detection area'}`);
     }
+    // Не пишем PRESENCE при каждом poll — только реальные события
 
     this.state.lastPresence = event.presence;
     this.state.currentZone = event.zone;
@@ -389,12 +393,7 @@ export class FP2Tab {
     if (!this.state.presenceStartedAt) {
       return '0s';
     }
-    const start = new Date(this.state.presenceStartedAt).getTime();
-    const now = Date.now();
-    if (Number.isNaN(start)) {
-      return '0s';
-    }
-    const diffSec = Math.max(0, Math.floor((now - start) / 1000));
+    const diffSec = Math.max(0, Math.floor((Date.now() - this.state.presenceStartedAt) / 1000));
     const min = Math.floor(diffSec / 60);
     const sec = diffSec % 60;
     if (min === 0) {

@@ -1,7 +1,7 @@
 // API Configuration for WiFi-DensePose UI
 
 export const API_CONFIG = {
-  BASE_URL: 'http://127.0.0.1:8000',  // FastAPI backend port
+  BASE_URL: 'https://wifi-densepose-qtgc.onrender.com',  // Render backend
   API_VERSION: '/api/v1',
   WS_PREFIX: 'ws://',
   WSS_PREFIX: 'wss://',
@@ -116,12 +116,10 @@ export function buildApiUrl(endpoint, params = {}) {
 
 // Helper function to build WebSocket URLs
 export function buildWsUrl(endpoint, params = {}) {
-  const protocol = window.location.protocol === 'https:' 
-    ? API_CONFIG.WSS_PREFIX 
-    : API_CONFIG.WS_PREFIX;
-  
-  // Use 127.0.0.1:8000 for WebSocket connections to match FastAPI backend
-  const host = '127.0.0.1:8000';
+  const baseUrl = API_CONFIG.BASE_URL;
+  const isHttps = baseUrl.startsWith('https://');
+  const protocol = isHttps ? API_CONFIG.WSS_PREFIX : API_CONFIG.WS_PREFIX;
+  const host = baseUrl.replace(/^https?:\/\//, '');
   let url = `${protocol}${host}${endpoint}`;
   
   // Add query parameters

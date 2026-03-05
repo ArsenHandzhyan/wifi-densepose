@@ -226,3 +226,93 @@ Created two new scripts:
 - `docs/fp2-real-movement-testing.md` - Updated with new tools
 - `.env` - Added note about Aqara API restrictions
 
+
+---
+
+## Полный анализ — 2026-03-05 (итоговый срез)
+
+### Цель
+Показывать реальное движение объектов в UI автоматически, используя имеющееся оборудование.
+
+### Оборудование
+
+| Устройство | Статус | Что даёт |
+|-----------|--------|----------|
+| Aqara FP2 (192.168.1.52) | Онлайн, Aqara Home | Зоны, координаты, скорость, люди |
+| Keenetic GIGA | Работает | WiFi-сеть |
+| MacBook (хост) | Работает | Docker, HA, бэкенд |
+| Render.com | Задеплоен | Публичный API |
+
+### Текущая архитектура
+
+```
+FP2 → Aqara Cloud → Aqara Home App  ← данные недоступны извне
+
+input_boolean.fp2_presence (HA helper, вручную / автоматизация каждые 30 сек)
+  → Home Assistant (Docker, localhost:8123)
+  → Cloudflare Tunnel (ephemeral URL, меняется при рестарте)
+  → Render.com FastAPI (https://wifi-densepose-qtgc.onrender.com)
+  → UI (localhost:3000) polling каждые 4 сек
+```
+
+### Корень проблемы
+FP2 привязан к Aqara Cloud. HAP (HomeKit) на нём выключен пока устройство в Aqara Home.
+`input_boolean.fp2_presence` — кнопка-заглушка, не связана с реальным FP2.
+
+### Три пути к реальному движению
+
+**Путь 1 — Нативный HomeKit (лучший результат, риск цикла сброса):**
+Удалить FP2 из Aqara Home → сброс → заново WiFi → добавить в HA как HomeKit Device.
+Даёт: binary_sensor.fp2_presence, зоны, координаты X/Y, скорость.
+Минус: теряется Aqara Home app навсегда.
+Риск: цикл сброса уже повторялся много раз — FP2 пропадает из сети после сброса.
+
+**Путь 2 — Aqara Home Webhook (без сброса FP2, РЕКОМЕНДОВАН):**
+В Aqara Home создать автоматизацию: при движении → HTTP POST на HA webhook.
+В HA: webhook-автоматизация → toggle input_boolean.fp2_presence.
+Даёт: реальное движение без потери Aqara Home.
+Ограничение: только on/off, без координат и зон.
+
+**Путь 3 — Aqara Hub M2/M3 (требует покупки ~$50):**
+Локальный хаб с LAN API → HA. Даёт полные данные без потери Aqara Home.
+
+### Рекомендованный следующий шаг
+Путь 2: настроить автоматизацию в Aqara Home app → webhook → HA.
+Это даст реальное движение прямо сейчас без риска.
+
+### Текущий статус (2026-03-05 ~21:00)
+
+| Компонент | Статус |
+|-----------|--------|
+| Render бэкенд | OK polls: 37, successful: 36 |
+| HA Docker | healthy |
+| Cloudflare Tunnel | federal-josh-vehicles-association.trycloudflare.com |
+| UI localhost:3000 | polling, ENTER/EXIT работают |
+| HA Automation симуляция | каждые 30 сек |
+| FP2 нативный HomeKit | НЕТ — не подключён |
+| Реальное движение в UI | НЕТ — нет связи FP2 → input_boolean |
+
+### Изменённые файлы (сессия 2026-03-05)
+
+- ui/components/FP2Tab.js — polling вместо WS, duration fix, история только при смене состояния
+- ui/services/fp2.service.js — baseUrls использует API_CONFIG.BASE_URL
+- ui/config/api.config.js — BASE_URL = Render, buildWsUrl использует BASE_URL
+- .ha-core/config/automations.yaml — автоматизация симуляции каждые 30 сек
+- .ha-core/config/configuration.yaml — trusted_proxies, убран homekit_controller
+
+### Что нужно для автоматического отображения реальных объектов
+
+Шаг 1 (сделать сейчас): Настроить Aqara Home webhook
+- Aqara Home app → Automation → создать правило
+- Trigger: FP2 detected presence change
+- Action: HTTP request → POST http://[mac-local-ip]:8123/api/webhook/fp2_real_motion
+- В HA создать webhook automation → input_boolean.fp2_presence toggle
+
+Шаг 2 (инфраструктура): Постоянный Cloudflare Tunnel
+- Зарегистрировать Cloudflare Zero Trust (бесплатно)
+- cloudflared tunnel create wifi-ha
+- URL не будет меняться при рестарте
+
+Шаг 3 (максимальные данные): Нативный HomeKit
+- Полные данные FP2: зоны, координаты, активность
+- Требует решения по поводу потери Aqara Home

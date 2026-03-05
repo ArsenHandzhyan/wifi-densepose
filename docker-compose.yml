@@ -145,6 +145,7 @@ services:
       - ./homebridge:/var/lib/homebridge
     ports:
       - "8581:8581"
+      - "51828:51828"
     networks:
       - wifi-densepose-network
     restart: unless-stopped

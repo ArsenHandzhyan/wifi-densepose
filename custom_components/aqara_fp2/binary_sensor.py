@@ -88,7 +88,7 @@ class AqaraDataCoordinator(DataUpdateCoordinator):
             return {}
 
     async def _request(self, session: aiohttp.ClientSession, intent: str, data: dict = None):
-        """Make API request."""
+        """Make API request following Aqara V3.0 API specification."""
         import hashlib
         import time
         import random
@@ -101,66 +101,57 @@ class AqaraDataCoordinator(DataUpdateCoordinator):
         nonce = str(random.randint(100000, 999999))
         timestamp = str(int(time.time() * 1000))
         
-        # Generate signature
-        sign_str = f"{app_key}{nonce}{timestamp}"
-        sign = hashlib.md5(sign_str.encode()).hexdigest()
+        # Generate signature using CORRECT Aqara V3.0 method
+        # 1. Collect params: Accesstoken, Appid, Keyid, Nonce, Time
+        # 2. Sort alphabetically
+        # 3. Concatenate: param=value&param=value
+        # 4. Append appKey
+        # 5. Lowercase
+        # 6. MD5 hash
+        params = {
+            'Accesstoken': self.access_token,
+            'Appid': app_id,
+            'Keyid': key_id,
+            'Nonce': nonce,
+            'Time': timestamp,
+        }
+        sorted_keys = sorted(params.keys())
+        concat_str = '&'.join(f"{key}={params[key]}" for key in sorted_keys)
+        concat_str += app_key
+        concat_str = concat_str.lower()
+        sign = hashlib.md5(concat_str.encode()).hexdigest()
         
-        # Try TWO different request formats:
-        # Format 1: Parameters in URL (original)
-        # Format 2: Parameters in body (alternative)
-        
-        # Format 1 - URL parameters
-        query_string = f"appid={app_id}&keyid={key_id}&nonce={nonce}&time={timestamp}&sign={sign}"
-        url = f"{self.base_url}?{query_string}"
-        
+        # IMPORTANT: All auth parameters go in HEADERS, not URL!
         headers = {
             "Content-Type": "application/json",
             "Accesstoken": self.access_token,
             "Appid": app_id,
+            "Keyid": key_id,
+            "Nonce": nonce,
+            "Time": timestamp,
+            "Sign": sign,
+            "Lang": "en",  # Optional but recommended
         }
         
+        # URL without query parameters
+        url = self.base_url
+        
+        # Request body with intent and data
         payload = {
             "intent": intent,
             "data": data or {},
         }
         
-        _LOGGER.debug(f"Format 1 - URL: {url}")
+        _LOGGER.debug(f"URL: {url}")
+        _LOGGER.debug(f"Headers: Appid={app_id}, Nonce={nonce}")
         _LOGGER.debug(f"Intent: {intent}")
+        _LOGGER.debug(f"Data: {data}")
         
         async with session.post(url, headers=headers, json=payload) as resp:
             result = await resp.json()
-            _LOGGER.debug(f"Response: {result.get('code')} - {result.get('messageDetail')}")
-            
-            # If successful, return
-            if result.get('code') == 0:
-                return result
-        
-        # If Format 1 failed with error 302, try Format 2
-        if result.get('code') == 302:
-            _LOGGER.info("Trying Format 2 - parameters in body")
-            
-            # Format 2 - All parameters in request body
-            body_payload = {
-                "appid": app_id,
-                "keyid": key_id,
-                "nonce": nonce,
-                "time": timestamp,
-                "sign": sign,
-                "intent": intent,
-                "data": data or {},
-            }
-            
-            headers_body = {
-                "Content-Type": "application/json",
-                "Accesstoken": self.access_token,
-            }
-            
-            async with session.post(self.base_url, headers=headers_body, json=body_payload) as resp:
-                result = await resp.json()
-                _LOGGER.debug(f"Format 2 Response: {result.get('code')} - {result.get('messageDetail')}")
-                return result
-        
-        return result
+            _LOGGER.debug(f"Response code: {result.get('code')}")
+            _LOGGER.debug(f"Response msg: {result.get('messageDetail')}")
+            return result
 
 
 class AqaraFp2OccupancySensor(CoordinatorEntity, BinarySensorEntity):

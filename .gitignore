@@ -196,3 +196,4 @@ cython_debug/
 
 # Local Aqara FP2 pairing state
 .fp2_pairing.json
+.fp2_homekit_code

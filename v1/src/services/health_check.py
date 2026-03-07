@@ -241,6 +241,15 @@ class HealthCheckService:
     async def _check_hardware_health(self) -> HealthCheck:
         """Check hardware service health."""
         start_time = time.time()
+
+        if not self.settings.csi_pipeline_enabled:
+            return HealthCheck(
+                name="hardware",
+                status=HealthStatus.UNKNOWN,
+                message="CSI pipeline disabled; FP2-only mode",
+                duration_ms=(time.time() - start_time) * 1000,
+                details={"disabled": True}
+            )
         
         try:
             # Import here to avoid circular imports
@@ -282,6 +291,15 @@ class HealthCheckService:
     async def _check_pose_health(self) -> HealthCheck:
         """Check pose service health."""
         start_time = time.time()
+
+        if not self.settings.csi_pipeline_enabled:
+            return HealthCheck(
+                name="pose",
+                status=HealthStatus.UNKNOWN,
+                message="CSI pipeline disabled; FP2-only mode",
+                duration_ms=(time.time() - start_time) * 1000,
+                details={"disabled": True}
+            )
         
         try:
             # Import here to avoid circular imports
@@ -323,6 +341,15 @@ class HealthCheckService:
     async def _check_stream_health(self) -> HealthCheck:
         """Check stream service health."""
         start_time = time.time()
+
+        if not self.settings.csi_pipeline_enabled:
+            return HealthCheck(
+                name="stream",
+                status=HealthStatus.UNKNOWN,
+                message="CSI pipeline disabled; FP2-only mode",
+                duration_ms=(time.time() - start_time) * 1000,
+                details={"disabled": True}
+            )
         
         try:
             # Import here to avoid circular imports

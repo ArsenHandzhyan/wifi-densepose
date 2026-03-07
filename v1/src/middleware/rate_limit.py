@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from fastapi import Request, Response, HTTPException, status
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -319,11 +320,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 
                 headers = self.rate_limiter.get_rate_limit_headers(rate_limit_info)
                 headers["Retry-After"] = str(int(rate_limit_info.reset_time - time.time()))
-                
-                raise HTTPException(
+
+                return JSONResponse(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Rate limit exceeded",
-                    headers=headers
+                    content={
+                        "error": {
+                            "code": status.HTTP_429_TOO_MANY_REQUESTS,
+                            "message": "Rate limit exceeded",
+                            "type": "rate_limit_error",
+                            "path": str(request.url.path),
+                        }
+                    },
+                    headers=headers,
                 )
             
             # Process request
@@ -355,6 +363,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             "/redoc",
             "/openapi.json",
             "/static",
+            "/api/v1/fp2",
         ]
         
         return any(path.startswith(skip_path) for skip_path in skip_paths)

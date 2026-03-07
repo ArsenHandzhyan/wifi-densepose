@@ -6,10 +6,12 @@ Supports two data sources:
   2. Direct HAP push from fp2_hap_client.py (new)
 """
 
-import logging
 import asyncio
+import json
+import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, Query
@@ -24,6 +26,96 @@ router = APIRouter()
 # ── In-memory store for HAP push data ────────────────────────
 _hap_latest: Dict[str, Any] = {}
 _hap_listeners: list = []
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_PAIRING_DATA_PATH = _PROJECT_ROOT / ".fp2_pairing.json"
+
+
+def _get_latest_hap_snapshot() -> Optional[FP2Snapshot]:
+    """Return the latest direct HAP snapshot even if it is stale."""
+    snapshot = _hap_latest.get("snapshot")
+    if snapshot is None:
+        return None
+    return snapshot
+
+
+def _get_recent_hap_snapshot(max_age_sec: float = 15.0) -> Optional[FP2Snapshot]:
+    """Return the latest direct HAP snapshot if it is still fresh."""
+    snapshot = _get_latest_hap_snapshot()
+    updated = _hap_latest.get("updated_at")
+    if snapshot is None or updated is None:
+        return None
+
+    if time.time() - updated > max_age_sec:
+        return None
+
+    return snapshot
+
+
+def _load_pairing_metadata() -> Dict[str, Any]:
+    """Read saved HAP pairing metadata if present."""
+    if not _PAIRING_DATA_PATH.exists():
+        return {}
+
+    try:
+        return json.loads(_PAIRING_DATA_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read FP2 pairing metadata from %s", _PAIRING_DATA_PATH)
+        return {}
+
+
+def _has_direct_hap_pairing() -> bool:
+    """Check whether the workspace is configured for direct HAP mode."""
+    return _PAIRING_DATA_PATH.exists()
+
+
+def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) -> Dict[str, Any]:
+    """Convert the last known HAP snapshot into an explicit offline payload."""
+    fp2_service = get_fp2_service()
+    payload = fp2_service.snapshot_to_pose_data(snapshot)
+    payload.setdefault("metadata", {})
+    payload["metadata"]["source"] = "hap_direct"
+    payload["metadata"]["entity_id"] = "hap_direct"
+    payload["metadata"]["available"] = False
+    payload["metadata"]["presence"] = False
+    payload["metadata"]["stale"] = True
+    payload["metadata"]["error"] = reason
+    payload["persons"] = []
+    payload["zone_summary"] = {}
+    return payload
+
+
+def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
+    """Build a stable description of the bound FP2 device."""
+    settings = fp2_service.settings
+    pairing = _load_pairing_metadata()
+
+    device_ip = pairing.get("AccessoryIP") or settings.fp2_ip_address
+    device_port = pairing.get("AccessoryPort")
+    device_label = settings.fp2_name or "Aqara FP2"
+    room_label = settings.fp2_room or "-"
+    wifi_channel = settings.fp2_wifi_channel or "-"
+    signal_strength = settings.fp2_signal_strength or "-"
+
+    return {
+        "name": device_label,
+        "room": room_label,
+        "model": settings.fp2_model or "Aqara FP2",
+        "sku": settings.fp2_sku or None,
+        "device_id": settings.fp2_device_id or None,
+        "mac_address": settings.fp2_mac_address or None,
+        "firmware": settings.fp2_firmware or None,
+        "ip_address": device_ip or None,
+        "hap_port": device_port,
+        "pairing_id": pairing.get("AccessoryPairingID"),
+        "transport": "HomeKit / HAP",
+        "wifi": {
+            "ssid": settings.router_ssid or None,
+            "router_ip": settings.router_ip or None,
+            "channel": wifi_channel,
+            "signal_strength": signal_strength,
+            "bssid": settings.fp2_bssid or None,
+        },
+    }
 
 
 @router.get("/status")
@@ -32,6 +124,72 @@ async def get_fp2_status(
 ):
     """Get FP2 integration status."""
     status = await fp2_service.get_status()
+    latest_hap_snapshot = _get_latest_hap_snapshot()
+    hap_snapshot = _get_recent_hap_snapshot()
+    status["device"] = _build_device_metadata(fp2_service)
+    if hap_snapshot is not None:
+        status["status"] = "healthy"
+        status["running"] = True
+        status["entity_id"] = "hap_direct"
+        status["last_snapshot"] = hap_snapshot.timestamp.isoformat()
+        status["presence"] = hap_snapshot.presence
+        status["source"] = "hap_direct"
+        status["hap_connected"] = True
+        status.setdefault("stats", {})
+        status["stats"]["mode"] = "hap_direct"
+        status["stats"]["last_error"] = None
+        status["stats"]["last_entity_state"] = "hap_direct"
+        status["connection"] = {
+            "transport": "hap_direct",
+            "state": "live",
+            "last_update_age_sec": round(time.time() - _hap_latest.get("updated_at", time.time()), 1),
+            "light_level": hap_snapshot.raw_attributes.get("light_level"),
+            "targets": len(hap_snapshot.targets),
+            "zones": [
+                {
+                    "zone_id": zone.zone_id,
+                    "name": zone.name,
+                    "occupied": zone.occupied,
+                    "target_count": zone.target_count,
+                }
+                for zone in hap_snapshot.zones
+            ],
+        }
+    elif _has_direct_hap_pairing():
+        updated_at = _hap_latest.get("updated_at")
+        last_age = round(time.time() - updated_at, 1) if updated_at else None
+        status["status"] = "degraded"
+        status["running"] = True
+        status["entity_id"] = "hap_direct"
+        status["last_snapshot"] = latest_hap_snapshot.timestamp.isoformat() if latest_hap_snapshot else None
+        status["presence"] = False
+        status["source"] = "hap_direct"
+        status["hap_connected"] = False
+        status.setdefault("stats", {})
+        status["stats"]["mode"] = "hap_direct"
+        status["stats"]["last_error"] = "Direct HAP stream is stale or offline"
+        status["stats"]["last_entity_state"] = "hap_direct_offline"
+        status["connection"] = {
+            "transport": "hap_direct",
+            "state": "stale",
+            "last_update_age_sec": last_age,
+            "light_level": latest_hap_snapshot.raw_attributes.get("light_level") if latest_hap_snapshot else None,
+            "targets": 0,
+            "zones": [],
+        }
+    else:
+        status["source"] = "home_assistant"
+        status["hap_connected"] = False
+        status.setdefault("stats", {})
+        status["stats"]["mode"] = "home_assistant"
+        status["connection"] = {
+            "transport": "home_assistant",
+            "state": "waiting_for_hap_push",
+            "last_update_age_sec": None,
+            "light_level": None,
+            "targets": 0,
+            "zones": [],
+        }
     status["enabled"] = fp2_service.settings.fp2_enabled
     return status
 
@@ -47,10 +205,28 @@ async def get_fp2_current_pose_like_data(
         data["metadata"]["enabled"] = False
         return data
 
-    snapshot = await fp2_service.fetch_snapshot(entity_id=entity_id)
+    hap_snapshot = _get_recent_hap_snapshot()
+    if hap_snapshot is not None:
+        snapshot = hap_snapshot
+        resolved_entity_id = "hap_direct"
+        source = "hap_direct"
+    elif _has_direct_hap_pairing():
+        return _build_stale_hap_payload(
+            _get_latest_hap_snapshot(),
+            reason="Direct HAP stream is stale or the FP2 device is offline",
+        )
+    else:
+        resolved_entity_id = await fp2_service.resolve_entity_id(entity_id)
+        snapshot = await fp2_service.fetch_snapshot(entity_id=resolved_entity_id)
+        source = "home_assistant"
+
     payload = fp2_service.snapshot_to_pose_data(snapshot)
     payload.setdefault("metadata", {})
-    payload["metadata"]["entity_id"] = entity_id or fp2_service.settings.fp2_entity_id
+    payload["metadata"]["available"] = snapshot is not None
+    if snapshot is None and fp2_service._stats.get("last_error"):
+        payload["metadata"]["error"] = fp2_service._stats["last_error"]
+    payload["metadata"]["entity_id"] = resolved_entity_id
+    payload["metadata"]["source"] = source
     return payload
 
 
@@ -98,10 +274,22 @@ async def websocket_fp2_stream(
         # If explicit entity is requested, run dedicated polling loop for this client.
         if entity_id:
             while True:
-                snapshot = await fp2_service.fetch_snapshot(entity_id=entity_id)
+                hap_snapshot = _get_recent_hap_snapshot()
+                if hap_snapshot is not None:
+                    snapshot = hap_snapshot
+                    resolved_entity_id = "hap_direct"
+                    source = "hap_direct"
+                else:
+                    resolved_entity_id = await fp2_service.resolve_entity_id(entity_id)
+                    snapshot = await fp2_service.fetch_snapshot(entity_id=resolved_entity_id)
+                    source = "home_assistant"
                 payload = fp2_service.snapshot_to_pose_data(snapshot)
                 payload.setdefault("metadata", {})
-                payload["metadata"]["entity_id"] = entity_id
+                payload["metadata"]["available"] = snapshot is not None
+                if snapshot is None and fp2_service._stats.get("last_error"):
+                    payload["metadata"]["error"] = fp2_service._stats["last_error"]
+                payload["metadata"]["entity_id"] = resolved_entity_id
+                payload["metadata"]["source"] = source
                 await websocket.send_json(payload)
                 await asyncio.sleep(fp2_service.settings.fp2_poll_interval)
         else:
@@ -171,6 +359,7 @@ async def push_fp2_data(payload: HAPPushPayload):
         targets=targets,
         raw_attributes={
             "source": payload.source,
+            "zones": payload.zones,
             "light_level": payload.light_level,
             "push_time": time.time(),
         },
@@ -226,6 +415,7 @@ async def get_hap_status():
         "zones": [{"zone_id": z.zone_id, "occupied": z.occupied} for z in snapshot.zones],
         "targets": len(snapshot.targets),
         "source": "hap_direct",
+        "device": _build_device_metadata(get_fp2_service()),
     }
 
 

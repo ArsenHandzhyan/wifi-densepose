@@ -63,12 +63,16 @@ class ServiceOrchestrator:
             self._services = {
                 'health': self.health_service,
                 'metrics': self.metrics_service,
-                'hardware': self.hardware_service,
-                'pose': self.pose_service,
-                'stream': self.stream_service,
-                'pose_stream_handler': self.pose_stream_handler,
                 'connection_manager': connection_manager
             }
+            if self.hardware_service:
+                self._services['hardware'] = self.hardware_service
+            if self.pose_service:
+                self._services['pose'] = self.pose_service
+            if self.stream_service:
+                self._services['stream'] = self.stream_service
+            if self.pose_stream_handler:
+                self._services['pose_stream_handler'] = self.pose_stream_handler
             if self.fp2_service:
                 self._services['fp2'] = self.fp2_service
             
@@ -83,20 +87,23 @@ class ServiceOrchestrator:
     async def _initialize_application_services(self):
         """Initialize application-specific services."""
         try:
-            # Initialize hardware service
-            self.hardware_service = get_hardware_service()
-            await self.hardware_service.initialize()
-            logger.info("Hardware service initialized")
-            
-            # Initialize pose service
-            self.pose_service = get_pose_service()
-            await self.pose_service.initialize()
-            logger.info("Pose service initialized")
-            
-            # Initialize stream service
-            self.stream_service = get_stream_service()
-            await self.stream_service.initialize()
-            logger.info("Stream service initialized")
+            if self.settings.csi_pipeline_enabled:
+                # Initialize hardware service
+                self.hardware_service = get_hardware_service()
+                await self.hardware_service.initialize()
+                logger.info("Hardware service initialized")
+                
+                # Initialize pose service
+                self.pose_service = get_pose_service()
+                await self.pose_service.initialize()
+                logger.info("Pose service initialized")
+                
+                # Initialize stream service
+                self.stream_service = get_stream_service()
+                await self.stream_service.initialize()
+                logger.info("Stream service initialized")
+            else:
+                logger.info("CSI pipeline disabled; skipping hardware, pose, and stream services")
 
             # Initialize FP2 service (optional)
             if self.settings.fp2_enabled:
@@ -105,12 +112,13 @@ class ServiceOrchestrator:
                 logger.info("FP2 service initialized")
             
             # Initialize pose stream handler
-            self.pose_stream_handler = PoseStreamHandler(
-                connection_manager=connection_manager,
-                pose_service=self.pose_service,
-                stream_service=self.stream_service
-            )
-            logger.info("Pose stream handler initialized")
+            if self.settings.csi_pipeline_enabled and self.pose_service and self.stream_service:
+                self.pose_stream_handler = PoseStreamHandler(
+                    connection_manager=connection_manager,
+                    pose_service=self.pose_service,
+                    stream_service=self.stream_service
+                )
+                logger.info("Pose stream handler initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize application services: {e}")
@@ -185,7 +193,7 @@ class ServiceOrchestrator:
                 self._background_tasks.append(task)
             
             # Start pose streaming if enabled
-            if self.settings.enable_real_time_processing:
+            if self.settings.csi_pipeline_enabled and self.pose_stream_handler:
                 await self.pose_stream_handler.start_streaming()
             
             logger.info(f"Started {len(self._background_tasks)} background tasks")

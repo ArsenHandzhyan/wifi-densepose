@@ -7,6 +7,7 @@ into the wifi-densepose pipeline format (pose-like structures).
 
 import asyncio
 import logging
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -60,6 +61,8 @@ class FP2Service:
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
         self._last_snapshot: Optional[FP2Snapshot] = None
+        self._ha_access_token: str = settings.ha_token
+        self._ha_access_token_expires_at: float = 0.0
         self._listeners: List[asyncio.Queue] = []
         self._stats = {
             "polls": 0,
@@ -67,6 +70,7 @@ class FP2Service:
             "failed": 0,
             "last_poll_time": None,
             "last_error": None,
+            "last_entity_state": None,
         }
 
     @property
@@ -76,8 +80,9 @@ class FP2Service:
     @property
     def headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json"}
-        if self.settings.ha_token:
-            h["Authorization"] = f"Bearer {self.settings.ha_token}"
+        token = self._ha_access_token or self.settings.ha_token
+        if token:
+            h["Authorization"] = f"Bearer {token}"
         return h
 
     # ── lifecycle ────────────────────────────────────────────────
@@ -88,7 +93,57 @@ class FP2Service:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=10)
             )
+        if not self._ha_access_token and self.settings.ha_refresh_token:
+            await self._refresh_ha_access_token(force=True)
         logger.info("FP2 service initialized (HA URL: %s)", self.ha_url)
+
+    async def _refresh_ha_access_token(self, force: bool = False) -> Optional[str]:
+        """Refresh short-lived HA access token from a stored refresh token."""
+        if self.settings.ha_token:
+            self._ha_access_token = self.settings.ha_token
+            self._ha_access_token_expires_at = float("inf")
+            return self._ha_access_token
+
+        if not self.settings.ha_refresh_token:
+            return None
+
+        if (
+            not force
+            and self._ha_access_token
+            and time.time() < self._ha_access_token_expires_at - 60
+        ):
+            return self._ha_access_token
+
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            )
+
+        token_url = f"{self.ha_url}/auth/token"
+        payload = {
+            "grant_type": "refresh_token",
+            "client_id": self.settings.ha_client_id,
+            "refresh_token": self.settings.ha_refresh_token,
+        }
+
+        try:
+            async with self._session.post(token_url, data=payload) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except aiohttp.ClientError as exc:
+            logger.error("HA token refresh failed: %s", exc)
+            self._stats["last_error"] = f"HA token refresh failed: {exc}"
+            return None
+
+        access_token = data.get("access_token")
+        expires_in = int(data.get("expires_in", 0) or 0)
+        if not access_token:
+            self._stats["last_error"] = "HA token refresh returned no access_token"
+            return None
+
+        self._ha_access_token = access_token
+        self._ha_access_token_expires_at = time.time() + expires_in
+        return access_token
 
     async def start(self):
         """Start the polling loop."""
@@ -134,15 +189,39 @@ class FP2Service:
         self._stats["polls"] += 1
         if self._session is None or self._session.closed:
             await self.initialize()
+        elif self.settings.ha_refresh_token:
+            await self._refresh_ha_access_token()
 
-        selected_entity = entity_id or self.settings.fp2_entity_id
+        selected_entity = await self.resolve_entity_id(entity_id)
         url = f"{self.ha_url}/api/states/{selected_entity}"
 
         try:
             async with self._session.get(url, headers=self.headers) as resp:
                 if resp.status == 401:
-                    logger.error("HA auth failed — check HA_TOKEN")
-                    return None
+                    refreshed = await self._refresh_ha_access_token(force=True)
+                    if not refreshed:
+                        logger.error("HA auth failed — check HA token/refresh token")
+                        return None
+                    async with self._session.get(url, headers=self.headers) as retry_resp:
+                        if retry_resp.status == 401:
+                            logger.error("HA auth failed after refresh")
+                            return None
+                        if retry_resp.status == 404:
+                            logger.warning("Entity %s not found in HA", selected_entity)
+                            return None
+                        retry_resp.raise_for_status()
+                        data = await retry_resp.json()
+                    entity_state = str(data.get("state", "")).strip().lower()
+                    self._stats["last_entity_state"] = entity_state
+                    if entity_state in {"unavailable", "unknown"}:
+                        self._stats["failed"] += 1
+                        self._stats["last_error"] = f"Entity {selected_entity} is {entity_state}"
+                        logger.warning("FP2 entity %s is %s", selected_entity, entity_state)
+                        return None
+                    self._stats["successful"] += 1
+                    self._stats["last_poll_time"] = datetime.utcnow().isoformat()
+                    self._stats["last_error"] = None
+                    return self._parse_entity(data)
                 if resp.status == 404:
                     logger.warning("Entity %s not found in HA", selected_entity)
                     return None
@@ -152,16 +231,44 @@ class FP2Service:
             logger.debug("HA request failed: %s", exc)
             return None
 
+        entity_state = str(data.get("state", "")).strip().lower()
+        self._stats["last_entity_state"] = entity_state
+        if entity_state in {"unavailable", "unknown"}:
+            self._stats["failed"] += 1
+            self._stats["last_error"] = f"Entity {selected_entity} is {entity_state}"
+            logger.warning("FP2 entity %s is %s", selected_entity, entity_state)
+            return None
+
         self._stats["successful"] += 1
         self._stats["last_poll_time"] = datetime.utcnow().isoformat()
+        self._stats["last_error"] = None
 
         return self._parse_entity(data)
+
+    async def resolve_entity_id(self, requested_entity_id: Optional[str] = None) -> str:
+        """Resolve the best entity_id to use for FP2 polling."""
+        selected_entity = requested_entity_id or self.settings.fp2_entity_id
+
+        if not selected_entity:
+            selected_entity = self.settings.fp2_entity_id
+
+        if requested_entity_id:
+            return selected_entity
+
+        if selected_entity.startswith("input_boolean.") or selected_entity.endswith("_presence"):
+            recommended = await self.recommend_entity_id()
+            if recommended and recommended != selected_entity:
+                return recommended
+
+        return selected_entity
 
     # Also try to discover related zone entities
     async def fetch_all_fp2_entities(self) -> List[Dict[str, Any]]:
         """Fetch all entities that look like FP2 zones/targets."""
         if self._session is None or self._session.closed:
             await self.initialize()
+        elif self.settings.ha_refresh_token:
+            await self._refresh_ha_access_token()
         url = f"{self.ha_url}/api/states"
         try:
             async with self._session.get(url, headers=self.headers) as resp:
@@ -171,12 +278,11 @@ class FP2Service:
             return []
 
         fp2_entities = []
-        base_name = self.settings.fp2_entity_id.split(".")[-1].replace("_presence", "")
-        for s in states:
-            eid = s.get("entity_id", "")
-            if base_name in eid or "fp2" in eid.lower():
-                fp2_entities.append(s)
-        return fp2_entities
+        for state in states:
+            if self._looks_like_fp2_entity(state):
+                fp2_entities.append(state)
+
+        return sorted(fp2_entities, key=self._entity_score, reverse=True)
 
     async def recommend_entity_id(self) -> Optional[str]:
         """Pick the most informative FP2-related entity automatically."""
@@ -184,49 +290,123 @@ class FP2Service:
         if not entities:
             return None
 
-        def score(entity: Dict[str, Any]) -> int:
-            entity_id = (entity.get("entity_id") or "").lower()
-            attrs = entity.get("attributes") or {}
-            domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
-            s = 0
-
-            # Prefer sensors over helpers/toggles
-            if domain == "sensor":
-                s += 50
-            elif domain == "binary_sensor":
-                s += 40
-            elif domain == "select":
-                s += 20
-            elif domain == "input_boolean":
-                s -= 20
-
-            # Prefer entities with zone/target-like metadata
-            if "zones" in attrs:
-                s += 40
-            if "targets" in attrs:
-                s += 40
-            if "target_count" in attrs:
-                s += 15
-            if "current_zone" in attrs or "zone" in attrs:
-                s += 25
-            if "occupancy" in attrs or "presence" in entity_id:
-                s += 10
-
-            # Penalize clearly synthetic/manual helper
-            if "input_boolean.fp2_presence" in entity_id:
-                s -= 30
-            return s
-
-        entities_sorted = sorted(entities, key=score, reverse=True)
+        available_entities = [
+            entity
+            for entity in entities
+            if str(entity.get("state", "")).strip().lower() not in {"unavailable", "unknown"}
+        ]
+        entities_sorted = sorted(
+            available_entities or entities,
+            key=self._entity_score,
+            reverse=True,
+        )
         return entities_sorted[0].get("entity_id")
+
+    def _looks_like_fp2_entity(self, entity: Dict[str, Any]) -> bool:
+        """Heuristically detect FP2-related entities imported into HA."""
+        entity_id = (entity.get("entity_id") or "").lower()
+        attrs = entity.get("attributes") or {}
+        friendly_name = str(attrs.get("friendly_name", "")).lower()
+        manufacturer = str(attrs.get("manufacturer", "")).lower()
+        model = str(attrs.get("model", "")).lower()
+        device_class = str(attrs.get("device_class", "")).lower()
+        current_name = self.settings.fp2_entity_id.split(".", 1)[-1].lower()
+
+        haystacks = [
+            entity_id,
+            friendly_name,
+            manufacturer,
+            model,
+            current_name,
+        ]
+        joined = " ".join(haystacks)
+
+        if "aqara" in joined and ("presence" in joined or "occupancy" in joined or "fp2" in joined):
+            return True
+
+        if "fp2" in joined:
+            return True
+
+        if model in {"ps-so2ru", "lumi.sensor_occupy.agl1"}:
+            return True
+
+        if device_class in {"occupancy", "motion", "presence"} and "aqara" in joined:
+            return True
+
+        if attrs.get("zones") or attrs.get("targets") or attrs.get("target_count") is not None:
+            return "aqara" in joined or "presence" in joined or "occupancy" in joined
+
+        if current_name and current_name != "aqara_fp2" and current_name in entity_id:
+            return True
+
+        return False
+
+    def _entity_score(self, entity: Dict[str, Any]) -> int:
+        """Score entity quality for FP2 monitoring."""
+        entity_id = (entity.get("entity_id") or "").lower()
+        state = str(entity.get("state", "")).lower()
+        attrs = entity.get("attributes") or {}
+        domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+        friendly_name = str(attrs.get("friendly_name", "")).lower()
+        manufacturer = str(attrs.get("manufacturer", "")).lower()
+        model = str(attrs.get("model", "")).lower()
+        device_class = str(attrs.get("device_class", "")).lower()
+
+        score = 0
+
+        if domain == "binary_sensor":
+            score += 60
+        elif domain == "sensor":
+            score += 45
+        elif domain == "select":
+            score += 10
+        elif domain == "input_boolean":
+            score -= 20
+
+        if device_class == "occupancy":
+            score += 45
+        elif device_class in {"motion", "presence"}:
+            score += 30
+
+        if "fp2" in entity_id or "fp2" in friendly_name:
+            score += 70
+        if entity_id == "binary_sensor.aqara_fp2":
+            score += 120
+        if "aqara" in manufacturer or "aqara" in friendly_name:
+            score += 25
+        if model in {"ps-so2ru", "lumi.sensor_occupy.agl1"}:
+            score += 50
+
+        if "zones" in attrs:
+            score += 40
+        if "targets" in attrs:
+            score += 40
+        if "target_count" in attrs:
+            score += 20
+        if "current_zone" in attrs or "zone" in attrs:
+            score += 25
+        if "occupancy" in attrs or "presence" in entity_id:
+            score += 15
+
+        if state == "unavailable":
+            score -= 300
+        elif state not in {"unknown", ""}:
+            score += 15
+
+        if entity_id.endswith("_presence"):
+            score -= 40
+        if entity_id.startswith("input_boolean."):
+            score -= 35
+
+        return score
 
     # ── parsing ─────────────────────────────────────────────────
 
     def _parse_entity(self, data: Dict[str, Any]) -> FP2Snapshot:
         """Parse a HA entity state dict into an FP2Snapshot."""
         attrs = data.get("attributes", {})
-        state = data.get("state", "off")
-        presence = state in ("on", "home", "detected")
+        state = str(data.get("state", "off")).strip().lower()
+        presence = state in {"on", "home", "detected", "occupied", "present", "true"}
 
         last_updated = None
         if lu := data.get("last_updated"):
@@ -323,7 +503,7 @@ class FP2Service:
                 "persons": [],
                 "zone_summary": {},
                 "processing_time_ms": 0,
-                "metadata": {"source": "fp2", "presence": False},
+                "metadata": {"source": "fp2", "presence": False, "available": False},
             }
 
         persons = []
@@ -360,6 +540,7 @@ class FP2Service:
             "metadata": {
                 "source": "fp2",
                 "presence": snap.presence,
+                "available": True,
                 "sensor": "aqara_fp2",
                 "raw_attributes": snap.raw_attributes,
             },

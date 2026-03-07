@@ -53,6 +53,9 @@ class ReadinessCheck(BaseModel):
 async def health_check(request: Request):
     """Comprehensive system health check."""
     try:
+        settings = getattr(request.app.state, "settings", get_settings())
+        csi_pipeline_enabled = settings.csi_pipeline_enabled
+
         # Get services from app state
         hardware_service = getattr(request.app.state, 'hardware_service', None)
         pose_service = getattr(request.app.state, 'pose_service', None)
@@ -90,11 +93,12 @@ async def health_check(request: Request):
         else:
             components["hardware"] = ComponentHealth(
                 name="Hardware Service",
-                status="unavailable",
-                message="Service not initialized",
+                status="disabled" if not csi_pipeline_enabled else "unavailable",
+                message="CSI pipeline disabled; FP2-only mode" if not csi_pipeline_enabled else "Service not initialized",
                 last_check=timestamp
             )
-            overall_status = "degraded"
+            if csi_pipeline_enabled:
+                overall_status = "degraded"
         
         # Check pose service
         if pose_service:
@@ -124,11 +128,12 @@ async def health_check(request: Request):
         else:
             components["pose"] = ComponentHealth(
                 name="Pose Service",
-                status="unavailable",
-                message="Service not initialized",
+                status="disabled" if not csi_pipeline_enabled else "unavailable",
+                message="CSI pipeline disabled; FP2-only mode" if not csi_pipeline_enabled else "Service not initialized",
                 last_check=timestamp
             )
-            overall_status = "degraded"
+            if csi_pipeline_enabled:
+                overall_status = "degraded"
         
         # Check stream service
         if stream_service:
@@ -158,11 +163,12 @@ async def health_check(request: Request):
         else:
             components["stream"] = ComponentHealth(
                 name="Stream Service",
-                status="unavailable",
-                message="Service not initialized",
+                status="disabled" if not csi_pipeline_enabled else "unavailable",
+                message="CSI pipeline disabled; FP2-only mode" if not csi_pipeline_enabled else "Service not initialized",
                 last_check=timestamp
             )
-            overall_status = "degraded"
+            if csi_pipeline_enabled:
+                overall_status = "degraded"
         
         # Get system metrics
         system_metrics = get_system_metrics()
@@ -192,9 +198,13 @@ async def readiness_check(request: Request):
     try:
         timestamp = datetime.utcnow()
         checks = {}
+        settings = getattr(request.app.state, "settings", get_settings())
+        csi_pipeline_enabled = settings.csi_pipeline_enabled
         
         # Check if services are available in app state
-        if hasattr(request.app.state, 'pose_service') and request.app.state.pose_service:
+        if not csi_pipeline_enabled:
+            checks["pose_ready"] = True
+        elif hasattr(request.app.state, 'pose_service') and request.app.state.pose_service:
             try:
                 checks["pose_ready"] = await request.app.state.pose_service.is_ready()
             except Exception as e:
@@ -203,7 +213,9 @@ async def readiness_check(request: Request):
         else:
             checks["pose_ready"] = False
             
-        if hasattr(request.app.state, 'stream_service') and request.app.state.stream_service:
+        if not csi_pipeline_enabled:
+            checks["stream_ready"] = True
+        elif hasattr(request.app.state, 'stream_service') and request.app.state.stream_service:
             try:
                 checks["stream_ready"] = await request.app.state.stream_service.is_ready()
             except Exception as e:

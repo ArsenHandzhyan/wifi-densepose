@@ -148,9 +148,24 @@ class Settings(BaseSettings):
     # Home Assistant / FP2 sensor settings
     ha_url: str = Field(default="http://localhost:8123", description="Home Assistant URL")
     ha_token: str = Field(default="", description="Home Assistant long-lived access token")
-    fp2_entity_id: str = Field(default="binary_sensor.fp2_presence", description="FP2 presence entity ID in HA")
+    ha_refresh_token: str = Field(default="", description="Home Assistant refresh token")
+    ha_client_id: str = Field(default="http://127.0.0.1:8123/", description="Home Assistant OAuth client_id")
+    fp2_entity_id: str = Field(default="binary_sensor.aqara_fp2", description="FP2 presence entity ID in HA")
     fp2_poll_interval: float = Field(default=1.0, description="FP2 polling interval in seconds")
     fp2_enabled: bool = Field(default=False, description="Enable FP2 sensor integration")
+    fp2_model: str = Field(default="", description="FP2 hardware model")
+    fp2_sku: str = Field(default="", description="FP2 SKU")
+    fp2_device_id: str = Field(default="", description="FP2 device identifier")
+    fp2_mac_address: str = Field(default="", description="FP2 MAC address")
+    fp2_ip_address: str = Field(default="", description="FP2 local IP address")
+    fp2_name: str = Field(default="Aqara FP2", description="FP2 display name")
+    fp2_room: str = Field(default="", description="FP2 room name")
+    fp2_firmware: str = Field(default="", description="FP2 firmware version")
+    fp2_wifi_channel: str = Field(default="", description="FP2 WiFi channel")
+    fp2_signal_strength: str = Field(default="", description="FP2 WiFi RSSI")
+    fp2_bssid: str = Field(default="", description="FP2 access point BSSID")
+    router_ssid: str = Field(default="", description="WiFi router SSID")
+    router_ip: str = Field(default="", description="WiFi router IP address")
     
     # Cleanup settings
     csi_data_retention_days: int = Field(default=30, description="CSI data retention in days")
@@ -262,6 +277,16 @@ class Settings(BaseSettings):
     def is_testing(self) -> bool:
         """Check if running in testing environment."""
         return self.environment == "testing"
+
+    @property
+    def csi_pipeline_enabled(self) -> bool:
+        """Check whether CSI/DensePose pipeline should be started."""
+        return self.enable_real_time_processing
+
+    @property
+    def fp2_only_mode(self) -> bool:
+        """Check whether the application should run in FP2-only mode."""
+        return self.fp2_enabled and not self.csi_pipeline_enabled
     
     def get_database_url(self) -> str:
         """Get database URL with fallback."""

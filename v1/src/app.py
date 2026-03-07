@@ -191,17 +191,20 @@ def setup_routers(app: FastAPI, settings: Settings):
     )
     
     # API routers with prefix
-    app.include_router(
-        pose.router,
-        prefix=f"{settings.api_prefix}/pose",
-        tags=["Pose Estimation"]
-    )
-    
-    app.include_router(
-        stream.router,
-        prefix=f"{settings.api_prefix}/stream",
-        tags=["Streaming"]
-    )
+    if settings.csi_pipeline_enabled:
+        app.include_router(
+            pose.router,
+            prefix=f"{settings.api_prefix}/pose",
+            tags=["Pose Estimation"]
+        )
+        
+        app.include_router(
+            stream.router,
+            prefix=f"{settings.api_prefix}/stream",
+            tags=["Streaming"]
+        )
+    else:
+        logger.info("CSI pipeline disabled; skipping pose and stream routers")
 
     app.include_router(
         fp2.router,
@@ -226,7 +229,10 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
                 "authentication": settings.enable_authentication,
                 "rate_limiting": settings.enable_rate_limiting,
                 "websockets": settings.enable_websockets,
-                "real_time_processing": settings.enable_real_time_processing
+                "real_time_processing": settings.enable_real_time_processing,
+                "csi_pipeline_enabled": settings.csi_pipeline_enabled,
+                "fp2_enabled": settings.fp2_enabled,
+                "fp2_only_mode": settings.fp2_only_mode
             }
         }
 
@@ -270,7 +276,10 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
                 "rate_limiting": settings.enable_rate_limiting,
                 "websockets": settings.enable_websockets,
                 "real_time_processing": settings.enable_real_time_processing,
-                "historical_data": settings.enable_historical_data
+                "historical_data": settings.enable_historical_data,
+                "csi_pipeline_enabled": settings.csi_pipeline_enabled,
+                "fp2_enabled": settings.fp2_enabled,
+                "fp2_only_mode": settings.fp2_only_mode
             },
             "limits": {
                 "rate_limit_requests": settings.rate_limit_requests,

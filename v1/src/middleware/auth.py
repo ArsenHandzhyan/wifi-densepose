@@ -20,7 +20,8 @@ from src.logger import set_request_context
 logger = logging.getLogger(__name__)
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt is unstable in this local Python 3.14 environment; use a pure-passlib scheme.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # JWT token handler
 security = HTTPBearer(auto_error=False)
@@ -176,18 +177,12 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process request through authentication middleware."""
         start_time = time.time()
+
+        if self._should_skip_auth(request) or not self.enabled:
+            response = await call_next(request)
+            return response
         
         try:
-            # Skip authentication for certain paths
-            if self._should_skip_auth(request):
-                response = await call_next(request)
-                return response
-            
-            # Skip if authentication is disabled
-            if not self.enabled:
-                response = await call_next(request)
-                return response
-            
             # Extract and verify token
             user_info = await self._authenticate_request(request)
             

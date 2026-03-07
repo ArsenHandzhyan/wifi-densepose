@@ -22,6 +22,7 @@
 
 import argparse
 import asyncio
+import getpass
 import inspect
 import json
 import logging
@@ -106,6 +107,36 @@ def mask_pairing_code(code: str) -> str:
     if len(cleaned) < 4:
         return "***"
     return f"{cleaned[:3]}-**-***"
+
+
+def normalize_pairing_code(code: str) -> str:
+    """Validate and normalize a HomeKit code to XXX-XX-XXX."""
+    digits = re.sub(r"\D", "", (code or "").strip())
+    if len(digits) != 8:
+        raise ValueError("HomeKit код должен содержать 8 цифр")
+    return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
+
+
+def save_pairing_code_file(code: str) -> str:
+    """Persist HomeKit code with restrictive file permissions."""
+    normalized = normalize_pairing_code(code)
+    PAIRING_CODE_FILE.write_text(normalized + "\n", encoding="utf-8")
+    os.chmod(PAIRING_CODE_FILE, 0o600)
+    return normalized
+
+
+def prompt_and_save_pairing_code() -> None:
+    """Securely prompt for the HomeKit code and store it locally."""
+    print(f"\nСохранение HomeKit кода в {PAIRING_CODE_FILE}\n")
+    first = getpass.getpass("Введите HomeKit код FP2 (например 123-45-678): ").strip()
+    second = getpass.getpass("Повторите код: ").strip()
+
+    if first != second:
+        raise ValueError("Коды не совпадают")
+
+    normalized = save_pairing_code_file(first)
+    print(f"\nКод сохранён: {mask_pairing_code(normalized)}")
+    print("Дальше monitor сможет делать auto-repair автоматически.\n")
 
 
 def get_local_iface(target_ip: Optional[str] = None) -> str:
@@ -804,7 +835,7 @@ async def status():
         print("  FP2 сейчас не виден через mDNS. Monitor будет ждать его появления и пробовать переподключиться.")
     elif service and service_is_pairable(service) and not get_pairing_code():
         print("  FP2 доступен для pairing, но HomeKit код не задан.")
-        print(f"  Сохраните код в {PAIRING_CODE_FILE} или задайте FP2_HOMEKIT_CODE.")
+        print(f"  Выполните '{Path(sys.argv[0]).name} set-code' или сохраните код в {PAIRING_CODE_FILE}.")
     elif service and service_is_pairable(service) and get_pairing_code():
         print("  FP2 доступен для pairing. monitor выполнит auto-repair сам.")
     elif not paired:
@@ -823,6 +854,7 @@ def main():
         epilog="""
 Примеры:
   %(prog)s status              # Проверить статус
+  %(prog)s set-code            # Сохранить HomeKit код локально
   %(prog)s pair                # Спарить с FP2
   %(prog)s repair              # Принудительно пересоздать pairing
   %(prog)s info                # Показать информацию о спаренном FP2
@@ -841,6 +873,7 @@ def main():
     sub = parser.add_subparsers(dest="command", help="Команда")
 
     sub.add_parser("status", help="Проверить статус FP2")
+    sub.add_parser("set-code", help="Сохранить HomeKit код FP2 локально")
     sub.add_parser("pair", help="Спарить с FP2")
     sub.add_parser("repair", help="Пересоздать pairing для FP2")
     sub.add_parser("info", help="Показать информацию об устройстве")
@@ -861,6 +894,8 @@ def main():
 
     if args.command == "status":
         asyncio.run(status())
+    elif args.command == "set-code":
+        prompt_and_save_pairing_code()
     elif args.command == "pair":
         asyncio.run(pair_fp2())
     elif args.command == "repair":

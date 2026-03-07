@@ -31,6 +31,7 @@ The authoritative runtime path on this machine is:
 ## Local-Only Artifacts
 
 - `.fp2_pairing.json` is a local pairing artifact and must not be committed.
+- `.fp2_homekit_code` stores the one-time HomeKit code for automatic re-pair and must not be committed.
 - `.env` contains secrets and local settings and must not be committed.
 
 ## Notes

@@ -115,6 +115,12 @@ Run the direct HAP monitor:
 python3 scripts/fp2_hap_client.py monitor --backend http://127.0.0.1:8000 --interval 1.0
 ```
 
+Store the HomeKit code once for automatic re-pair after Wi-Fi or modem changes:
+
+```bash
+python3 scripts/fp2_hap_client.py set-code
+```
+
 Inspect the paired device:
 
 ```bash
@@ -124,6 +130,7 @@ python3 scripts/fp2_hap_client.py info
 ## Local-Only Files
 
 - `.fp2_pairing.json` stores local HomeKit pairing state and must not be committed
+- `.fp2_homekit_code` stores the local HomeKit code used for automatic re-pair and must not be committed
 - `.env` stores local secrets and must not be committed
 
 ## Deprecated Paths For This Workspace

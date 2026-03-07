@@ -105,8 +105,8 @@ export class FP2Tab {
       this.elements.apiStatus.textContent = this.state.apiEnabled ? 'Enabled' : 'Disabled';
       this.elements.apiStatus.className = `chip ${this.state.apiEnabled ? 'ok' : 'warn'}`;
 
-      this.updateStreamState(status.hap_connected ? 'live' : 'offline');
-      this.elements.entityId.textContent = status.entity_id || 'hap_direct';
+      this.updateStreamState(status.connection?.state || (status.stream_connected ? 'live' : 'offline'));
+      this.elements.entityId.textContent = status.entity_id || status.source || 'fp2';
       this.elements.transportValue.textContent = this.formatTransport(
         status.connection?.transport || status.device?.transport
       );
@@ -204,7 +204,7 @@ export class FP2Tab {
     this.state.zones = zones;
     this.state.lastUpdate = timestampLabel;
 
-    this.elements.entityId.textContent = metadata.entity_id || 'hap_direct';
+      this.elements.entityId.textContent = metadata.entity_id || metadata.source || 'fp2';
     this.elements.updatedAt.textContent = timestampLabel;
     this.elements.presenceValue.textContent = available
       ? (presence ? 'PRESENT' : 'ABSENT')
@@ -341,7 +341,7 @@ export class FP2Tab {
 
   formatTransport(transport) {
     if (!transport) {
-      return 'HAP direct';
+      return 'Direct sensor';
     }
 
     return String(transport)

@@ -1,10 +1,10 @@
 # Aqara FP2 Documentation Index
 
-This repository no longer treats `Matter`, `Google Home`, `SmartThings`, or `Aqara Cloud polling` as the active integration path for this workspace.
+This repository no longer treats `Matter`, `Google Home`, or `SmartThings` as the active integration path for this workspace.
 
 The authoritative runtime path on this machine is:
 
-`Aqara FP2 -> HomeKit/HAP -> scripts/fp2_hap_client.py -> FastAPI backend -> UI`
+`Aqara FP2 -> Aqara Open API -> scripts/fp2_aqara_cloud_monitor.py -> FastAPI backend -> UI`
 
 ## Read This First
 
@@ -16,7 +16,7 @@ The authoritative runtime path on this machine is:
 
 ## Current Status
 
-- `FP2` is paired locally and monitored directly over `HomeKit/HAP`.
+- `FP2` is currently monitored through Aqara Open API and pushed into the local backend.
 - The UI is now `FP2-only` and exposes only `Dashboard` and `FP2 Monitor`.
 - `CSI/DensePose` content remains in the repo as legacy project context, not as the active runtime.
 - `Home Assistant` can still exist locally, but the live UI no longer depends on HA polling for the working sensor path.
@@ -25,8 +25,7 @@ The authoritative runtime path on this machine is:
 
 - Recommending `Matter` as the primary path for this FP2 setup
 - Treating `Google Home` or `SmartThings` as the live source of truth
-- Using `Aqara Cloud API` as the active telemetry path
-- Reconstructing the exact Aqara mobile floorplan from `HAP`
+- Reconstructing the exact Aqara mobile floorplan from public API data
 
 ## Local-Only Artifacts
 
@@ -36,4 +35,4 @@ The authoritative runtime path on this machine is:
 
 ## Notes
 
-If a document in `docs/` still describes `Matter`, `Google Home`, or `SmartThings` as the recommended next step, treat it as historical unless it explicitly references the direct `HAP` runtime path above.
+If a document in `docs/` still describes `Matter`, `Google Home`, `SmartThings`, or direct `HAP` as the recommended next step, treat it as historical unless it explicitly references the active cloud monitor path above.

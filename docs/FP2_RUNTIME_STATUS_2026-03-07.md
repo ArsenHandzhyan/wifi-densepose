@@ -6,9 +6,9 @@ This is the authoritative runtime status for the current workspace.
 
 ## Active Architecture
 
-`Aqara FP2 -> HomeKit/HAP -> scripts/fp2_hap_client.py -> FastAPI backend -> UI`
+`Aqara FP2 -> Aqara Open API -> scripts/fp2_aqara_cloud_monitor.py -> FastAPI backend -> UI`
 
-This path is local-first and does not depend on `Matter`, `SmartThings`, `Google Home`, or `Aqara Cloud` for live telemetry.
+This is the currently verified live telemetry path on this machine. It does not depend on `Matter`, `SmartThings`, or `Google Home`.
 
 ## Verified Device
 
@@ -20,10 +20,12 @@ This path is local-first and does not depend on `Matter`, `SmartThings`, `Google
 
 ## What Works
 
-- Direct `HomeKit/HAP` pairing to the physical FP2
+- Aqara Open API token refresh and auth-code exchange
+- Cloud DID resolution for the physical FP2: `lumi1.54ef4479e003`
 - Live presence updates pushed into the backend
-- Live light level updates pushed into the backend
-- Fixed single-device UI bound to `hap_direct`
+- Live target coordinates pushed into the backend
+- Live light level and online/RSSI state pushed into the backend
+- Fixed single-device UI bound to the active runtime source
 - `Dashboard` rewritten for `FP2-only` mode
 - `FP2 Monitor` rewritten as the primary operational view
 
@@ -44,21 +46,32 @@ There is no longer any user-facing entity picker, mock-server toggle, or legacy 
 
 ## API Reality
 
-The working source of truth is `hap_direct`.
+The working source of truth is currently `aqara_cloud`.
 
 Expected fields in the active runtime:
 
-- `metadata.source = "hap_direct"`
-- `metadata.entity_id = "hap_direct"`
-- `status.hap_connected = true`
-- `status.connection.transport = "hap_direct"`
+- `metadata.source = "aqara_cloud"`
+- `metadata.entity_id = "aqara_cloud"`
+- `status.source = "aqara_cloud"`
+- `status.stream_connected = true`
+- `status.connection.transport = "aqara_cloud"`
 
 Useful local endpoints:
 
 - `http://127.0.0.1:8000/api/v1/fp2/status`
 - `http://127.0.0.1:8000/api/v1/fp2/current`
-- `http://127.0.0.1:8000/api/v1/fp2/hap-status`
 - `http://127.0.0.1:3000`
+
+Typical live fields now visible in `/api/v1/fp2/current`:
+
+- `persons[0].bounding_box.x`
+- `persons[0].bounding_box.y`
+- `persons[0].distance`
+- `persons[0].angle`
+- `zone_summary.detection_area`
+- `metadata.raw_attributes.light_level`
+- `metadata.raw_attributes.rssi`
+- `metadata.raw_attributes.online`
 
 ## Current UI Scope
 
@@ -77,19 +90,22 @@ The following legacy tabs were removed from the primary UI:
 
 ## Current Runtime Constraints
 
-Direct `HAP` does not expose the exact Aqara mobile map model.
+The current cloud path returns presence, coordinates, light, online state, and movement/fall metadata, but not the exact Aqara mobile floorplan scene graph.
 
-Available directly:
+Available now:
 
 - occupancy / presence
+- active targets with coordinates
 - ambient light
-- occupancy-channel style zones
+- movement and fall flags
+- online state / RSSI
+- zone occupancy channels
 
-Not available directly:
+Not available as a stable public API:
 
-- exact person coordinates
-- Aqara mobile floorplan geometry
+- the exact Aqara mobile floorplan geometry
 - full app-defined room layout metadata
+- a reliable direct `HomeKit/HAP` pairing path from this Mac
 
 Because of that, the repository renders an honest zone-window and occupancy view instead of pretending to reproduce the Aqara mobile map one-to-one.
 
@@ -109,28 +125,26 @@ cd ui
 ./start-ui.sh
 ```
 
-Run the direct HAP monitor:
+Run the active cloud monitor:
 
 ```bash
-python3 scripts/fp2_hap_client.py monitor --backend http://127.0.0.1:8000 --interval 1.0
+python3 scripts/fp2_aqara_cloud_monitor.py --backend http://127.0.0.1:8000 --interval 2 --log-level INFO
 ```
 
-Store the HomeKit code once for automatic re-pair after Wi-Fi or modem changes:
+Exchange a fresh Aqara auth code into `.env`:
 
 ```bash
-python3 scripts/fp2_hap_client.py set-code
+python3 scripts/aqara_api_probe.py exchange-auth-code 123456 --write-env
 ```
 
-Inspect the paired device:
+Probe Aqara API access and current FP2 resources:
 
 ```bash
-python3 scripts/fp2_hap_client.py info
+python3 scripts/aqara_api_probe.py probe --refresh-first
 ```
 
 ## Local-Only Files
 
-- `.fp2_pairing.json` stores local HomeKit pairing state and must not be committed
-- `.fp2_homekit_code` stores the local HomeKit code used for automatic re-pair and must not be committed
 - `.env` stores local secrets and must not be committed
 
 ## Deprecated Paths For This Workspace
@@ -140,9 +154,9 @@ These paths are historical investigation branches, not the active runtime:
 - `Matter`
 - `Google Home`
 - `SmartThings`
-- `Aqara Cloud API polling`
+- `direct HAP telemetry as the primary live source`
 - `Home Assistant helper/entity selection as the primary live source`
 
 ## Bottom Line
 
-The repository is now operating as a local `Aqara FP2` monitor with a cleaned `FP2-only` UI and direct `HAP` telemetry.
+The repository is now operating as an `Aqara FP2` monitor with a cleaned `FP2-only` UI and live telemetry delivered through Aqara Open API into the local backend.

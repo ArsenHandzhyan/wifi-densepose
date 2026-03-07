@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aqara FP2 Local Monitor</title>
-    <link rel="stylesheet" href="style.css?v=20260307-fp2only5">
+    <title>Aqara FP2 Monitor</title>
+    <link rel="stylesheet" href="style.css?v=20260307-fp2only6">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>Aqara FP2 Local Monitor</h1>
-            <p class="subtitle">Direct local monitoring over HomeKit/HAP</p>
+            <h1>Aqara FP2 Monitor</h1>
+            <p class="subtitle">Live FP2 telemetry over the active transport, including Aqara Cloud and direct sensor modes.</p>
             <div class="header-info">
                 <span class="api-version"></span>
                 <span class="api-environment"></span>
@@ -31,7 +31,7 @@
                 <h2>Local FP2 Presence Monitoring</h2>
                 <p class="hero-description">
                     This instance is running in FP2-only mode. Presence data is read locally from
-                    your Aqara FP2 over HomeKit/HAP and pushed directly into the backend and UI.
+                    your Aqara FP2 and pushed directly into the backend and UI over the currently available transport.
                 </p>
                 
                 <!-- Error container -->
@@ -112,7 +112,7 @@
                         </div>
                         <div class="stat-item">
                             <span class="stat-label">Transport</span>
-                            <span class="detection-count">HAP</span>
+                            <span class="detection-count">FP2</span>
                         </div>
                     </div>
                     
@@ -126,7 +126,7 @@
                     <div class="benefit-card">
                         <div class="benefit-icon">🏠</div>
                         <h3>Direct Sensor</h3>
-                        <p>Reads presence directly from Aqara FP2 without cloud polling.</p>
+                        <p>Reads live presence and movement data from Aqara FP2 over the currently active transport.</p>
                     </div>
                     <div class="benefit-card">
                         <div class="benefit-icon">🔒</div>
@@ -136,7 +136,7 @@
                     <div class="benefit-card">
                         <div class="benefit-icon">⚡</div>
                         <h3>Local Updates</h3>
-                        <p>Real-time updates are pushed from the paired FP2 monitor into the backend.</p>
+                        <p>Real-time FP2 snapshots are pushed into the backend and rendered in the UI.</p>
                     </div>
                     <div class="benefit-card">
                         <div class="benefit-icon">💰</div>
@@ -155,7 +155,7 @@
                         <span class="stat-label">Update Interval</span>
                     </div>
                     <div class="stat" data-stat="accuracy">
-                        <span class="stat-value">HAP</span>
+                        <span class="stat-value">FP2</span>
                         <span class="stat-label">Transport</span>
                     </div>
                     <div class="stat" data-stat="hardware-cost">
@@ -169,7 +169,7 @@
         <!-- FP2 Monitor Tab -->
         <section id="fp2" class="tab-content">
             <h2>FP2 Presence Monitor</h2>
-            <p class="help-text">A single live view bound to your paired Aqara FP2 over HomeKit/HAP. No entity selection, no cloud polling, no HA fallback controls.</p>
+            <p class="help-text">A single live view bound to your Aqara FP2. No entity selection, no HA fallback controls. The source below reflects the transport currently delivering live telemetry.</p>
 
             <div class="fp2-toolbar fp2-toolbar--compact">
                 <button id="fp2Refresh" class="btn btn--secondary">Refresh Snapshot</button>
@@ -179,10 +179,10 @@
                 <div class="fp2-card fp2-card--accent">
                     <h3>Connection</h3>
                     <div class="fp2-kv"><span>API</span><span id="fp2ApiStatus" class="chip">-</span></div>
-                    <div class="fp2-kv"><span>HAP Link</span><span id="fp2StreamStatus" class="chip">OFFLINE</span></div>
+                    <div class="fp2-kv"><span>Sensor Link</span><span id="fp2StreamStatus" class="chip">OFFLINE</span></div>
                     <div class="fp2-kv"><span>State</span><strong id="fp2ConnectionState">-</strong></div>
                     <div class="fp2-kv"><span>Transport</span><strong id="fp2TransportValue">-</strong></div>
-                    <div class="fp2-kv"><span>Source</span><code id="fp2EntityId">hap_direct</code></div>
+                    <div class="fp2-kv"><span>Source</span><code id="fp2EntityId">fp2</code></div>
                     <div class="fp2-kv"><span>Last Update</span><span id="fp2UpdatedAt">-</span></div>
                 </div>
 
@@ -227,14 +227,14 @@
 
                 <div class="fp2-card">
                     <h3>Movement Events</h3>
-                    <p class="help-text">Detected ENTER, EXIT, and zone transitions from the direct FP2 stream.</p>
+                    <p class="help-text">Detected presence, target, and zone transitions from the active FP2 stream.</p>
                     <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
                 </div>
             </div>
 
             <div class="fp2-card">
                 <h3>Movement Map</h3>
-                <p class="help-text">A live room view that highlights which FP2 zone is active right now.</p>
+                <p class="help-text">A live room view that highlights active FP2 zones and targets right now.</p>
                 <canvas id="fp2MovementCanvas" width="960" height="260" style="width: 100%; height: 260px;"></canvas>
             </div>
 
@@ -260,6 +260,6 @@
     <div id="globalErrorToast" class="error-toast"></div>
 
     <!-- Load application scripts as modules -->
-    <script type="module" src="app.js?v=20260307-fp2only5"></script>
+    <script type="module" src="app.js?v=20260307-fp2only6"></script>
 </body>
 </html>

@@ -69,12 +69,15 @@ def _has_direct_hap_pairing() -> bool:
 
 
 def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) -> Dict[str, Any]:
-    """Convert the last known HAP snapshot into an explicit offline payload."""
+    """Convert the last known pushed FP2 snapshot into an explicit offline payload."""
     fp2_service = get_fp2_service()
     payload = fp2_service.snapshot_to_pose_data(snapshot)
     payload.setdefault("metadata", {})
-    payload["metadata"]["source"] = "hap_direct"
-    payload["metadata"]["entity_id"] = "hap_direct"
+    source = "hap_direct"
+    if snapshot is not None:
+        source = str(snapshot.raw_attributes.get("source") or "hap_direct")
+    payload["metadata"]["source"] = source
+    payload["metadata"]["entity_id"] = source
     payload["metadata"]["available"] = False
     payload["metadata"]["presence"] = False
     payload["metadata"]["stale"] = True
@@ -88,6 +91,11 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
     """Build a stable description of the bound FP2 device."""
     settings = fp2_service.settings
     pairing = _load_pairing_metadata()
+    latest_snapshot = _get_latest_hap_snapshot()
+    pushed_device = dict(_hap_latest.get("device") or {})
+    snapshot_device = {}
+    if latest_snapshot is not None:
+        snapshot_device = dict(latest_snapshot.raw_attributes.get("device") or {})
 
     device_ip = pairing.get("AccessoryIP") or settings.fp2_ip_address
     device_port = pairing.get("AccessoryPort")
@@ -96,7 +104,7 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
     wifi_channel = settings.fp2_wifi_channel or "-"
     signal_strength = settings.fp2_signal_strength or "-"
 
-    return {
+    base = {
         "name": device_label,
         "room": room_label,
         "model": settings.fp2_model or "Aqara FP2",
@@ -117,6 +125,20 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
         },
     }
 
+    merged = {**base, **snapshot_device, **pushed_device}
+    merged_wifi = {
+        **(base.get("wifi") or {}),
+        **(snapshot_device.get("wifi") or {}),
+        **(pushed_device.get("wifi") or {}),
+    }
+    merged["wifi"] = merged_wifi
+
+    connection = _hap_latest.get("connection") or {}
+    if connection.get("transport"):
+        merged["transport"] = connection.get("transport")
+
+    return merged
+
 
 @router.get("/status")
 async def get_fp2_status(
@@ -128,20 +150,24 @@ async def get_fp2_status(
     hap_snapshot = _get_recent_hap_snapshot()
     status["device"] = _build_device_metadata(fp2_service)
     if hap_snapshot is not None:
+        source = str(hap_snapshot.raw_attributes.get("source") or "hap_direct")
+        connection = dict(_hap_latest.get("connection") or {})
+        transport = connection.get("transport") or str(hap_snapshot.raw_attributes.get("transport") or source)
         status["status"] = "healthy"
         status["running"] = True
-        status["entity_id"] = "hap_direct"
+        status["entity_id"] = source
         status["last_snapshot"] = hap_snapshot.timestamp.isoformat()
         status["presence"] = hap_snapshot.presence
-        status["source"] = "hap_direct"
-        status["hap_connected"] = True
+        status["source"] = source
+        status["hap_connected"] = source == "hap_direct"
+        status["stream_connected"] = True
         status.setdefault("stats", {})
-        status["stats"]["mode"] = "hap_direct"
+        status["stats"]["mode"] = source
         status["stats"]["last_error"] = None
-        status["stats"]["last_entity_state"] = "hap_direct"
+        status["stats"]["last_entity_state"] = source
         status["connection"] = {
-            "transport": "hap_direct",
-            "state": "live",
+            "transport": transport,
+            "state": connection.get("state") or "live",
             "last_update_age_sec": round(time.time() - _hap_latest.get("updated_at", time.time()), 1),
             "light_level": hap_snapshot.raw_attributes.get("light_level"),
             "targets": len(hap_snapshot.targets),
@@ -154,32 +180,49 @@ async def get_fp2_status(
                 }
                 for zone in hap_snapshot.zones
             ],
+            "rssi": connection.get("rssi") or hap_snapshot.raw_attributes.get("rssi"),
+            "online": connection.get("online"),
         }
-    elif _has_direct_hap_pairing():
+    elif latest_hap_snapshot is not None or _has_direct_hap_pairing():
+        source = "hap_direct"
+        connection = dict(_hap_latest.get("connection") or {})
+        if latest_hap_snapshot is not None:
+            source = str(latest_hap_snapshot.raw_attributes.get("source") or "hap_direct")
+        transport = connection.get("transport") or (
+            latest_hap_snapshot.raw_attributes.get("transport") if latest_hap_snapshot is not None else "hap_direct"
+        ) or source
         updated_at = _hap_latest.get("updated_at")
         last_age = round(time.time() - updated_at, 1) if updated_at else None
         status["status"] = "degraded"
         status["running"] = True
-        status["entity_id"] = "hap_direct"
+        status["entity_id"] = source
         status["last_snapshot"] = latest_hap_snapshot.timestamp.isoformat() if latest_hap_snapshot else None
         status["presence"] = False
-        status["source"] = "hap_direct"
+        status["source"] = source
         status["hap_connected"] = False
+        status["stream_connected"] = False
         status.setdefault("stats", {})
-        status["stats"]["mode"] = "hap_direct"
-        status["stats"]["last_error"] = "Direct HAP stream is stale or offline"
-        status["stats"]["last_entity_state"] = "hap_direct_offline"
+        status["stats"]["mode"] = source
+        status["stats"]["last_error"] = (
+            "FP2 cloud stream is stale or offline"
+            if source == "aqara_cloud"
+            else "Direct HAP stream is stale or offline"
+        )
+        status["stats"]["last_entity_state"] = f"{source}_offline"
         status["connection"] = {
-            "transport": "hap_direct",
+            "transport": transport,
             "state": "stale",
             "last_update_age_sec": last_age,
             "light_level": latest_hap_snapshot.raw_attributes.get("light_level") if latest_hap_snapshot else None,
             "targets": 0,
             "zones": [],
+            "rssi": connection.get("rssi") or (latest_hap_snapshot.raw_attributes.get("rssi") if latest_hap_snapshot else None),
+            "online": connection.get("online"),
         }
     else:
         status["source"] = "home_assistant"
         status["hap_connected"] = False
+        status["stream_connected"] = False
         status.setdefault("stats", {})
         status["stats"]["mode"] = "home_assistant"
         status["connection"] = {
@@ -208,11 +251,16 @@ async def get_fp2_current_pose_like_data(
     hap_snapshot = _get_recent_hap_snapshot()
     if hap_snapshot is not None:
         snapshot = hap_snapshot
-        resolved_entity_id = "hap_direct"
-        source = "hap_direct"
-    elif _has_direct_hap_pairing():
+        source = str(snapshot.raw_attributes.get("source") or "hap_direct")
+        resolved_entity_id = source
+    elif _get_latest_hap_snapshot() is not None:
         return _build_stale_hap_payload(
             _get_latest_hap_snapshot(),
+            reason="FP2 direct stream is stale or the device is offline",
+        )
+    elif _has_direct_hap_pairing():
+        return _build_stale_hap_payload(
+            None,
             reason="Direct HAP stream is stale or the FP2 device is offline",
         )
     else:
@@ -319,8 +367,12 @@ class HAPPushPayload(BaseModel):
     timestamp: float
     presence: bool
     zones: list = []
+    targets: list = []
     light_level: Optional[float] = None
     source: str = "hap_direct"
+    raw_attributes: Dict[str, Any] = {}
+    device: Dict[str, Any] = {}
+    connection: Dict[str, Any] = {}
 
 
 @router.post("/push")
@@ -340,16 +392,30 @@ async def push_fp2_data(payload: HAPPushPayload):
         occupied = z.get("occupied", False)
         zones.append(FP2Zone(
             zone_id=zone_id,
-            name=zone_id,
+            name=z.get("name", zone_id),
             occupied=occupied,
-            target_count=1 if occupied else 0,
+            target_count=int(z.get("target_count", 1 if occupied else 0) or 0),
         ))
-        if occupied:
+        if occupied and not payload.targets:
             targets.append(FP2Target(
                 target_id=f"person_{zone_id}",
                 zone_id=zone_id,
                 activity="present",
                 confidence=0.95,
+            ))
+
+    if payload.targets:
+        for target in payload.targets:
+            zone_id = target.get("zone_id", "detection_area")
+            targets.append(FP2Target(
+                target_id=str(target.get("target_id") or target.get("id") or f"person_{len(targets)}"),
+                zone_id=zone_id,
+                x=float(target.get("x", 0.0) or 0.0),
+                y=float(target.get("y", 0.0) or 0.0),
+                distance=float(target.get("distance", 0.0) or 0.0),
+                angle=float(target.get("angle", 0.0) or 0.0),
+                activity=str(target.get("activity") or "present"),
+                confidence=float(target.get("confidence", 0.95) or 0.95),
             ))
 
     snapshot = FP2Snapshot(
@@ -359,15 +425,20 @@ async def push_fp2_data(payload: HAPPushPayload):
         targets=targets,
         raw_attributes={
             "source": payload.source,
+            "transport": payload.connection.get("transport") or payload.source,
             "zones": payload.zones,
+            "targets": payload.targets,
             "light_level": payload.light_level,
             "push_time": time.time(),
+            **payload.raw_attributes,
         },
     )
 
     # Update in-memory store
     _hap_latest["snapshot"] = snapshot
     _hap_latest["updated_at"] = time.time()
+    _hap_latest["device"] = payload.device
+    _hap_latest["connection"] = payload.connection
 
     # Also update fp2_service's last snapshot if available
     try:

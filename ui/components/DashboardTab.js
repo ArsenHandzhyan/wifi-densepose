@@ -1,6 +1,7 @@
 // Dashboard Tab Component
 
 import { healthService } from '../services/health.service.js';
+import { fp2Service } from '../services/fp2.service.js?v=20260307-dashboardlive1';
 
 export class DashboardTab {
   constructor(containerElement) {
@@ -8,6 +9,7 @@ export class DashboardTab {
     this.statsElements = {};
     this.healthSubscription = null;
     this.statsInterval = null;
+    this.fp2Interval = null;
     this.csiPipelineEnabled = true;
     this.fp2OnlyMode = false;
   }
@@ -51,6 +53,7 @@ export class DashboardTab {
 
       if (this.fp2OnlyMode || !this.csiPipelineEnabled) {
         this.setFp2OnlyState();
+        await this.refreshFp2OnlyState();
         return;
       }
 
@@ -72,6 +75,14 @@ export class DashboardTab {
       this.statsInterval = setInterval(() => {
         this.updateLiveStats();
       }, 5000);
+    }
+
+    if (this.fp2OnlyMode) {
+      this.fp2Interval = setInterval(() => {
+        this.refreshFp2OnlyState().catch((error) => {
+          console.error('Failed to refresh FP2 dashboard state:', error);
+        });
+      }, 3000);
     }
 
     // Start health monitoring
@@ -133,6 +144,9 @@ export class DashboardTab {
       if (health.system_metrics || health.metrics) {
         this.updateSystemMetrics(health.system_metrics || health.metrics);
       }
+      this.refreshFp2OnlyState().catch((error) => {
+        console.error('Failed to refresh FP2 dashboard state:', error);
+      });
       return;
     }
 
@@ -346,12 +360,12 @@ export class DashboardTab {
 
     const heroDescription = this.container.querySelector('.hero-description');
     if (heroDescription) {
-      heroDescription.textContent = 'This dashboard is running in FP2-only mode. Presence is read locally from Aqara FP2 over HomeKit/HAP and pushed directly to the backend.';
+      heroDescription.textContent = 'This dashboard is running in FP2-only mode. Presence is read from Aqara FP2 and pushed directly into the backend over the currently active transport.';
     }
 
     const detectionCount = this.container.querySelector('.detection-count');
     if (detectionCount) {
-      detectionCount.textContent = 'HAP';
+      detectionCount.textContent = 'FP2';
     }
 
     const personCount = this.container.querySelector('.person-count');
@@ -361,7 +375,7 @@ export class DashboardTab {
 
     const avgConfidence = this.container.querySelector('.avg-confidence');
     if (avgConfidence) {
-      avgConfidence.textContent = 'PRESENCE';
+      avgConfidence.textContent = 'UNAVAILABLE';
     }
 
     if (this.statsElements.bodyRegions) {
@@ -373,7 +387,7 @@ export class DashboardTab {
     }
 
     if (this.statsElements.accuracy) {
-      this.statsElements.accuracy.textContent = 'HAP';
+      this.statsElements.accuracy.textContent = 'FP2';
     }
 
     if (this.statsElements.hardwareCost) {
@@ -384,8 +398,8 @@ export class DashboardTab {
     if (zonesContainer) {
       zonesContainer.innerHTML = `
         <div class="zone-item">
-          <span class="zone-name">FP2 stream</span>
-          <span class="zone-count">active</span>
+          <span class="zone-name">No live zones</span>
+          <span class="zone-count">-</span>
         </div>
       `;
     }
@@ -401,11 +415,11 @@ export class DashboardTab {
 
     const hardwareCard = this.container.querySelector('[data-component="hardware"]');
     if (hardwareCard) {
-      hardwareCard.className = 'component-status status-healthy';
+      hardwareCard.className = 'component-status status-warning';
       const statusText = hardwareCard.querySelector('.status-text');
       const statusMessage = hardwareCard.querySelector('.status-message');
       if (statusText) statusText.textContent = 'FP2';
-      if (statusMessage) statusMessage.textContent = 'Aqara FP2 direct HAP monitor is active';
+      if (statusMessage) statusMessage.textContent = 'Waiting for a live FP2 telemetry stream';
     }
 
     const inferenceCard = this.container.querySelector('[data-component="inference"]');
@@ -419,12 +433,157 @@ export class DashboardTab {
 
     const streamingCard = this.container.querySelector('[data-component="streaming"]');
     if (streamingCard) {
-      streamingCard.className = 'component-status status-healthy';
+      streamingCard.className = 'component-status status-warning';
       const statusText = streamingCard.querySelector('.status-text');
       const statusMessage = streamingCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'HAP';
-      if (statusMessage) statusMessage.textContent = 'Direct FP2 snapshots are being pushed to the backend';
+      if (statusText) statusText.textContent = 'STALE';
+      if (statusMessage) statusMessage.textContent = 'No live FP2 snapshots are currently reaching the backend';
     }
+  }
+
+  async refreshFp2OnlyState() {
+    if (!this.fp2OnlyMode) {
+      return;
+    }
+
+    try {
+      const [status, current] = await Promise.all([
+        fp2Service.getStatus(),
+        fp2Service.getCurrent()
+      ]);
+
+      this.renderFp2OnlyStatus(status, current);
+    } catch (error) {
+      console.error('Failed to load FP2-only dashboard state:', error);
+      this.renderFp2OnlyError(error);
+    }
+  }
+
+  renderFp2OnlyStatus(status, current) {
+    const metadata = current?.metadata || {};
+    const available = metadata.available !== false;
+    const presence = Boolean(metadata.presence);
+    const persons = Array.isArray(current?.persons) ? current.persons.length : 0;
+    const connection = status?.connection || {};
+    const zones = Array.isArray(connection.zones) ? connection.zones : [];
+    const liveZoneCount = zones.length > 0 ? zones.length : Object.keys(current?.zone_summary || {}).length;
+    const transportLabel = this.formatTransport(connection.transport || status?.source || 'fp2');
+    const hasLiveStream = connection?.state === 'live' && available;
+
+    const personCount = this.container.querySelector('.person-count');
+    if (personCount) {
+      personCount.textContent = available ? String(persons) : '-';
+    }
+
+    const avgConfidence = this.container.querySelector('.avg-confidence');
+    if (avgConfidence) {
+      avgConfidence.textContent = available
+        ? (presence ? 'PRESENT' : 'ABSENT')
+        : 'UNAVAILABLE';
+    }
+
+    const detectionCount = this.container.querySelector('.detection-count');
+    if (detectionCount) {
+      detectionCount.textContent = transportLabel;
+    }
+
+    const zonesContainer = this.container.querySelector('.zones-summary');
+    if (zonesContainer) {
+      if (liveZoneCount > 0) {
+        const zoneMarkup = zones.length > 0
+          ? zones.map((zone) => `
+              <div class="zone-item">
+                <span class="zone-name">${zone.name || zone.zone_id || 'zone'}</span>
+                <span class="zone-count">${zone.occupied ? 'active' : 'idle'}</span>
+              </div>
+            `).join('')
+          : Object.entries(current?.zone_summary || {}).map(([zoneName, count]) => `
+              <div class="zone-item">
+                <span class="zone-name">${zoneName}</span>
+                <span class="zone-count">${count}</span>
+              </div>
+            `).join('');
+        zonesContainer.innerHTML = zoneMarkup;
+      } else {
+        zonesContainer.innerHTML = `
+          <div class="zone-item">
+            <span class="zone-name">No live zones</span>
+            <span class="zone-count">-</span>
+          </div>
+        `;
+      }
+    }
+
+    const hardwareCard = this.container.querySelector('[data-component="hardware"]');
+    if (hardwareCard) {
+      hardwareCard.className = `component-status ${hasLiveStream ? 'status-healthy' : 'status-warning'}`;
+      const statusText = hardwareCard.querySelector('.status-text');
+      const statusMessage = hardwareCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = hasLiveStream ? 'FP2' : 'STALE';
+      if (statusMessage) {
+        statusMessage.textContent = hasLiveStream
+          ? `Aqara FP2 telemetry is live over ${transportLabel}`
+          : 'Aqara FP2 is configured, but no live telemetry stream is active';
+      }
+    }
+
+    const streamingCard = this.container.querySelector('[data-component="streaming"]');
+    if (streamingCard) {
+      const streamState = hasLiveStream ? 'healthy' : 'warning';
+      const statusText = streamingCard.querySelector('.status-text');
+      const statusMessage = streamingCard.querySelector('.status-message');
+      streamingCard.className = `component-status status-${streamState}`;
+      if (statusText) {
+        statusText.textContent = hasLiveStream ? transportLabel : this.formatConnectionState(connection.state || 'stale');
+      }
+      if (statusMessage) {
+        statusMessage.textContent = hasLiveStream
+          ? `Live FP2 snapshots are being pushed to the backend over ${transportLabel}`
+          : 'No live FP2 snapshots are currently reaching the backend';
+      }
+    }
+  }
+
+  renderFp2OnlyError() {
+    const hardwareCard = this.container.querySelector('[data-component="hardware"]');
+    const streamingCard = this.container.querySelector('[data-component="streaming"]');
+    const avgConfidence = this.container.querySelector('.avg-confidence');
+
+    if (avgConfidence) {
+      avgConfidence.textContent = 'UNAVAILABLE';
+    }
+
+    if (hardwareCard) {
+      hardwareCard.className = 'component-status status-error';
+      const statusText = hardwareCard.querySelector('.status-text');
+      const statusMessage = hardwareCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'ERROR';
+      if (statusMessage) statusMessage.textContent = 'Unable to load FP2 sensor state';
+    }
+
+    if (streamingCard) {
+      streamingCard.className = 'component-status status-error';
+      const statusText = streamingCard.querySelector('.status-text');
+      const statusMessage = streamingCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'ERROR';
+      if (statusMessage) statusMessage.textContent = 'Unable to load FP2 stream state';
+    }
+  }
+
+  formatTransport(transport) {
+    const normalized = String(transport || '').replace(/_/g, ' ').trim();
+    if (!normalized) {
+      return 'FP2';
+    }
+    return normalized
+      .split(' ')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
+
+  formatConnectionState(state) {
+    const normalized = String(state || 'offline').trim().toUpperCase();
+    return normalized || 'OFFLINE';
   }
 
   // Format feature name
@@ -467,6 +626,10 @@ export class DashboardTab {
     
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
+    }
+
+    if (this.fp2Interval) {
+      clearInterval(this.fp2Interval);
     }
     
     healthService.stopHealthMonitoring();

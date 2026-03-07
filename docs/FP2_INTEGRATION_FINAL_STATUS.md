@@ -8,7 +8,7 @@ The active runtime status for this workspace is documented in [`FP2_RUNTIME_STAT
 
 The project was reduced to a single verified path:
 
-`Aqara FP2 -> HomeKit/HAP -> local backend -> UI`
+`Aqara FP2 -> Aqara Open API -> local backend -> UI`
 
 That path works on the current hardware and is the only integration route treated as active in this repository snapshot.
 
@@ -30,33 +30,38 @@ That path works on the current hardware and is the only integration route treate
 
 ### Aqara Cloud API
 
-- The tested account/app path returned authorization failures for device state calls
-- It was not reliable enough to remain the primary integration method
+- The older `config.*` endpoints remained unreliable
+- The working route is the newer `query.*` family with:
+  - device DID `lumi1.54ef4479e003`
+  - model `lumi.motion.agl001`
+  - resource polling via `query.resource.value`
 
 ### Home Assistant Entity Polling
 
 - HA helper and fallback entity approaches were useful during debugging
 - They are no longer the primary data source for the working UI
 
-## Why Direct HAP Won
+### Direct HomeKit / HAP
 
-- It provides a local path without relying on cloud polling
-- It works with the existing `Aqara FP2` and Wi-Fi network
-- It exposes live presence and light telemetry fast enough for the current UI
+- Reverse engineering reached the real setup-mode `HAP` endpoint
+- Pair setup from `Mac` consistently failed with `kTLVError_MaxPeers`
+- That block remained even after factory reset and removal from controllers
+- Direct `HAP` is therefore documented as experimental and currently blocked by the accessory, not by this repository
 
 ## Important Limitation
 
-Direct `HomeKit/HAP` does not expose the full Aqara mobile app scene graph.
+The public Aqara/Open API path does not expose the full Aqara mobile app scene graph.
 
 The repository can show:
 
 - presence
+- target coordinates
 - light level
 - occupancy channels / zone-like windows
 - connection state
 - event history
 
-The repository cannot reproduce exactly from direct HAP:
+The repository cannot reproduce exactly from public API data:
 
 - the Aqara room floorplan
 - exact person coordinates on the room map
@@ -67,5 +72,5 @@ The repository cannot reproduce exactly from direct HAP:
 The cleaned project state should be interpreted as:
 
 - `FP2-only UI`
-- `direct HAP monitoring`
+- `Aqara Cloud monitor feeding the local backend`
 - `legacy CSI/DensePose materials retained only as original project context`

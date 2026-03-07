@@ -1,8 +1,8 @@
-// Aqara FP2 Local Monitor - Main Entry Point
+// Aqara FP2 Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js?v=20260307-fp2only5';
-import { FP2Tab } from './components/FP2Tab.js?v=20260307-fp2only5';
+import { DashboardTab } from './components/DashboardTab.js?v=20260307-fp2only8';
+import { FP2Tab } from './components/FP2Tab.js?v=20260307-fp2only8';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
@@ -11,12 +11,13 @@ class WiFiDensePoseApp {
   constructor() {
     this.components = {};
     this.isInitialized = false;
+    this.lastBackendToastState = null;
   }
 
   // Initialize application
   async init() {
     try {
-      console.log('Initializing Aqara FP2 Local Monitor...');
+      console.log('Initializing Aqara FP2 Monitor...');
       
       // Set up error handling
       this.setupErrorHandling();
@@ -31,7 +32,7 @@ class WiFiDensePoseApp {
       this.setupEventListeners();
       
       this.isInitialized = true;
-      console.log('Aqara FP2 Local Monitor initialized successfully');
+      console.log('Aqara FP2 Monitor initialized successfully');
       
     } catch (error) {
       console.error('Failed to initialize application:', error);
@@ -69,6 +70,17 @@ class WiFiDensePoseApp {
       console.error('❌ Backend check failed:', error);
       this.showBackendStatus('Backend connection failed', 'error');
     }
+
+    healthService.subscribeToHealth((health) => {
+      if (health?.status === 'alive' || health?.status === 'healthy') {
+        this.showBackendStatus('Connected to real backend', 'success');
+        return;
+      }
+
+      this.showBackendStatus('Backend connection failed', 'error');
+    });
+
+    healthService.startHealthMonitoring(10000);
   }
 
   // Initialize UI components
@@ -180,6 +192,12 @@ class WiFiDensePoseApp {
 
   // Show backend status notification
   showBackendStatus(message, type) {
+    const toastState = `${type}:${message}`;
+    if (this.lastBackendToastState === toastState) {
+      return;
+    }
+    this.lastBackendToastState = toastState;
+
     // Create status notification if it doesn't exist
     let statusToast = document.getElementById('backendStatusToast');
     if (!statusToast) {

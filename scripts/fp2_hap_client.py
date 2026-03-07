@@ -22,9 +22,11 @@
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -37,9 +39,9 @@ PAIRING_DATA_FILE = PROJECT_ROOT / ".fp2_pairing.json"
 # ── Known FP2 config ────────────────────────────────────────
 FP2_IP = os.environ.get("FP2_IP", "192.168.1.52")
 FP2_PORT = int(os.environ.get("FP2_PORT", "443"))
-FP2_PAIRING_CODE = os.environ.get("FP2_HOMEKIT_CODE", "797-12-099")
+FP2_PAIRING_CODE = os.environ.get("FP2_HOMEKIT_CODE", "")
 FP2_MAC = os.environ.get("FP2_MAC", "54:EF:44:79:E0:03")
-LOCAL_IFACE = os.environ.get("LOCAL_IFACE", "192.168.1.62")
+LOCAL_IFACE = os.environ.get("LOCAL_IFACE")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 logging.basicConfig(
@@ -51,6 +53,40 @@ log = logging.getLogger("fp2_hap")
 
 
 # ── HAP Discovery helpers ───────────────────────────────────
+
+def create_characteristic_cache():
+    """Create a characteristic cache compatible with old and new aiohomekit layouts."""
+    try:
+        from aiohomekit.characteristic_cache import CharacteristicCacheMemory
+    except ImportError:
+        from aiohomekit.model.characteristics import CharacteristicCacheMemory
+    return CharacteristicCacheMemory()
+
+
+async def await_maybe(value):
+    """Await coroutine results when needed, otherwise return the value as-is."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def is_standard_homekit_char(char_type: str, short_code: str) -> bool:
+    """Match standard HomeKit characteristic UUIDs by their short code."""
+    norm = (char_type or "").upper()
+    code = short_code.upper()
+    return norm == code or norm.startswith(f"000000{code}-")
+
+def get_local_iface() -> str:
+    """Best-effort local interface IP used to reach FP2."""
+    if LOCAL_IFACE:
+        return LOCAL_IFACE
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect((FP2_IP, FP2_PORT))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
 
 def build_fp2_service():
     """Build a HomeKitService manually for FP2 (bypasses mDNS)."""
@@ -76,11 +112,10 @@ def build_fp2_service():
     )
 
 
-async def discover_fp2(timeout: float = 10.0) -> bool:
-    """Try to discover FP2 via mDNS (works when FP2 is in pairing mode)."""
-    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
-
-    log.info("Поиск FP2 через mDNS (%s сек)...", timeout)
+async def discover_fp2_service(timeout: float = 5.0):
+    """Discover and return the real FP2 HomeKit service from mDNS."""
+    from aiohomekit.zeroconf import HomeKitService
+    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser, AsyncServiceInfo
 
     found = []
 
@@ -93,17 +128,48 @@ async def discover_fp2(timeout: float = 10.0) -> bool:
         def update_service(self, zc, stype, name):
             pass
 
-    azc = AsyncZeroconf(interfaces=[LOCAL_IFACE])
+    azc = AsyncZeroconf(interfaces=[get_local_iface()])
     browser = AsyncServiceBrowser(azc.zeroconf, "_hap._tcp.local.", Listener())
-    await asyncio.sleep(timeout)
-    await browser.async_cancel()
-    await azc.async_close()
+    try:
+        await asyncio.sleep(timeout)
 
-    fp2_found = any("FP2" in n or "Presence" in n for n in found)
+        for name in found:
+            info = AsyncServiceInfo("_hap._tcp.local.", name)
+            ok = await info.async_request(azc.zeroconf, int(timeout * 1000))
+            if not ok:
+                continue
+
+            props = {str(k).lower(): str(v) for k, v in info.decoded_properties.items() if v is not None}
+            model = props.get("md", "")
+            if "FP2" not in name and "Presence" not in name and model != "PS-S02D":
+                continue
+
+            service = HomeKitService.from_service_info(info)
+            log.info(
+                "FP2 service: name=%s id=%s address=%s port=%s model=%s",
+                service.name,
+                service.id,
+                service.address,
+                service.port,
+                service.model,
+            )
+            return service
+    finally:
+        await browser.async_cancel()
+        await azc.async_close()
+
+    return None
+
+
+async def discover_fp2(timeout: float = 10.0) -> bool:
+    """Try to discover FP2 via mDNS (works when FP2 is in pairing mode)."""
+    log.info("Поиск FP2 через mDNS (%s сек)...", timeout)
+    service = await discover_fp2_service(timeout=timeout)
+    fp2_found = service is not None
     if fp2_found:
         log.info("FP2 найден через mDNS!")
     else:
-        log.warning("FP2 не найден через mDNS. Всего найдено: %d устройств", len(found))
+        log.warning("FP2 не найден через mDNS.")
     return fp2_found
 
 
@@ -128,60 +194,51 @@ async def pair_fp2():
     """Pair with FP2 using HomeKit protocol."""
     from aiohomekit.controller.ip import IpController
     from aiohomekit.controller.ip.discovery import IpDiscovery
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
-    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
+    from zeroconf.asyncio import AsyncZeroconf
 
     if PAIRING_DATA_FILE.exists():
         log.warning("Файл пейринга уже существует: %s", PAIRING_DATA_FILE)
         log.warning("Удалите его для повторного пейринга: rm %s", PAIRING_DATA_FILE)
         return False
 
-    # Check reachability first
-    if not await check_fp2_reachable():
-        log.error("FP2 недоступен. Убедитесь что датчик включен и в сети.")
+    if not FP2_PAIRING_CODE:
+        log.error("Не задан FP2_HOMEKIT_CODE. Укажите HomeKit код через переменную окружения.")
         return False
 
-    log.info("Начинаю пейринг с FP2...")
-    log.info("  IP: %s:%d", FP2_IP, FP2_PORT)
-    log.info("  Код: %s", FP2_PAIRING_CODE)
-
-    # Setup zeroconf with browser (required for IpController)
-    azc = AsyncZeroconf(interfaces=[LOCAL_IFACE])
-
-    class DummyListener:
-        def add_service(self, *a): pass
-        def remove_service(self, *a): pass
-        def update_service(self, *a): pass
-
-    browser = AsyncServiceBrowser(azc.zeroconf, "_hap._tcp.local.", DummyListener())
-
-    try:
-        char_cache = CharacteristicCacheMemory()
-        controller = IpController(char_cache=char_cache, zeroconf_instance=azc)
-        await controller.async_start()
-        log.info("IpController запущен")
-
-        # Build manual service description
+    service = await discover_fp2_service(timeout=5.0)
+    if service is None:
+        log.warning("Не удалось получить реальный HAP service через mDNS, пробую fallback.")
+        if not await check_fp2_reachable():
+            log.error("FP2 недоступен. Убедитесь что датчик включен и в сети.")
+            return False
         service = build_fp2_service()
 
-        # Create discovery object
+    log.info("Начинаю пейринг с FP2...")
+    log.info("  HAP service: %s", service.name)
+    log.info("  HAP id: %s", service.id)
+    log.info("  IP: %s:%d", service.address, service.port)
+    log.info("  Код: %s", FP2_PAIRING_CODE)
+
+    azc = AsyncZeroconf(interfaces=[get_local_iface()])
+    controller = None
+
+    try:
+        char_cache = create_characteristic_cache()
+        controller = IpController(char_cache=char_cache, zeroconf_instance=azc)
+
         discovery = IpDiscovery(controller, service)
 
-        # Start pairing
         log.info("Отправляю запрос на пейринг...")
         finish_pairing = await discovery.async_start_pairing("fp2_sensor")
 
-        # Complete pairing with code
         log.info("Ввожу код пейринга: %s", FP2_PAIRING_CODE)
         pairing = await finish_pairing(FP2_PAIRING_CODE)
 
-        # Save pairing data
         pairing_data = pairing.pairing_data
         PAIRING_DATA_FILE.write_text(json.dumps(pairing_data, indent=2))
         log.info("Пейринг УСПЕШЕН! Данные сохранены: %s", PAIRING_DATA_FILE)
 
-        # Read accessories to verify
-        accessories = await pairing.list_accessories_and_characteristics()
+        accessories = await await_maybe(pairing.list_accessories_and_characteristics())
         log.info("Аксессуары FP2:")
         for acc in accessories:
             for svc in acc.get("services", []):
@@ -192,16 +249,14 @@ async def pair_fp2():
                     value = char.get("value")
                     log.info("    %s = %s", ctype, value)
 
-        await pairing.close()
+        await await_maybe(pairing.close())
         return True
 
     except Exception as e:
         log.error("Ошибка пейринга: %s", e)
-        log.error("Убедитесь что FP2 удалён из Aqara Home и доступен для пейринга.")
+        log.error("Убедитесь что FP2 доступен для HomeKit-пейринга и код указан верно.")
         return False
     finally:
-        await browser.async_cancel()
-        await controller.async_shutdown()
         await azc.async_close()
 
 
@@ -210,8 +265,7 @@ async def pair_fp2():
 async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
     """Connect to paired FP2 and monitor presence data in real-time."""
     from aiohomekit.controller.ip import IpController
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
-    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
+    from zeroconf.asyncio import AsyncZeroconf
 
     if not PAIRING_DATA_FILE.exists():
         log.error("Файл пейринга не найден: %s", PAIRING_DATA_FILE)
@@ -222,31 +276,25 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
     log.info("Загружены данные пейринга")
 
     # Setup
-    azc = AsyncZeroconf(interfaces=[LOCAL_IFACE])
-
-    class DummyListener:
-        def add_service(self, *a): pass
-        def remove_service(self, *a): pass
-        def update_service(self, *a): pass
-
-    browser = AsyncServiceBrowser(azc.zeroconf, "_hap._tcp.local.", DummyListener())
+    azc = AsyncZeroconf(interfaces=[get_local_iface()])
 
     http_session = None
     if backend_url:
         import aiohttp
         http_session = aiohttp.ClientSession()
 
+    controller = None
     try:
-        char_cache = CharacteristicCacheMemory()
+        char_cache = create_characteristic_cache()
         controller = IpController(char_cache=char_cache, zeroconf_instance=azc)
-        await controller.async_start()
 
-        # Restore pairing
-        pairing = await controller.load_pairing("fp2_sensor", pairing_data)
+        pairing = await await_maybe(controller.load_pairing("fp2_sensor", pairing_data))
+        if pairing is None:
+            log.error("Не удалось восстановить pairing из файла.")
+            return
         log.info("Подключение к FP2 восстановлено")
 
-        # Get all accessories info
-        accessories = await pairing.list_accessories_and_characteristics()
+        accessories = await await_maybe(pairing.list_accessories_and_characteristics())
 
         # Parse services to find occupancy sensors
         occupancy_chars = []
@@ -261,14 +309,14 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
                     iid = char.get("iid", 0)
 
                     # Occupancy Detected (0x71 = 113)
-                    if "71" in ctype or "OCCUPANCY" in ctype.upper():
+                    if is_standard_homekit_char(ctype, "71"):
                         occupancy_chars.append({
                             "aid": aid, "iid": iid,
                             "name": f"occupancy_{svc.get('iid',0)}",
                             "service_iid": svc.get("iid", 0),
                         })
                     # Current Ambient Light Level (0x6B = 107)
-                    elif "6B" in ctype or "LIGHT" in ctype.upper():
+                    elif is_standard_homekit_char(ctype, "6B"):
                         light_chars.append({
                             "aid": aid, "iid": iid,
                             "name": f"light_{svc.get('iid',0)}",
@@ -302,7 +350,7 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
             try:
                 # Read all relevant characteristics
                 if chars_to_read:
-                    values = await pairing.get_characteristics(chars_to_read)
+                    values = await await_maybe(pairing.get_characteristics(chars_to_read))
                 else:
                     values = {}
 
@@ -325,7 +373,10 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
                     key = (lc["aid"], lc["iid"])
                     val = values.get(key, {}).get("value")
                     if val is not None:
-                        light_level = float(val)
+                        try:
+                            light_level = float(val)
+                        except (TypeError, ValueError):
+                            continue
 
                 presence = any(z["occupied"] for z in zones)
 
@@ -371,11 +422,6 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
     finally:
         if http_session and not http_session.closed:
             await http_session.close()
-        await browser.async_cancel()
-        try:
-            await controller.async_shutdown()
-        except Exception:
-            pass
         await azc.async_close()
 
 
@@ -384,8 +430,7 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
 async def info_fp2():
     """Show info about paired FP2."""
     from aiohomekit.controller.ip import IpController
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
-    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
+    from zeroconf.asyncio import AsyncZeroconf
 
     if not PAIRING_DATA_FILE.exists():
         log.error("FP2 не спарен. Сначала: python3 %s pair", __file__)
@@ -393,22 +438,18 @@ async def info_fp2():
 
     pairing_data = json.loads(PAIRING_DATA_FILE.read_text())
 
-    azc = AsyncZeroconf(interfaces=[LOCAL_IFACE])
+    azc = AsyncZeroconf(interfaces=[get_local_iface()])
 
-    class DummyListener:
-        def add_service(self, *a): pass
-        def remove_service(self, *a): pass
-        def update_service(self, *a): pass
-
-    browser = AsyncServiceBrowser(azc.zeroconf, "_hap._tcp.local.", DummyListener())
-
+    controller = None
     try:
-        char_cache = CharacteristicCacheMemory()
+        char_cache = create_characteristic_cache()
         controller = IpController(char_cache=char_cache, zeroconf_instance=azc)
-        await controller.async_start()
-        pairing = await controller.load_pairing("fp2_sensor", pairing_data)
+        pairing = await await_maybe(controller.load_pairing("fp2_sensor", pairing_data))
+        if pairing is None:
+            log.error("Не удалось восстановить pairing из файла.")
+            return
 
-        accessories = await pairing.list_accessories_and_characteristics()
+        accessories = await await_maybe(pairing.list_accessories_and_characteristics())
 
         print("\n" + "=" * 60)
         print("  AQARA FP2 — ИНФОРМАЦИЯ ОБ УСТРОЙСТВЕ")
@@ -426,11 +467,9 @@ async def info_fp2():
                     fmt = char.get("format", "")
                     print(f"    {ctype:40s} = {str(value):20s} [{fmt}] perms={perms}")
 
-        await pairing.close()
+        await await_maybe(pairing.close())
 
     finally:
-        await browser.async_cancel()
-        await controller.async_shutdown()
         await azc.async_close()
 
 
@@ -483,8 +522,8 @@ def main():
 Переменные окружения:
   FP2_IP           IP-адрес FP2 (по умолчанию: 192.168.1.52)
   FP2_PORT         Порт FP2 (по умолчанию: 443)
-  FP2_HOMEKIT_CODE Код пейринга (по умолчанию: 797-12-099)
-  LOCAL_IFACE      IP локального интерфейса (по умолчанию: 192.168.1.62)
+  FP2_HOMEKIT_CODE Код пейринга (обязателен для команды pair)
+  LOCAL_IFACE      IP локального интерфейса (по умолчанию: автоопределение)
         """
     )
 

@@ -1,5 +1,7 @@
 # WiFi DensePose
 
+> Current workspace mode: `FP2-only`. The live application in this repository is currently configured for direct `Aqara FP2 -> HomeKit/HAP -> local backend -> UI` monitoring. CSI/DensePose materials below are legacy project context, not the active runtime path on this machine. See [`docs/FP2_RUNTIME_STATUS_2026-03-07.md`](docs/FP2_RUNTIME_STATUS_2026-03-07.md) for the authoritative runtime status.
+
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.95+-green.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

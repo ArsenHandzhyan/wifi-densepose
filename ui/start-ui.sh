@@ -1,15 +1,13 @@
 #!/bin/bash
 
-# WiFi DensePose UI Startup Script
-# This script starts the UI on port 3000 to avoid conflicts with the FastAPI backend on port 8000
+# Aqara FP2 Local Monitor UI Startup Script
+# This script starts the FP2-only UI on port 3000 to avoid conflicts with the FastAPI backend on port 8000
 
-echo "🚀 Starting WiFi DensePose UI..."
+echo "🚀 Starting Aqara FP2 Local Monitor UI..."
 echo ""
 echo "📋 Configuration:"
 echo "   - UI Server: http://localhost:3000"
 echo "   - Backend API: http://localhost:8000 (make sure it's running)"
-echo "   - Test Runner: http://localhost:3000/tests/test-runner.html"
-echo "   - Integration Tests: http://localhost:3000/tests/integration-test.html"
 echo ""
 
 # Check if port 3000 is already in use
@@ -24,10 +22,8 @@ if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null ; then
     echo "✅ FastAPI backend detected on port 8000"
 else
     echo "⚠️  FastAPI backend not detected on port 8000"
-    echo "   Please start it with: wifi-densepose start"
-    echo "   Or: python -m wifi_densepose.main"
-    echo ""
-    echo "   The UI will still work with the mock server for testing."
+    echo "   Start it manually from the repository root:"
+    echo "   source venv/bin/activate && PYTHONPATH=. uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload"
 fi
 
 echo ""

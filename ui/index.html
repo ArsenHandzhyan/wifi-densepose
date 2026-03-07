@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WiFi DensePose: Human Tracking Through Walls</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Aqara FP2 Local Monitor</title>
+    <link rel="stylesheet" href="style.css?v=20260307-fp2only5">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>WiFi DensePose</h1>
-            <p class="subtitle">Human Tracking Through Walls Using WiFi Signals</p>
+            <h1>Aqara FP2 Local Monitor</h1>
+            <p class="subtitle">Direct local monitoring over HomeKit/HAP</p>
             <div class="header-info">
                 <span class="api-version"></span>
                 <span class="api-environment"></span>
@@ -23,21 +23,15 @@
         <nav class="nav-tabs">
             <button class="nav-tab active" data-tab="dashboard">Dashboard</button>
             <button class="nav-tab" data-tab="fp2">FP2 Monitor</button>
-            <button class="nav-tab" data-tab="hardware">Hardware</button>
-            <button class="nav-tab" data-tab="demo">Live Demo</button>
-            <button class="nav-tab" data-tab="architecture">Architecture</button>
-            <button class="nav-tab" data-tab="performance">Performance</button>
-            <button class="nav-tab" data-tab="applications">Applications</button>
         </nav>
 
         <!-- Dashboard Tab -->
         <section id="dashboard" class="tab-content active">
             <div class="hero-section">
-                <h2>Revolutionary WiFi-Based Human Pose Detection</h2>
+                <h2>Local FP2 Presence Monitoring</h2>
                 <p class="hero-description">
-                    AI can track your full-body movement through walls using just WiFi signals. 
-                    Researchers at Carnegie Mellon have trained a neural network to turn basic WiFi 
-                    signals into detailed wireframe models of human bodies.
+                    This instance is running in FP2-only mode. Presence data is read locally from
+                    your Aqara FP2 over HomeKit/HAP and pushed directly into the backend and UI.
                 </p>
                 
                 <!-- Error container -->
@@ -53,12 +47,12 @@
                             <span class="status-message"></span>
                         </div>
                         <div class="component-status" data-component="hardware">
-                            <span class="component-name">Hardware</span>
+                            <span class="component-name">Sensor</span>
                             <span class="status-text">-</span>
                             <span class="status-message"></span>
                         </div>
                         <div class="component-status" data-component="inference">
-                            <span class="component-name">Inference</span>
+                            <span class="component-name">CSI Pipeline</span>
                             <span class="status-text">-</span>
                             <span class="status-message"></span>
                         </div>
@@ -109,16 +103,16 @@
                     <h3>Live Statistics</h3>
                     <div class="stats-grid">
                         <div class="stat-item">
-                            <span class="stat-label">Active Persons</span>
-                            <span class="person-count">0</span>
+                            <span class="stat-label">Active Targets</span>
+                            <span class="person-count">-</span>
                         </div>
                         <div class="stat-item">
-                            <span class="stat-label">Avg Confidence</span>
-                            <span class="avg-confidence">0%</span>
+                            <span class="stat-label">Presence State</span>
+                            <span class="avg-confidence">-</span>
                         </div>
                         <div class="stat-item">
-                            <span class="stat-label">Total Detections</span>
-                            <span class="detection-count">0</span>
+                            <span class="stat-label">Transport</span>
+                            <span class="detection-count">HAP</span>
                         </div>
                     </div>
                     
@@ -131,42 +125,42 @@
                 <div class="key-benefits">
                     <div class="benefit-card">
                         <div class="benefit-icon">🏠</div>
-                        <h3>Through Walls</h3>
-                        <p>Works through solid barriers with no line of sight required</p>
+                        <h3>Direct Sensor</h3>
+                        <p>Reads presence directly from Aqara FP2 without cloud polling.</p>
                     </div>
                     <div class="benefit-card">
                         <div class="benefit-icon">🔒</div>
                         <h3>Privacy-Preserving</h3>
-                        <p>No cameras or visual recording - just WiFi signal analysis</p>
+                        <p>No cameras and no image recording. Only occupancy/presence telemetry.</p>
                     </div>
                     <div class="benefit-card">
                         <div class="benefit-icon">⚡</div>
-                        <h3>Real-Time</h3>
-                        <p>Maps 24 body regions in real-time at 100Hz sampling rate</p>
+                        <h3>Local Updates</h3>
+                        <p>Real-time updates are pushed from the paired FP2 monitor into the backend.</p>
                     </div>
                     <div class="benefit-card">
                         <div class="benefit-icon">💰</div>
-                        <h3>Low Cost</h3>
-                        <p>Built using $30 commercial WiFi hardware</p>
+                        <h3>Current Mode</h3>
+                        <p>FP2-only operation. CSI pipeline is intentionally disabled on this setup.</p>
                     </div>
                 </div>
 
                 <div class="system-stats">
                     <div class="stat" data-stat="body-regions">
-                        <span class="stat-value">24</span>
-                        <span class="stat-label">Body Regions</span>
+                        <span class="stat-value">FP2</span>
+                        <span class="stat-label">Sensor</span>
                     </div>
                     <div class="stat" data-stat="sampling-rate">
-                        <span class="stat-value">100Hz</span>
-                        <span class="stat-label">Sampling Rate</span>
+                        <span class="stat-value">1s</span>
+                        <span class="stat-label">Update Interval</span>
                     </div>
                     <div class="stat" data-stat="accuracy">
-                        <span class="stat-value">87.2%</span>
-                        <span class="stat-label">Accuracy (AP@50)</span>
+                        <span class="stat-value">HAP</span>
+                        <span class="stat-label">Transport</span>
                     </div>
                     <div class="stat" data-stat="hardware-cost">
-                        <span class="stat-value">$30</span>
-                        <span class="stat-label">Hardware Cost</span>
+                        <span class="stat-value">Local</span>
+                        <span class="stat-label">Mode</span>
                     </div>
                 </div>
             </div>
@@ -175,46 +169,72 @@
         <!-- FP2 Monitor Tab -->
         <section id="fp2" class="tab-content">
             <h2>FP2 Presence Monitor</h2>
-            <p class="help-text">Live data from <code>/api/v1/fp2/current</code> and <code>/api/v1/fp2/ws</code>.</p>
+            <p class="help-text">A single live view bound to your paired Aqara FP2 over HomeKit/HAP. No entity selection, no cloud polling, no HA fallback controls.</p>
 
-            <div class="fp2-toolbar">
-                <button id="fp2Refresh" class="btn btn--secondary">Refresh</button>
-                <button id="fp2StreamToggle" class="btn btn--primary">Start Stream</button>
-                <select id="fp2EntitySelect" class="zone-select" style="min-width: 280px;"></select>
-                <button id="fp2EntityAuto" class="btn btn--secondary">Auto Select Entity</button>
+            <div class="fp2-toolbar fp2-toolbar--compact">
+                <button id="fp2Refresh" class="btn btn--secondary">Refresh Snapshot</button>
             </div>
 
-            <div class="fp2-grid">
-                <div class="fp2-card">
-                    <h3>State</h3>
+            <div class="fp2-grid fp2-grid--top">
+                <div class="fp2-card fp2-card--accent">
+                    <h3>Connection</h3>
                     <div class="fp2-kv"><span>API</span><span id="fp2ApiStatus" class="chip">-</span></div>
-                    <div class="fp2-kv"><span>Stream</span><span id="fp2StreamStatus" class="chip">disconnected</span></div>
-                    <div class="fp2-kv"><span>Entity</span><code id="fp2EntityId">-</code></div>
+                    <div class="fp2-kv"><span>HAP Link</span><span id="fp2StreamStatus" class="chip">OFFLINE</span></div>
+                    <div class="fp2-kv"><span>State</span><strong id="fp2ConnectionState">-</strong></div>
+                    <div class="fp2-kv"><span>Transport</span><strong id="fp2TransportValue">-</strong></div>
+                    <div class="fp2-kv"><span>Source</span><code id="fp2EntityId">hap_direct</code></div>
                     <div class="fp2-kv"><span>Last Update</span><span id="fp2UpdatedAt">-</span></div>
-                    <div class="fp2-kv"><span>Presence</span><span id="fp2PresenceValue" class="presence-pill absent">ABSENT</span></div>
                 </div>
 
                 <div class="fp2-card">
-                    <h3>Counters</h3>
-                    <div class="fp2-kv"><span>Persons</span><strong id="fp2PersonsCount">0</strong></div>
+                    <h3>Device</h3>
+                    <div class="fp2-device-title">
+                        <strong id="fp2DeviceName">Aqara FP2</strong>
+                        <span id="fp2DeviceModel">-</span>
+                    </div>
+                    <div class="fp2-kv"><span>Device ID</span><code id="fp2DeviceId">-</code></div>
+                    <div class="fp2-kv"><span>MAC</span><code id="fp2DeviceMac">-</code></div>
+                    <div class="fp2-kv"><span>Endpoint</span><code id="fp2DeviceIp">-</code></div>
+                    <div class="fp2-kv"><span>Pairing ID</span><code id="fp2PairingId">-</code></div>
+                    <div class="fp2-kv"><span>Room</span><strong id="fp2RoomValue">-</strong></div>
+                    <div class="fp2-kv"><span>Firmware</span><strong id="fp2FirmwareValue">-</strong></div>
+                    <div class="fp2-kv"><span>Network</span><strong id="fp2NetworkValue">-</strong></div>
+                </div>
+
+                <div class="fp2-card">
+                    <h3>Live Readings</h3>
+                    <div class="fp2-kv"><span>Presence</span><span id="fp2PresenceValue" class="presence-pill absent">ABSENT</span></div>
+                    <div class="fp2-kv"><span>Targets</span><strong id="fp2PersonsCount">0</strong></div>
                     <div class="fp2-kv"><span>Zones</span><strong id="fp2ZonesCount">0</strong></div>
-                    <div class="fp2-kv"><span>FP2 Entities in HA</span><strong id="fp2EntitiesCount">0</strong></div>
+                    <div class="fp2-kv"><span>Light</span><strong id="fp2LightLevel">-</strong></div>
                     <div class="fp2-kv"><span>Current Zone</span><strong id="fp2CurrentZone">-</strong></div>
+                    <div class="fp2-kv"><span>Last Packet</span><strong id="fp2LastPacketAge">-</strong></div>
                     <div class="fp2-kv"><span>Presence Duration</span><strong id="fp2PresenceDuration">0s</strong></div>
-                    <h4>Recent Presence Changes</h4>
+                </div>
+            </div>
+
+            <div class="fp2-card">
+                <h3>Zone Windows</h3>
+                <p class="help-text">Each window reflects one live occupancy channel reported by your FP2.</p>
+                <div id="fp2ZoneWindows" class="fp2-zone-windows"></div>
+            </div>
+
+            <div class="fp2-grid fp2-grid--events">
+                <div class="fp2-card">
+                    <h3>Recent Presence Changes</h3>
                     <ul id="fp2HistoryList" class="fp2-history-list"></ul>
                 </div>
+
+                <div class="fp2-card">
+                    <h3>Movement Events</h3>
+                    <p class="help-text">Detected ENTER, EXIT, and zone transitions from the direct FP2 stream.</p>
+                    <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
+                </div>
             </div>
 
             <div class="fp2-card">
-                <h3>Movement Events</h3>
-                <p class="help-text">Detected ENTER/EXIT and zone transitions from FP2 stream.</p>
-                <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
-            </div>
-
-            <div class="fp2-card">
-                <h3>Live Movement Map</h3>
-                <p class="help-text">Real-time FP2 movement canvas (zone-based projection).</p>
+                <h3>Movement Map</h3>
+                <p class="help-text">A live room view that highlights which FP2 zone is active right now.</p>
                 <canvas id="fp2MovementCanvas" width="960" height="260" style="width: 100%; height: 260px;"></canvas>
             </div>
 
@@ -228,325 +248,18 @@
                 </div>
             </div>
 
-            <div class="fp2-card">
-                <h3>Raw Payload</h3>
+            <details class="fp2-payload-details">
+                <summary>Raw Payload</summary>
                 <pre id="fp2RawOutput" class="fp2-raw-output">{}</pre>
-            </div>
+            </details>
         </section>
 
-        <!-- Hardware Tab -->
-        <section id="hardware" class="tab-content">
-            <h2>Hardware Configuration</h2>
-            
-            <div class="hardware-grid">
-                <div class="antenna-section">
-                    <h3>3×3 Antenna Array</h3>
-                    <p class="help-text">Click antennas to toggle their state</p>
-                    <div class="antenna-array">
-                        <div class="antenna-grid">
-                            <div class="antenna tx active" data-type="TX1"></div>
-                            <div class="antenna tx active" data-type="TX2"></div>
-                            <div class="antenna tx active" data-type="TX3"></div>
-                            <div class="antenna rx active" data-type="RX1"></div>
-                            <div class="antenna rx active" data-type="RX2"></div>
-                            <div class="antenna rx active" data-type="RX3"></div>
-                            <div class="antenna rx active" data-type="RX4"></div>
-                            <div class="antenna rx active" data-type="RX5"></div>
-                            <div class="antenna rx active" data-type="RX6"></div>
-                        </div>
-                        <div class="antenna-legend">
-                            <div class="legend-item">
-                                <div class="legend-color tx"></div>
-                                <span>Transmitters (3)</span>
-                            </div>
-                            <div class="legend-item">
-                                <div class="legend-color rx"></div>
-                                <span>Receivers (6)</span>
-                            </div>
-                        </div>
-                        <div class="array-status"></div>
-                    </div>
-                </div>
-
-                <div class="config-section">
-                    <h3>WiFi Configuration</h3>
-                    <div class="config-grid">
-                        <div class="config-item">
-                            <label>Frequency</label>
-                            <div class="config-value">2.4GHz ± 20MHz</div>
-                        </div>
-                        <div class="config-item">
-                            <label>Subcarriers</label>
-                            <div class="config-value">30</div>
-                        </div>
-                        <div class="config-item">
-                            <label>Sampling Rate</label>
-                            <div class="config-value">100 Hz</div>
-                        </div>
-                        <div class="config-item">
-                            <label>Total Cost</label>
-                            <div class="config-value">$30</div>
-                        </div>
-                    </div>
-
-                    <div class="csi-data">
-                        <h4>Real-time CSI Data</h4>
-                        <div class="csi-display">
-                            <div class="csi-row">
-                                <span>Amplitude:</span>
-                                <div class="csi-bar">
-                                    <div class="csi-fill amplitude" style="width: 75%"></div>
-                                </div>
-                                <span class="csi-value">0.75</span>
-                            </div>
-                            <div class="csi-row">
-                                <span>Phase:</span>
-                                <div class="csi-bar">
-                                    <div class="csi-fill phase" style="width: 60%"></div>
-                                </div>
-                                <span class="csi-value">1.2π</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Demo Tab -->
-        <section id="demo" class="tab-content">
-            <h2>Live Demonstration</h2>
-            
-            <div class="demo-controls">
-                <button id="startDemo" class="btn btn--primary">Start Stream</button>
-                <button id="stopDemo" class="btn btn--secondary" disabled>Stop Stream</button>
-                <div class="demo-status">
-                    <span class="status status--info" id="demoStatus">Ready</span>
-                </div>
-            </div>
-
-            <div class="demo-grid">
-                <div class="signal-panel">
-                    <h3>WiFi Signal Analysis</h3>
-                    <div class="signal-display">
-                        <canvas id="signalCanvas" width="400" height="200"></canvas>
-                    </div>
-                    <div class="signal-metrics">
-                        <div class="metric">
-                            <span>Signal Strength:</span>
-                            <span id="signalStrength">-45 dBm</span>
-                        </div>
-                        <div class="metric">
-                            <span>Processing Latency:</span>
-                            <span id="latency">12 ms</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="pose-panel">
-                    <h3>Human Pose Detection</h3>
-                    <div class="pose-display">
-                        <canvas id="poseCanvas" width="400" height="300"></canvas>
-                    </div>
-                    <div class="detection-info">
-                        <div class="info-item">
-                            <span>Persons Detected:</span>
-                            <span id="personCount">0</span>
-                        </div>
-                        <div class="info-item">
-                            <span>Confidence:</span>
-                            <span id="confidence">0.0%</span>
-                        </div>
-                        <div class="info-item">
-                            <span>Keypoints:</span>
-                            <span id="keypoints">0/0</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Architecture Tab -->
-        <section id="architecture" class="tab-content">
-            <h2>System Architecture</h2>
-            
-            <div class="architecture-flow">
-                <img src="https://pplx-res.cloudinary.com/image/upload/v1748813853/gpt4o_images/m7zztcttnue7vaxclvuw.png" 
-                     alt="WiFi DensePose Architecture" class="architecture-image">
-                
-                <div class="flow-steps">
-                    <div class="step-card" data-step="1">
-                        <div class="step-number">1</div>
-                        <h3>CSI Input</h3>
-                        <p>Channel State Information collected from WiFi antenna array</p>
-                    </div>
-                    <div class="step-card" data-step="2">
-                        <div class="step-number">2</div>
-                        <h3>Phase Sanitization</h3>
-                        <p>Remove hardware-specific noise and normalize signal phase</p>
-                    </div>
-                    <div class="step-card" data-step="3">
-                        <div class="step-number">3</div>
-                        <h3>Modality Translation</h3>
-                        <p>Convert WiFi signals to visual representation using CNN</p>
-                    </div>
-                    <div class="step-card" data-step="4">
-                        <div class="step-number">4</div>
-                        <h3>DensePose-RCNN</h3>
-                        <p>Extract human pose keypoints and body part segmentation</p>
-                    </div>
-                    <div class="step-card" data-step="5">
-                        <div class="step-number">5</div>
-                        <h3>Wireframe Output</h3>
-                        <p>Generate final human pose wireframe visualization</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Performance Tab -->
-        <section id="performance" class="tab-content">
-            <h2>Performance Analysis</h2>
-            
-            <div class="performance-chart">
-                <img src="https://pplx-res.cloudinary.com/image/upload/v1748813924/pplx_code_interpreter/af6ef268_nsauu6.jpg" 
-                     alt="Performance Comparison Chart" class="chart-image">
-            </div>
-
-            <div class="performance-grid">
-                <div class="performance-card">
-                    <h3>WiFi-based (Same Layout)</h3>
-                    <div class="metric-list">
-                        <div class="metric-item">
-                            <span>Average Precision:</span>
-                            <span class="metric-value">43.5%</span>
-                        </div>
-                        <div class="metric-item">
-                            <span>AP@50:</span>
-                            <span class="metric-value success">87.2%</span>
-                        </div>
-                        <div class="metric-item">
-                            <span>AP@75:</span>
-                            <span class="metric-value">44.6%</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="performance-card">
-                    <h3>Image-based (Reference)</h3>
-                    <div class="metric-list">
-                        <div class="metric-item">
-                            <span>Average Precision:</span>
-                            <span class="metric-value success">84.7%</span>
-                        </div>
-                        <div class="metric-item">
-                            <span>AP@50:</span>
-                            <span class="metric-value success">94.4%</span>
-                        </div>
-                        <div class="metric-item">
-                            <span>AP@75:</span>
-                            <span class="metric-value success">77.1%</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="limitations-section">
-                    <h3>Advantages & Limitations</h3>
-                    <div class="pros-cons">
-                        <div class="pros">
-                            <h4>Advantages</h4>
-                            <ul>
-                                <li>Through-wall detection</li>
-                                <li>Privacy preserving</li>
-                                <li>Lighting independent</li>
-                                <li>Low cost hardware</li>
-                                <li>Uses existing WiFi</li>
-                            </ul>
-                        </div>
-                        <div class="cons">
-                            <h4>Limitations</h4>
-                            <ul>
-                                <li>Performance drops in different layouts</li>
-                                <li>Requires WiFi-compatible devices</li>
-                                <li>Training requires synchronized data</li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Applications Tab -->
-        <section id="applications" class="tab-content">
-            <h2>Real-World Applications</h2>
-            
-            <div class="applications-grid">
-                <div class="app-card">
-                    <div class="app-icon">👴</div>
-                    <h3>Elderly Care Monitoring</h3>
-                    <p>Monitor elderly individuals for falls or emergencies without invading privacy. Track movement patterns and detect anomalies in daily routines.</p>
-                    <div class="app-features">
-                        <span class="feature-tag">Fall Detection</span>
-                        <span class="feature-tag">Activity Monitoring</span>
-                        <span class="feature-tag">Emergency Alert</span>
-                    </div>
-                </div>
-
-                <div class="app-card">
-                    <div class="app-icon">🏠</div>
-                    <h3>Home Security Systems</h3>
-                    <p>Detect intruders and monitor home security without visible cameras. Track multiple persons and identify suspicious movement patterns.</p>
-                    <div class="app-features">
-                        <span class="feature-tag">Intrusion Detection</span>
-                        <span class="feature-tag">Multi-person Tracking</span>
-                        <span class="feature-tag">Invisible Monitoring</span>
-                    </div>
-                </div>
-
-                <div class="app-card">
-                    <div class="app-icon">🏥</div>
-                    <h3>Healthcare Patient Monitoring</h3>
-                    <p>Monitor patients in hospitals and care facilities. Track vital signs through movement analysis and detect health emergencies.</p>
-                    <div class="app-features">
-                        <span class="feature-tag">Vital Sign Analysis</span>
-                        <span class="feature-tag">Movement Tracking</span>
-                        <span class="feature-tag">Health Alerts</span>
-                    </div>
-                </div>
-
-                <div class="app-card">
-                    <div class="app-icon">🏢</div>
-                    <h3>Smart Building Occupancy</h3>
-                    <p>Optimize building energy consumption by tracking occupancy patterns. Control lighting, HVAC, and security systems automatically.</p>
-                    <div class="app-features">
-                        <span class="feature-tag">Energy Optimization</span>
-                        <span class="feature-tag">Occupancy Tracking</span>
-                        <span class="feature-tag">Smart Controls</span>
-                    </div>
-                </div>
-
-                <div class="app-card">
-                    <div class="app-icon">🥽</div>
-                    <h3>AR/VR Applications</h3>
-                    <p>Enable full-body tracking for virtual and augmented reality applications without wearing additional sensors or cameras.</p>
-                    <div class="app-features">
-                        <span class="feature-tag">Full Body Tracking</span>
-                        <span class="feature-tag">Sensor-free</span>
-                        <span class="feature-tag">Immersive Experience</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="implementation-note">
-                <h3>Implementation Considerations</h3>
-                <p>While WiFi DensePose offers revolutionary capabilities, successful implementation requires careful consideration of environment setup, data privacy regulations, and system calibration for optimal performance.</p>
-            </div>
-        </section>
     </div>
 
     <!-- Error Toast -->
     <div id="globalErrorToast" class="error-toast"></div>
 
     <!-- Load application scripts as modules -->
-    <script type="module" src="app.js?v=20260301-fix6"></script>
+    <script type="module" src="app.js?v=20260307-fp2only5"></script>
 </body>
 </html>

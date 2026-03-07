@@ -20,7 +20,10 @@ export class FP2Service {
     this.baseUrls = [
       API_CONFIG.BASE_URL
     ].filter(Boolean);
-    this.selectedEntityId = localStorage.getItem('fp2_selected_entity_id') || null;
+    this.selectedEntityId = null;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem('fp2_selected_entity_id');
+    }
   }
 
   async requestWithFallback(path) {
@@ -49,10 +52,7 @@ export class FP2Service {
   }
 
   async getCurrent() {
-    const query = this.selectedEntityId
-      ? `?entity_id=${encodeURIComponent(this.selectedEntityId)}`
-      : '';
-    const data = await this.requestWithFallback(`${API_CONFIG.ENDPOINTS.FP2.CURRENT}${query}`);
+    const data = await this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.CURRENT);
     this.lastData = data;
     return data;
   }
@@ -66,16 +66,14 @@ export class FP2Service {
   }
 
   setSelectedEntity(entityId) {
-    this.selectedEntityId = entityId || null;
-    if (this.selectedEntityId) {
-      localStorage.setItem('fp2_selected_entity_id', this.selectedEntityId);
-    } else {
+    this.selectedEntityId = null;
+    if (typeof window !== 'undefined' && window.localStorage) {
       localStorage.removeItem('fp2_selected_entity_id');
     }
   }
 
   getSelectedEntity() {
-    return this.selectedEntityId;
+    return null;
   }
 
   async startStream() {
@@ -86,12 +84,8 @@ export class FP2Service {
     this.connectionState = 'connecting';
     this.notify({ type: 'connection_state', state: this.connectionState });
 
-    const wsPath = this.selectedEntityId
-      ? `${API_CONFIG.ENDPOINTS.FP2.WS}?entity_id=${encodeURIComponent(this.selectedEntityId)}`
-      : API_CONFIG.ENDPOINTS.FP2.WS;
-
     this.streamConnection = await wsService.connect(
-      wsPath,
+      API_CONFIG.ENDPOINTS.FP2.WS,
       {},
       {
         onOpen: () => {

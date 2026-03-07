@@ -1,17 +1,40 @@
 // API Configuration for WiFi-DensePose UI
 
+const RENDER_BACKEND_URL = 'https://wifi-densepose-qtgc.onrender.com';
+const LOCAL_BACKEND_URL = 'http://127.0.0.1:8000';
+
+function resolveBaseUrl() {
+  if (typeof window === 'undefined') {
+    return RENDER_BACKEND_URL;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const queryOverride = params.get('backend');
+  const storedOverride = window.localStorage.getItem('wifi_densepose_backend_url');
+
+  if (queryOverride) {
+    window.localStorage.setItem('wifi_densepose_backend_url', queryOverride);
+    return queryOverride;
+  }
+
+  if (storedOverride) {
+    return storedOverride;
+  }
+
+  const hostname = window.location.hostname;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return LOCAL_BACKEND_URL;
+  }
+
+  return RENDER_BACKEND_URL;
+}
+
 export const API_CONFIG = {
-  BASE_URL: 'https://wifi-densepose-qtgc.onrender.com',  // Render backend
+  BASE_URL: resolveBaseUrl(),
   API_VERSION: '/api/v1',
   WS_PREFIX: 'ws://',
   WSS_PREFIX: 'wss://',
-  
-  // Mock server configuration (only for testing)
-  MOCK_SERVER: {
-    ENABLED: false,  // Set to true only for testing without backend
-    AUTO_DETECT: false,  // Disabled: always use real backend in local FP2 mode
-  },
-  
+
   // API Endpoints
   ENDPOINTS: {
     // Root & Info
@@ -22,8 +45,8 @@ export const API_CONFIG = {
     
     // Health
     HEALTH: {
-      SYSTEM: '/health/health',
-      READY: '/health/ready',
+      SYSTEM: '/api/v1/health',
+      READY: '/api/v1/ready',
       LIVE: '/health/live',
       METRICS: '/health/metrics',
       VERSION: '/health/version'

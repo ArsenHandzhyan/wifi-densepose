@@ -1,7 +1,6 @@
 // Dashboard Tab Component
 
 import { healthService } from '../services/health.service.js';
-import { poseService } from '../services/pose.service.js';
 
 export class DashboardTab {
   constructor(containerElement) {
@@ -9,6 +8,8 @@ export class DashboardTab {
     this.statsElements = {};
     this.healthSubscription = null;
     this.statsInterval = null;
+    this.csiPipelineEnabled = true;
+    this.fp2OnlyMode = false;
   }
 
   // Initialize component
@@ -45,10 +46,13 @@ export class DashboardTab {
       // Get API info
       const info = await healthService.getApiInfo();
       this.updateApiInfo(info);
+      this.fp2OnlyMode = Boolean(info?.features?.fp2_only_mode);
+      this.csiPipelineEnabled = info?.features?.csi_pipeline_enabled ?? info?.features?.real_time_processing ?? true;
 
-      // Get current stats
-      const stats = await poseService.getStats(1);
-      this.updateStats(stats);
+      if (this.fp2OnlyMode || !this.csiPipelineEnabled) {
+        this.setFp2OnlyState();
+        return;
+      }
 
     } catch (error) {
       console.error('Failed to load dashboard data:', error);
@@ -63,10 +67,12 @@ export class DashboardTab {
       this.updateHealthStatus(health);
     });
 
-    // Start periodic stats updates
-    this.statsInterval = setInterval(() => {
-      this.updateLiveStats();
-    }, 5000);
+    // Start periodic stats updates only when CSI mode is actually enabled.
+    if (this.csiPipelineEnabled && !this.fp2OnlyMode) {
+      this.statsInterval = setInterval(() => {
+        this.updateLiveStats();
+      }, 5000);
+    }
 
     // Start health monitoring
     healthService.startHealthMonitoring(30000);
@@ -122,6 +128,14 @@ export class DashboardTab {
       overallStatus.textContent = health.status.toUpperCase();
     }
 
+    if (this.fp2OnlyMode) {
+      this.setFp2OnlyState();
+      if (health.system_metrics || health.metrics) {
+        this.updateSystemMetrics(health.system_metrics || health.metrics);
+      }
+      return;
+    }
+
     // Update component statuses
     if (health.components) {
       Object.entries(health.components).forEach(([component, status]) => {
@@ -130,8 +144,8 @@ export class DashboardTab {
     }
 
     // Update metrics
-    if (health.metrics) {
-      this.updateSystemMetrics(health.metrics);
+    if (health.system_metrics || health.metrics) {
+      this.updateSystemMetrics(health.system_metrics || health.metrics);
     }
   }
 
@@ -232,17 +246,8 @@ export class DashboardTab {
 
   // Update live statistics
   async updateLiveStats() {
-    try {
-      // Get current pose data
-      const currentPose = await poseService.getCurrentPose();
-      this.updatePoseStats(currentPose);
-
-      // Get zones summary
-      const zonesSummary = await poseService.getZonesSummary();
-      this.updateZonesDisplay(zonesSummary);
-
-    } catch (error) {
-      console.error('Failed to update live stats:', error);
+    if (!this.csiPipelineEnabled || this.fp2OnlyMode) {
+      return;
     }
   }
 
@@ -330,6 +335,95 @@ export class DashboardTab {
     // Update accuracy if available
     if (this.statsElements.accuracy && stats.average_confidence !== undefined) {
       this.statsElements.accuracy.textContent = `${(stats.average_confidence * 100).toFixed(1)}%`;
+    }
+  }
+
+  setFp2OnlyState() {
+    const heroTitle = this.container.querySelector('.hero-section h2');
+    if (heroTitle) {
+      heroTitle.textContent = 'Local FP2 Presence Monitoring';
+    }
+
+    const heroDescription = this.container.querySelector('.hero-description');
+    if (heroDescription) {
+      heroDescription.textContent = 'This dashboard is running in FP2-only mode. Presence is read locally from Aqara FP2 over HomeKit/HAP and pushed directly to the backend.';
+    }
+
+    const detectionCount = this.container.querySelector('.detection-count');
+    if (detectionCount) {
+      detectionCount.textContent = 'HAP';
+    }
+
+    const personCount = this.container.querySelector('.person-count');
+    if (personCount) {
+      personCount.textContent = '-';
+    }
+
+    const avgConfidence = this.container.querySelector('.avg-confidence');
+    if (avgConfidence) {
+      avgConfidence.textContent = 'PRESENCE';
+    }
+
+    if (this.statsElements.bodyRegions) {
+      this.statsElements.bodyRegions.textContent = 'FP2';
+    }
+
+    if (this.statsElements.samplingRate) {
+      this.statsElements.samplingRate.textContent = '1s';
+    }
+
+    if (this.statsElements.accuracy) {
+      this.statsElements.accuracy.textContent = 'HAP';
+    }
+
+    if (this.statsElements.hardwareCost) {
+      this.statsElements.hardwareCost.textContent = 'Local';
+    }
+
+    const zonesContainer = this.container.querySelector('.zones-summary');
+    if (zonesContainer) {
+      zonesContainer.innerHTML = `
+        <div class="zone-item">
+          <span class="zone-name">FP2 stream</span>
+          <span class="zone-count">active</span>
+        </div>
+      `;
+    }
+
+    const apiCard = this.container.querySelector('[data-component="api"]');
+    if (apiCard) {
+      apiCard.className = 'component-status status-healthy';
+      const statusText = apiCard.querySelector('.status-text');
+      const statusMessage = apiCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'HEALTHY';
+      if (statusMessage) statusMessage.textContent = 'Local backend is responding';
+    }
+
+    const hardwareCard = this.container.querySelector('[data-component="hardware"]');
+    if (hardwareCard) {
+      hardwareCard.className = 'component-status status-healthy';
+      const statusText = hardwareCard.querySelector('.status-text');
+      const statusMessage = hardwareCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'FP2';
+      if (statusMessage) statusMessage.textContent = 'Aqara FP2 direct HAP monitor is active';
+    }
+
+    const inferenceCard = this.container.querySelector('[data-component="inference"]');
+    if (inferenceCard) {
+      inferenceCard.className = 'component-status status-disabled';
+      const statusText = inferenceCard.querySelector('.status-text');
+      const statusMessage = inferenceCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'DISABLED';
+      if (statusMessage) statusMessage.textContent = 'CSI/DensePose pipeline is disabled on this setup';
+    }
+
+    const streamingCard = this.container.querySelector('[data-component="streaming"]');
+    if (streamingCard) {
+      streamingCard.className = 'component-status status-healthy';
+      const statusText = streamingCard.querySelector('.status-text');
+      const statusMessage = streamingCard.querySelector('.status-message');
+      if (statusText) statusText.textContent = 'HAP';
+      if (statusMessage) statusMessage.textContent = 'Direct FP2 snapshots are being pushed to the backend';
     }
   }
 

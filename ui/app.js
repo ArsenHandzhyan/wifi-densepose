@@ -1,14 +1,11 @@
-// WiFi DensePose Application - Main Entry Point
+// Aqara FP2 Local Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js';
-import { FP2Tab } from './components/FP2Tab.js?v=20260301-fix5';
-import { HardwareTab } from './components/HardwareTab.js';
-import { LiveDemoTab } from './components/LiveDemoTab.js';
+import { DashboardTab } from './components/DashboardTab.js?v=20260307-fp2only5';
+import { FP2Tab } from './components/FP2Tab.js?v=20260307-fp2only5';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
-import { backendDetector } from './utils/backend-detector.js';
 
 class WiFiDensePoseApp {
   constructor() {
@@ -19,7 +16,7 @@ class WiFiDensePoseApp {
   // Initialize application
   async init() {
     try {
-      console.log('Initializing WiFi DensePose UI...');
+      console.log('Initializing Aqara FP2 Local Monitor...');
       
       // Set up error handling
       this.setupErrorHandling();
@@ -34,7 +31,7 @@ class WiFiDensePoseApp {
       this.setupEventListeners();
       
       this.isInitialized = true;
-      console.log('WiFi DensePose UI initialized successfully');
+      console.log('Aqara FP2 Local Monitor initialized successfully');
       
     } catch (error) {
       console.error('Failed to initialize application:', error);
@@ -62,30 +59,15 @@ class WiFiDensePoseApp {
       return response;
     });
 
-    // Detect backend availability and initialize accordingly
-    const useMock = await backendDetector.shouldUseMockServer();
-    
-    if (useMock) {
-      console.log('🧪 Initializing with mock server for testing');
-      // Import and start mock server only when needed
-      const { mockServer } = await import('./utils/mock-server.js');
-      mockServer.start();
-      
-      // Show notification to user
-      this.showBackendStatus('Mock server active - testing mode', 'warning');
-    } else {
-      console.log('🔌 Initializing with real backend');
-      
-      // Verify backend is actually working
-      try {
-        const health = await healthService.checkLiveness();
-        console.log('✅ Backend is available and responding:', health);
-        this.showBackendStatus('Connected to real backend', 'success');
-      } catch (error) {
-        console.error('❌ Backend check failed:', error);
-        this.showBackendStatus('Backend connection failed', 'error');
-        // Don't throw - let the app continue and retry later
-      }
+    console.log('🔌 Initializing with real backend');
+
+    try {
+      const health = await healthService.checkLiveness();
+      console.log('✅ Backend is available and responding:', health);
+      this.showBackendStatus('Connected to real backend', 'success');
+    } catch (error) {
+      console.error('❌ Backend check failed:', error);
+      this.showBackendStatus('Backend connection failed', 'error');
     }
   }
 
@@ -120,7 +102,7 @@ class WiFiDensePoseApp {
       });
     }
 
-    // Hardware tab
+    // FP2 tab
     const fp2Container = document.getElementById('fp2');
     if (fp2Container) {
       this.components.fp2 = new FP2Tab(fp2Container);
@@ -128,51 +110,11 @@ class WiFiDensePoseApp {
         console.error('Failed to initialize FP2 tab:', error);
       });
     }
-
-    // Hardware tab
-    const hardwareContainer = document.getElementById('hardware');
-    if (hardwareContainer) {
-      this.components.hardware = new HardwareTab(hardwareContainer);
-      this.components.hardware.init();
-    }
-
-    // Live demo tab
-    const demoContainer = document.getElementById('demo');
-    if (demoContainer) {
-      this.components.demo = new LiveDemoTab(demoContainer);
-      this.components.demo.init();
-    }
-
-    // Architecture tab - static content, no component needed
-    
-    // Performance tab - static content, no component needed
-    
-    // Applications tab - static content, no component needed
   }
 
   // Handle tab changes
   handleTabChange(newTab, oldTab) {
     console.log(`Tab changed from ${oldTab} to ${newTab}`);
-    
-    // Stop demo if leaving demo tab
-    if (oldTab === 'demo' && this.components.demo) {
-      this.components.demo.stopDemo();
-    }
-    
-    // Update components based on active tab
-    switch (newTab) {
-      case 'dashboard':
-        // Dashboard auto-updates when visible
-        break;
-        
-      case 'hardware':
-        // Hardware visualization is always active
-        break;
-        
-      case 'demo':
-        // Demo starts manually
-        break;
-    }
   }
 
   // Set up global event listeners

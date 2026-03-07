@@ -1,6 +1,6 @@
 // FP2 Monitor Tab Component
 
-import { fp2Service } from '../services/fp2.service.js?v=20260301-fix5';
+import { fp2Service } from '../services/fp2.service.js?v=20260307-fixedfp2';
 
 export class FP2Tab {
   constructor(containerElement) {
@@ -8,8 +8,9 @@ export class FP2Tab {
     this.unsubscribe = null;
     this.pollTimer = null;
     this.durationTimer = null;
+    this.graphAnimationId = null;
     this.state = {
-      streamState: 'disconnected',
+      streamState: 'offline',
       apiEnabled: false,
       lastUpdate: null,
       history: [],
@@ -17,9 +18,9 @@ export class FP2Tab {
       currentZone: null,
       lastPresence: null,
       presenceStartedAt: null,
-      entities: [],
-      selectedEntity: fp2Service.getSelectedEntity(),
-      trajectories: []
+      zones: [],
+      device: null,
+      connection: null
     };
   }
 
@@ -31,10 +32,7 @@ export class FP2Tab {
 
     this.unsubscribe = fp2Service.subscribe((message) => this.handleMessage(message));
 
-    await this.loadEntitiesCount();
-    await this.autoSelectEntityIfNeeded();
     await this.refreshAll();
-    await this.startStreaming();
     this.startPolling();
     this.startDurationTicker();
   }
@@ -42,23 +40,33 @@ export class FP2Tab {
   cacheElements() {
     this.elements = {
       refreshBtn: this.container.querySelector('#fp2Refresh'),
-      streamBtn: this.container.querySelector('#fp2StreamToggle'),
-      entitySelect: this.container.querySelector('#fp2EntitySelect'),
-      entityAutoBtn: this.container.querySelector('#fp2EntityAuto'),
       apiStatus: this.container.querySelector('#fp2ApiStatus'),
       streamStatus: this.container.querySelector('#fp2StreamStatus'),
-      presenceValue: this.container.querySelector('#fp2PresenceValue'),
-      updatedAt: this.container.querySelector('#fp2UpdatedAt'),
+      connectionState: this.container.querySelector('#fp2ConnectionState'),
+      transportValue: this.container.querySelector('#fp2TransportValue'),
       entityId: this.container.querySelector('#fp2EntityId'),
+      updatedAt: this.container.querySelector('#fp2UpdatedAt'),
+      presenceValue: this.container.querySelector('#fp2PresenceValue'),
+      deviceName: this.container.querySelector('#fp2DeviceName'),
+      deviceModel: this.container.querySelector('#fp2DeviceModel'),
+      deviceId: this.container.querySelector('#fp2DeviceId'),
+      deviceMac: this.container.querySelector('#fp2DeviceMac'),
+      deviceIp: this.container.querySelector('#fp2DeviceIp'),
+      pairingId: this.container.querySelector('#fp2PairingId'),
+      roomValue: this.container.querySelector('#fp2RoomValue'),
+      networkValue: this.container.querySelector('#fp2NetworkValue'),
+      firmwareValue: this.container.querySelector('#fp2FirmwareValue'),
       personsCount: this.container.querySelector('#fp2PersonsCount'),
       zonesCount: this.container.querySelector('#fp2ZonesCount'),
-      entitiesCount: this.container.querySelector('#fp2EntitiesCount'),
+      lightLevel: this.container.querySelector('#fp2LightLevel'),
       currentZone: this.container.querySelector('#fp2CurrentZone'),
       presenceDuration: this.container.querySelector('#fp2PresenceDuration'),
+      lastPacketAge: this.container.querySelector('#fp2LastPacketAge'),
       historyList: this.container.querySelector('#fp2HistoryList'),
       movementList: this.container.querySelector('#fp2MovementList'),
       rawOutput: this.container.querySelector('#fp2RawOutput'),
-      movementCanvas: this.container.querySelector('#fp2MovementCanvas')
+      movementCanvas: this.container.querySelector('#fp2MovementCanvas'),
+      zoneWindows: this.container.querySelector('#fp2ZoneWindows')
     };
   }
 
@@ -68,32 +76,6 @@ export class FP2Tab {
         await this.refreshAll();
       });
     }
-
-    if (this.elements.streamBtn) {
-      this.elements.streamBtn.addEventListener('click', async () => {
-        if (this.state.streamState === 'connected' || this.state.streamState === 'connecting') {
-          fp2Service.stopStream();
-          this.updateStreamState('disconnected');
-        } else {
-          await this.startStreaming();
-        }
-      });
-    }
-
-    if (this.elements.entitySelect) {
-      this.elements.entitySelect.addEventListener('change', async () => {
-        const selected = this.elements.entitySelect.value || null;
-        this.state.selectedEntity = selected;
-        fp2Service.setSelectedEntity(selected);
-        await this.restartStreamAndRefresh();
-      });
-    }
-
-    if (this.elements.entityAutoBtn) {
-      this.elements.entityAutoBtn.addEventListener('click', async () => {
-        await this.autoSelectEntity();
-      });
-    }
   }
 
   initCanvas() {
@@ -101,15 +83,15 @@ export class FP2Tab {
     if (!canvas) {
       return;
     }
+
     this.canvasCtx = canvas.getContext('2d');
-    this.drawMovementMap(null);
+    this.drawMovementMap([], false);
   }
 
   async refreshAll() {
     await Promise.all([
       this.loadStatus(),
-      this.loadCurrent(),
-      this.loadEntitiesCount()
+      this.loadCurrent()
     ]);
   }
 
@@ -117,18 +99,38 @@ export class FP2Tab {
     try {
       const status = await fp2Service.getStatus();
       this.state.apiEnabled = Boolean(status.enabled);
+      this.state.device = status.device || null;
+      this.state.connection = status.connection || null;
+
       this.elements.apiStatus.textContent = this.state.apiEnabled ? 'Enabled' : 'Disabled';
       this.elements.apiStatus.className = `chip ${this.state.apiEnabled ? 'ok' : 'warn'}`;
 
-      // Show currently selected entity in UI; if none selected then backend default.
-      const selectedEntity = this.state.selectedEntity || status.entity_id || '-';
-      this.elements.entityId.textContent = selectedEntity;
-    } catch (_error) {
-      // Don't show Error if we already had successful data before
-      if (!this.state.apiEnabled) {
-        this.elements.apiStatus.textContent = 'Error';
-        this.elements.apiStatus.className = 'chip err';
+      this.updateStreamState(status.hap_connected ? 'live' : 'offline');
+      this.elements.entityId.textContent = status.entity_id || 'hap_direct';
+      this.elements.transportValue.textContent = this.formatTransport(
+        status.connection?.transport || status.device?.transport
+      );
+      this.elements.connectionState.textContent = this.formatConnectionState(status.connection?.state);
+
+      this.renderDevice(status.device);
+
+      const statusZones = this.normalizeZones(status.connection?.zones || []);
+      if (statusZones.length > 0) {
+        this.state.zones = statusZones;
+        this.renderZoneWindows(statusZones, this.state.currentZone);
       }
+
+      if (typeof status.connection?.light_level === 'number') {
+        this.elements.lightLevel.textContent = `${Math.round(status.connection.light_level)} lux`;
+      }
+      if (typeof status.connection?.last_update_age_sec === 'number') {
+        this.elements.lastPacketAge.textContent = `${status.connection.last_update_age_sec.toFixed(1)}s`;
+      }
+    } catch (error) {
+      console.error('Failed to load FP2 status:', error);
+      this.elements.apiStatus.textContent = 'Error';
+      this.elements.apiStatus.className = 'chip err';
+      this.updateStreamState('offline');
     }
   }
 
@@ -138,114 +140,6 @@ export class FP2Tab {
       this.renderCurrent(data);
     } catch (error) {
       console.error('Failed to load FP2 current data:', error);
-    }
-  }
-
-  async loadEntitiesCount() {
-    try {
-      const entities = await fp2Service.getEntities();
-      this.state.entities = entities.entities || [];
-      this.elements.entitiesCount.textContent = String(entities.count ?? 0);
-      this.populateEntitySelector();
-    } catch (_error) {
-      this.elements.entitiesCount.textContent = '-';
-    }
-  }
-
-  populateEntitySelector() {
-    const select = this.elements.entitySelect;
-    if (!select) {
-      return;
-    }
-
-    const current = this.state.selectedEntity || '';
-    select.innerHTML = '';
-
-    const defaultOption = document.createElement('option');
-    defaultOption.value = '';
-    defaultOption.textContent = 'Default (.env FP2_ENTITY_ID)';
-    select.appendChild(defaultOption);
-
-    this.state.entities.forEach((entity) => {
-      const option = document.createElement('option');
-      option.value = entity.entity_id;
-      const friendly = entity.attributes?.friendly_name || entity.entity_id;
-      option.textContent = `${friendly} (${entity.entity_id})`;
-      select.appendChild(option);
-    });
-
-    select.value = current;
-  }
-
-  async autoSelectEntityIfNeeded() {
-    if (this.state.selectedEntity) {
-      return;
-    }
-    await this.autoSelectEntity({ silent: true });
-  }
-
-  async autoSelectEntity({ silent = false } = {}) {
-    try {
-      const result = await fp2Service.getRecommendedEntity();
-      const recommended = result?.recommended_entity_id || null;
-      if (recommended) {
-        this.state.selectedEntity = recommended;
-        fp2Service.setSelectedEntity(recommended);
-        this.populateEntitySelector();
-        if (!silent) {
-          console.info('[FP2] Auto-selected entity:', recommended);
-        }
-        await this.restartStreamAndRefresh();
-      }
-    } catch (error) {
-      if (!silent) {
-        console.warn('[FP2] Auto-select failed:', error);
-      }
-    }
-  }
-
-  async restartStreamAndRefresh() {
-    fp2Service.stopStream();
-    this.updateStreamState('disconnected');
-    await this.refreshAll();
-    await this.startStreaming();
-  }
-
-  async startStreaming() {
-    // WebSocket не поддерживается на Render free tier — используем REST polling
-    this.updateStreamState('polling');
-  }
-
-  startPolling() {
-    this.stopPolling();
-    this.pollTimer = setInterval(async () => {
-      await this.loadStatus();
-      if (this.state.streamState !== 'connected') {
-        await this.loadCurrent();
-      }
-    }, 4000);
-  }
-
-  stopPolling() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-  }
-
-  startDurationTicker() {
-    this.stopDurationTicker();
-    this.durationTimer = setInterval(() => {
-      if (this.elements.presenceDuration) {
-        this.elements.presenceDuration.textContent = this.getPresenceDuration();
-      }
-    }, 1000);
-  }
-
-  stopDurationTicker() {
-    if (this.durationTimer) {
-      clearInterval(this.durationTimer);
-      this.durationTimer = null;
     }
   }
 
@@ -262,82 +156,292 @@ export class FP2Tab {
 
   updateStreamState(state) {
     this.state.streamState = state;
-    this.elements.streamStatus.textContent = state;
-    const cls = state === 'connected' ? 'ok'
-              : state === 'error'    ? 'err'
-              : 'warn';
-    this.elements.streamStatus.className = `chip ${cls}`;
 
-    if (this.elements.streamBtn) {
-      this.elements.streamBtn.textContent = state === 'connected' ? 'Stop Stream' : 'Start Stream';
-    }
+    const label = state === 'live'
+      ? 'live'
+      : state === 'connected'
+        ? 'connected'
+        : state === 'polling'
+          ? 'polling'
+          : state === 'error'
+            ? 'error'
+            : 'offline';
+
+    const cls = label === 'live' || label === 'connected'
+      ? 'ok'
+      : label === 'error'
+        ? 'err'
+        : 'warn';
+
+    this.elements.streamStatus.textContent = label.toUpperCase();
+    this.elements.streamStatus.className = `chip ${cls}`;
+  }
+
+  renderDevice(device) {
+    const wifi = device?.wifi || {};
+    this.elements.deviceName.textContent = device?.name || 'Aqara FP2';
+    this.elements.deviceModel.textContent = device?.model || '-';
+    this.elements.deviceId.textContent = device?.device_id || '-';
+    this.elements.deviceMac.textContent = device?.mac_address || '-';
+    this.elements.deviceIp.textContent = this.formatEndpoint(device?.ip_address, device?.hap_port);
+    this.elements.pairingId.textContent = device?.pairing_id || '-';
+    this.elements.roomValue.textContent = device?.room || '-';
+    this.elements.firmwareValue.textContent = device?.firmware || '-';
+    this.elements.networkValue.textContent = this.formatNetworkInfo(wifi);
   }
 
   renderCurrent(data) {
-    const presence = Boolean(data?.metadata?.presence);
-    this.elements.presenceValue.textContent = presence ? 'PRESENT' : 'ABSENT';
-    this.elements.presenceValue.className = `presence-pill ${presence ? 'present' : 'absent'}`;
-    
-    // Update real-time graph
-    this.updateGraphData(presence);
-
+    const metadata = data?.metadata || {};
+    const rawAttributes = metadata.raw_attributes || {};
+    const available = metadata.available !== false;
+    const presence = Boolean(metadata.presence);
     const persons = Array.isArray(data?.persons) ? data.persons : [];
-    const personsCount = persons.length;
-    const zonesCount = data?.zone_summary ? Object.keys(data.zone_summary).length : 0;
-    const currentZone = this.detectCurrentZone(data);
+    const zones = this.getZoneStates(data);
+    const currentZone = this.detectCurrentZone(data, zones);
+    const packetAge = this.getPacketAge(rawAttributes.push_time);
+    const timestampLabel = this.formatTimestamp(data?.timestamp);
 
-    this.elements.personsCount.textContent = String(personsCount);
-    this.elements.zonesCount.textContent = String(zonesCount);
+    this.state.zones = zones;
+    this.state.lastUpdate = timestampLabel;
+
+    this.elements.entityId.textContent = metadata.entity_id || 'hap_direct';
+    this.elements.updatedAt.textContent = timestampLabel;
+    this.elements.presenceValue.textContent = available
+      ? (presence ? 'PRESENT' : 'ABSENT')
+      : 'UNAVAILABLE';
+    this.elements.presenceValue.className = `presence-pill ${available && presence ? 'present' : 'absent'}`;
+
+    this.elements.personsCount.textContent = String(persons.length);
+    this.elements.zonesCount.textContent = String(zones.length);
     this.elements.currentZone.textContent = currentZone || '-';
+    this.elements.lastPacketAge.textContent = packetAge;
 
-    this.elements.updatedAt.textContent = new Date().toLocaleTimeString();
+    if (typeof rawAttributes.light_level === 'number') {
+      this.elements.lightLevel.textContent = `${Math.round(rawAttributes.light_level)} lux`;
+    } else if (!this.elements.lightLevel.textContent.trim()) {
+      this.elements.lightLevel.textContent = '-';
+    }
+
     this.elements.rawOutput.textContent = JSON.stringify(data, null, 2);
 
-    const ts = new Date().toLocaleTimeString();
-    this.trackMovement({
-      timestamp: ts,
-      presence,
-      zone: currentZone
-    });
+    this.updateGraphData(available && presence);
+    this.renderZoneWindows(zones, currentZone);
+    this.drawMovementMap(zones, available && presence);
 
-    if (presence && !this.state.presenceStartedAt) {
+    if (available && presence && !this.state.presenceStartedAt) {
       this.state.presenceStartedAt = Date.now();
     }
-    if (!presence) {
+    if (!available || !presence) {
       this.state.presenceStartedAt = null;
     }
     this.elements.presenceDuration.textContent = this.getPresenceDuration();
 
-    this.state.lastUpdate = ts;
-
-    // Записываем в историю только при смене состояния
-    if (this.state.lastPresence !== presence) {
-      this.pushHistory({ timestamp: ts, presence });
+    const currentPresenceState = available ? presence : null;
+    if (this.state.lastPresence !== currentPresenceState) {
+      this.pushHistory({ timestamp: timestampLabel, presence: currentPresenceState });
     }
 
-    this.updateTrajectory(data);
-    this.drawMovementMap(data);
+    this.trackMovement({
+      timestamp: timestampLabel,
+      presence: available && presence,
+      zone: currentZone
+    });
   }
 
-  detectCurrentZone(data) {
+  getZoneStates(data) {
+    const rawZones = data?.metadata?.raw_attributes?.zones;
+    if (Array.isArray(rawZones) && rawZones.length > 0) {
+      return this.normalizeZones(rawZones);
+    }
+
+    const zoneSummary = data?.zone_summary || {};
+    const summaryZones = Object.entries(zoneSummary).map(([zoneId, targetCount], index) => ({
+      zone_id: zoneId,
+      name: zoneId,
+      occupied: Number(targetCount) > 0,
+      target_count: Number(targetCount) || 0,
+      index
+    }));
+    if (summaryZones.length > 0) {
+      return this.normalizeZones(summaryZones);
+    }
+
+    if (this.state.zones.length > 0) {
+      return this.state.zones;
+    }
+
+    return [
+      {
+        zone_id: 'detection_area',
+        name: 'Detection Area',
+        displayName: 'Detection Area',
+        occupied: Boolean(data?.metadata?.presence),
+        target_count: Boolean(data?.metadata?.presence) ? 1 : 0
+      }
+    ];
+  }
+
+  normalizeZones(zones) {
+    return zones.map((zone, index) => {
+      const zoneId = zone.zone_id || zone.id || `zone_${index + 1}`;
+      const targetCount = Number(zone.target_count ?? zone.count ?? (zone.occupied ? 1 : 0)) || 0;
+      return {
+        zone_id: zoneId,
+        name: zone.name || zoneId,
+        displayName: this.formatZoneName(zoneId, index),
+        occupied: Boolean(zone.occupied),
+        target_count: targetCount,
+        service_iid: zone.service_iid || null
+      };
+    });
+  }
+
+  detectCurrentZone(data, zones) {
     const personZone = Array.isArray(data?.persons) && data.persons.length > 0
       ? data.persons[0]?.zone_id
       : null;
     if (personZone) {
-      return personZone;
+      return this.displayZoneName(personZone, zones);
     }
 
-    const zoneSummary = data?.zone_summary;
-    if (zoneSummary && typeof zoneSummary === 'object') {
-      const zones = Object.entries(zoneSummary);
-      if (zones.length > 0) {
-        zones.sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0));
-        return zones[0][0];
-      }
+    const occupiedZone = zones.find((zone) => zone.occupied);
+    if (occupiedZone) {
+      return occupiedZone.displayName;
     }
 
     const attrs = data?.metadata?.raw_attributes || {};
-    return attrs.current_zone || attrs.zone || null;
+    if (attrs.current_zone) {
+      return this.displayZoneName(attrs.current_zone, zones);
+    }
+
+    return null;
+  }
+
+  displayZoneName(zoneId, zones) {
+    const match = zones.find((zone) => zone.zone_id === zoneId || zone.name === zoneId);
+    return match?.displayName || zoneId;
+  }
+
+  formatZoneName(zoneId, index) {
+    if (!zoneId) {
+      return `Zone ${index + 1}`;
+    }
+
+    if (/^occupancy_\d+$/i.test(zoneId)) {
+      return `Zone ${index + 1}`;
+    }
+
+    return zoneId
+      .replace(/^zone[_-]?/i, 'Zone ')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  formatTransport(transport) {
+    if (!transport) {
+      return 'HAP direct';
+    }
+
+    return String(transport)
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  formatConnectionState(state) {
+    if (!state) {
+      return '-';
+    }
+
+    if (state === 'live') {
+      return 'Direct live link';
+    }
+
+    if (state === 'waiting_for_hap_push') {
+      return 'Waiting for sensor updates';
+    }
+
+    return String(state)
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  formatEndpoint(ipAddress, port) {
+    if (!ipAddress) {
+      return '-';
+    }
+
+    return port ? `${ipAddress}:${port}` : ipAddress;
+  }
+
+  formatNetworkInfo(wifi) {
+    const parts = [];
+    if (wifi.ssid) {
+      parts.push(wifi.ssid);
+    }
+    if (wifi.channel && wifi.channel !== '-') {
+      parts.push(`ch ${wifi.channel}`);
+    }
+    if (wifi.signal_strength && wifi.signal_strength !== '-') {
+      parts.push(`${wifi.signal_strength} dBm`);
+    }
+
+    return parts.join(' · ') || '-';
+  }
+
+  formatTimestamp(timestamp) {
+    if (!timestamp) {
+      return new Date().toLocaleTimeString();
+    }
+
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+      return new Date().toLocaleTimeString();
+    }
+
+    return date.toLocaleTimeString();
+  }
+
+  getPacketAge(pushTime) {
+    if (!Number.isFinite(pushTime)) {
+      return '-';
+    }
+
+    const ageSec = Math.max(0, Date.now() / 1000 - pushTime);
+    return `${ageSec.toFixed(ageSec < 10 ? 1 : 0)}s`;
+  }
+
+  renderZoneWindows(zones, currentZone) {
+    const container = this.elements.zoneWindows;
+    if (!container) {
+      return;
+    }
+
+    if (!zones.length) {
+      container.innerHTML = '<div class="fp2-zone-window fp2-zone-window--empty">No zone telemetry yet</div>';
+      return;
+    }
+
+    container.innerHTML = zones.map((zone) => {
+      const isCurrent = currentZone && zone.displayName === currentZone;
+      return `
+        <article class="fp2-zone-window ${zone.occupied ? 'active' : ''} ${isCurrent ? 'current' : ''}">
+          <div class="fp2-zone-window-header">
+            <h4>${zone.displayName}</h4>
+            <span class="fp2-zone-window-status">${zone.occupied ? 'MOTION' : 'IDLE'}</span>
+          </div>
+          <div class="fp2-zone-window-body">
+            <span class="fp2-zone-window-count">${zone.target_count || 0}</span>
+            <span class="fp2-zone-window-label">targets</span>
+          </div>
+          <div class="fp2-zone-window-meta">
+            <span>${zone.zone_id}</span>
+            <span>${zone.occupied ? 'occupied' : 'clear'}</span>
+          </div>
+        </article>
+      `;
+    }).join('');
   }
 
   trackMovement(event) {
@@ -346,9 +450,8 @@ export class FP2Tab {
 
     if (prevPresence === null) {
       this.state.lastPresence = event.presence;
-      this.state.currentZone = event.zone;
       if (event.presence) {
-        this.pushMovementEvent(event.timestamp, 'enter', `Detected in ${event.zone || 'unknown zone'}`);
+        this.pushMovementEvent(event.timestamp, 'enter', `Motion detected in ${event.zone || 'detection area'}`);
       }
       return;
     }
@@ -360,7 +463,6 @@ export class FP2Tab {
     } else if (event.presence && prevZone && event.zone && prevZone !== event.zone) {
       this.pushMovementEvent(event.timestamp, 'move', `${prevZone} -> ${event.zone}`);
     }
-    // Не пишем PRESENCE при каждом poll — только реальные события
 
     this.state.lastPresence = event.presence;
     this.state.currentZone = event.zone;
@@ -376,16 +478,17 @@ export class FP2Tab {
     if (!this.elements.movementList) {
       return;
     }
+
     this.elements.movementList.innerHTML = '';
     this.state.movementHistory.forEach((entry) => {
-      const li = document.createElement('li');
-      li.className = 'fp2-history-item';
-      li.innerHTML = `
+      const item = document.createElement('li');
+      item.className = 'fp2-history-item';
+      item.innerHTML = `
         <span>${entry.timestamp}</span>
         <span>${entry.text}</span>
         <strong class="fp2-event fp2-event-${entry.type}">${entry.type.toUpperCase()}</strong>
       `;
-      this.elements.movementList.appendChild(li);
+      this.elements.movementList.appendChild(item);
     });
   }
 
@@ -393,12 +496,15 @@ export class FP2Tab {
     if (!this.state.presenceStartedAt) {
       return '0s';
     }
+
     const diffSec = Math.max(0, Math.floor((Date.now() - this.state.presenceStartedAt) / 1000));
     const min = Math.floor(diffSec / 60);
     const sec = diffSec % 60;
+
     if (min === 0) {
       return `${sec}s`;
     }
+
     return `${min}m ${sec}s`;
   }
 
@@ -408,230 +514,242 @@ export class FP2Tab {
 
     this.elements.historyList.innerHTML = '';
     this.state.history.forEach((entry) => {
-      const li = document.createElement('li');
-      li.className = 'fp2-history-item';
-      li.innerHTML = `
+      const itemElement = document.createElement('li');
+      itemElement.className = 'fp2-history-item';
+      itemElement.innerHTML = `
         <span>${entry.timestamp}</span>
-        <strong class="${entry.presence ? 'ok' : 'muted'}">${entry.presence ? 'PRESENT' : 'ABSENT'}</strong>
+        <strong class="${entry.presence === null ? 'err' : entry.presence ? 'ok' : 'muted'}">
+          ${entry.presence === null ? 'UNAVAILABLE' : entry.presence ? 'PRESENT' : 'ABSENT'}
+        </strong>
       `;
-      this.elements.historyList.appendChild(li);
+      this.elements.historyList.appendChild(itemElement);
     });
   }
 
-  updateTrajectory(data) {
-    const people = Array.isArray(data?.persons) ? data.persons : [];
-    if (people.length === 0) {
-      return;
-    }
-
-    const zoneKeys = Object.keys(data?.zone_summary || {});
-    const zoneIndex = {};
-    zoneKeys.forEach((zone, i) => {
-      zoneIndex[zone] = i;
-    });
-
-    people.forEach((person, idx) => {
-      const bb = person?.bounding_box || {};
-      let x = Number.isFinite(bb.x) ? bb.x : null;
-      let y = Number.isFinite(bb.y) ? bb.y : null;
-
-      if (x === null || y === null) {
-        const zid = person.zone_id || this.state.currentZone;
-        const zi = zid && zoneIndex[zid] !== undefined ? zoneIndex[zid] : idx;
-        x = 0.15 + (zi % 6) * 0.14;
-        y = 0.5;
-      }
-
-      this.state.trajectories.push({
-        x: Math.max(0, Math.min(1, x)),
-        y: Math.max(0, Math.min(1, y)),
-        personId: person.person_id || `p${idx + 1}`,
-        ts: Date.now()
-      });
-    });
-
-    // Keep recent points only.
-    this.state.trajectories = this.state.trajectories.filter((p) => (Date.now() - p.ts) < 30000);
-  }
-
-  drawMovementMap(data) {
+  drawMovementMap(zones, presence) {
     const canvas = this.elements.movementCanvas;
     const ctx = this.canvasCtx;
     if (!canvas || !ctx) {
       return;
     }
 
-    const w = canvas.width;
-    const h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
+    const zoneList = zones.length > 0
+      ? zones
+      : [{ displayName: 'Detection Area', zone_id: 'detection_area', occupied: presence, target_count: presence ? 1 : 0 }];
+    const width = canvas.width;
+    const height = canvas.height;
 
-    // Grid
-    ctx.strokeStyle = 'rgba(90,110,130,0.24)';
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 8; i += 1) {
-      const x = (w / 8) * i;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-    }
-    for (let j = 1; j < 4; j += 1) {
-      const y = (h / 4) * j;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
-      ctx.stroke();
-    }
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#101722';
+    ctx.fillRect(0, 0, width, height);
 
-    // Zone labels
-    const zones = Object.keys(data?.zone_summary || {});
-    ctx.font = '12px monospace';
-    ctx.fillStyle = 'rgba(170,200,220,0.85)';
-    zones.forEach((zone, i) => {
-      const x = 12 + i * 130;
-      ctx.fillText(zone, x, 18);
-    });
+    const gap = 18;
+    const padding = 24;
+    const zoneWidth = Math.max(140, (width - padding * 2 - gap * (zoneList.length - 1)) / zoneList.length);
+    const zoneHeight = height - padding * 2;
 
-    // Draw trajectories
-    this.state.trajectories.forEach((point) => {
-      const age = Date.now() - point.ts;
-      const alpha = Math.max(0.15, 1 - age / 30000);
-      const px = Math.floor(point.x * (w - 20)) + 10;
-      const py = Math.floor(point.y * (h - 20)) + 10;
+    zoneList.forEach((zone, index) => {
+      const x = padding + index * (zoneWidth + gap);
+      const y = padding;
+      const active = Boolean(zone.occupied);
 
-      ctx.fillStyle = `rgba(40, 220, 180, ${alpha.toFixed(2)})`;
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      this.drawRoundedRect(ctx, x, y, zoneWidth, zoneHeight, 18);
+      ctx.fillStyle = active ? 'rgba(74, 222, 128, 0.18)' : 'rgba(148, 163, 184, 0.08)';
       ctx.fill();
+      ctx.lineWidth = active ? 2 : 1;
+      ctx.strokeStyle = active ? 'rgba(74, 222, 128, 0.9)' : 'rgba(148, 163, 184, 0.25)';
+      ctx.stroke();
+
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = '600 16px sans-serif';
+      ctx.fillText(zone.displayName, x + 18, y + 30);
+
+      ctx.fillStyle = active ? 'rgba(134, 239, 172, 0.95)' : 'rgba(148, 163, 184, 0.85)';
+      ctx.font = '12px monospace';
+      ctx.fillText(zone.zone_id, x + 18, y + 50);
+
+      ctx.fillStyle = active ? '#4ade80' : '#64748b';
+      ctx.font = '700 28px sans-serif';
+      ctx.fillText(active ? 'MOTION' : 'IDLE', x + 18, y + 98);
+
+      ctx.fillStyle = '#cbd5e1';
+      ctx.font = '13px sans-serif';
+      ctx.fillText(`${zone.target_count || 0} target(s)`, x + 18, y + 126);
+
+      if (active) {
+        const pulseX = x + zoneWidth - 58;
+        const pulseY = y + zoneHeight / 2;
+        const pulseRadius = 18 + Math.sin(Date.now() / 240) * 5;
+
+        ctx.strokeStyle = 'rgba(74, 222, 128, 0.35)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(pulseX, pulseY, pulseRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(74, 222, 128, 0.9)';
+        ctx.beginPath();
+        ctx.arc(pulseX, pulseY, 9, 0, Math.PI * 2);
+        ctx.fill();
+      }
     });
 
-    // Current presence marker
-    if (this.state.lastPresence) {
-      ctx.fillStyle = 'rgba(90, 255, 140, 0.9)';
-      ctx.fillText('PRESENT', w - 90, 20);
-    } else {
-      ctx.fillStyle = 'rgba(255, 110, 110, 0.9)';
-      ctx.fillText('ABSENT', w - 80, 20);
-    }
+    ctx.fillStyle = presence ? 'rgba(74, 222, 128, 0.95)' : 'rgba(248, 113, 113, 0.95)';
+    ctx.font = '700 14px monospace';
+    ctx.fillText(presence ? 'LIVE MOTION' : 'ROOM CLEAR', width - 128, 22);
   }
 
-  // Real-time graph initialization
+  drawRoundedRect(ctx, x, y, width, height, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+  }
+
   initRealtimeGraph() {
     const canvas = this.container.querySelector('#fp2RealtimeGraph');
-    if (!canvas) return;
-    
+    if (!canvas) {
+      return;
+    }
+
     this.graphCanvas = canvas;
     this.graphCtx = canvas.getContext('2d');
-    this.graphData = []; // Array of {timestamp, presence}
-    this.maxGraphPoints = 120; // 60 seconds at 0.5s interval
-    
+    this.graphData = [];
+    this.maxGraphPoints = 120;
     this.startGraphAnimation();
   }
-  
+
   startGraphAnimation() {
-    if (this.graphAnimationId) return;
-    
+    if (this.graphAnimationId) {
+      return;
+    }
+
     const animate = () => {
       this.drawRealtimeGraph();
       this.graphAnimationId = requestAnimationFrame(animate);
     };
     animate();
   }
-  
+
   stopGraphAnimation() {
     if (this.graphAnimationId) {
       cancelAnimationFrame(this.graphAnimationId);
       this.graphAnimationId = null;
     }
   }
-  
+
   updateGraphData(presence) {
     const now = Date.now();
     this.graphData.push({
       timestamp: now,
       presence: presence ? 1 : 0
     });
-    
-    // Keep only recent data
+
     if (this.graphData.length > this.maxGraphPoints) {
       this.graphData.shift();
     }
   }
-  
+
   drawRealtimeGraph() {
     const canvas = this.graphCanvas;
     const ctx = this.graphCtx;
-    if (!canvas || !ctx) return;
-    
-    const w = canvas.width;
-    const h = canvas.height;
-    
-    // Clear canvas
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, w, h);
-    
-    // Draw grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    if (!canvas || !ctx) {
+      return;
+    }
+
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.fillStyle = '#101722';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = 1;
-    for (let i = 0; i < 5; i++) {
-      const y = (h / 4) * i;
+    for (let index = 0; index < 5; index += 1) {
+      const y = (height / 4) * index;
       ctx.beginPath();
       ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
+      ctx.lineTo(width, y);
       ctx.stroke();
     }
-    
-    // Draw time labels
+
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.font = '10px sans-serif';
     ctx.fillText('Present', 8, 15);
-    ctx.fillText('Absent', 8, h - 5);
-    
-    if (this.graphData.length < 2) return;
-    
-    // Draw presence line
+    ctx.fillText('Absent', 8, height - 6);
+
+    if (this.graphData.length < 2) {
+      return;
+    }
+
+    const xStep = width / this.maxGraphPoints;
     ctx.strokeStyle = '#4ade80';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    
-    const xStep = w / this.maxGraphPoints;
-    
-    this.graphData.forEach((point, i) => {
-      const x = i * xStep;
-      const y = point.presence ? 30 : h - 20;
-      
-      if (i === 0) {
+
+    this.graphData.forEach((point, index) => {
+      const x = index * xStep;
+      const y = point.presence ? 30 : height - 20;
+      if (index === 0) {
         ctx.moveTo(x, y);
       } else {
         ctx.lineTo(x, y);
       }
     });
-    
     ctx.stroke();
-    
-    // Fill area under line
-    ctx.fillStyle = 'rgba(74, 222, 128, 0.2)';
+
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.18)';
     ctx.beginPath();
-    ctx.moveTo(0, h);
-    this.graphData.forEach((point, i) => {
-      const x = i * xStep;
-      const y = point.presence ? 30 : h - 20;
+    ctx.moveTo(0, height);
+    this.graphData.forEach((point, index) => {
+      const x = index * xStep;
+      const y = point.presence ? 30 : height - 20;
       ctx.lineTo(x, y);
     });
-    ctx.lineTo((this.graphData.length - 1) * xStep, h);
+    ctx.lineTo((this.graphData.length - 1) * xStep, height);
     ctx.closePath();
     ctx.fill();
-    
-    // Draw current indicator
-    if (this.graphData.length > 0) {
-      const last = this.graphData[this.graphData.length - 1];
-      const x = (this.graphData.length - 1) * xStep;
-      const y = last.presence ? 30 : h - 20;
-      
-      ctx.fillStyle = last.presence ? '#4ade80' : '#6b7280';
-      ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI * 2);
-      ctx.fill();
+
+    const last = this.graphData[this.graphData.length - 1];
+    const lastX = (this.graphData.length - 1) * xStep;
+    const lastY = last.presence ? 30 : height - 20;
+    ctx.fillStyle = last.presence ? '#4ade80' : '#94a3b8';
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  startPolling() {
+    this.stopPolling();
+    this.pollTimer = setInterval(async () => {
+      await this.refreshAll();
+    }, 2000);
+  }
+
+  stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  startDurationTicker() {
+    this.stopDurationTicker();
+    this.durationTimer = setInterval(() => {
+      this.elements.presenceDuration.textContent = this.getPresenceDuration();
+    }, 1000);
+  }
+
+  stopDurationTicker() {
+    if (this.durationTimer) {
+      clearInterval(this.durationTimer);
+      this.durationTimer = null;
     }
   }
 

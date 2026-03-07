@@ -12,13 +12,16 @@ The authoritative runtime path on this machine is:
    The current verified runtime status, architecture, limits, and local commands.
 
 2. [`FP2_INTEGRATION_FINAL_STATUS.md`](FP2_INTEGRATION_FINAL_STATUS.md)
-   Historical investigation summary explaining why the project was narrowed to direct HAP.
+   Historical investigation summary explaining why the project was narrowed from multiple experimental paths to the current FP2 monitor.
+
+3. [`LOCAL_ARCHIVE.md`](LOCAL_ARCHIVE.md)
+   Explains where removed legacy files are kept locally if they are not needed in the tracked runtime.
 
 ## Current Status
 
 - `FP2` is currently monitored through Aqara Open API and pushed into the local backend.
 - The UI is now `FP2-only` and exposes only `Dashboard` and `FP2 Monitor`.
-- `CSI/DensePose` content remains in the repo as legacy project context, not as the active runtime.
+- Legacy CSI/DensePose materials were removed from the tracked runtime tree and moved into the local archive.
 - `Home Assistant` can still exist locally, but the live UI no longer depends on HA polling for the working sensor path.
 
 ## What Is Intentionally Out Of Scope

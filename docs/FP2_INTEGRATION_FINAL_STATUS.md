@@ -73,4 +73,4 @@ The cleaned project state should be interpreted as:
 
 - `FP2-only UI`
 - `Aqara Cloud monitor feeding the local backend`
-- `legacy CSI/DensePose materials retained only as original project context`
+- `legacy CSI/DensePose materials moved to the local archive and removed from the tracked runtime tree`

@@ -4,20 +4,44 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile.render
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: HA_URL
-        value: ${HA_URL}
-      - key: HA_TOKEN
-        value: ${HA_TOKEN}
+      - key: SECRET_KEY
+        value: ${SECRET_KEY}
       - key: FP2_ENABLED
         value: "true"
-      - key: FP2_ENTITY_ID
-        value: ${FP2_ENTITY_ID}
-      - key: DATABASE_URL
-        value: ${DATABASE_URL}
-      - key: REDIS_URL
-        value: ${REDIS_URL}
-    healthCheckPath: /health
-    buildCommand: pip install -r requirements.txt
+      - key: ENABLE_REAL_TIME_PROCESSING
+        value: "false"
+    healthCheckPath: /health/live
     startCommand: uvicorn src.app:app --host 0.0.0.0 --port $PORT
+
+  - type: worker
+    name: wifi-densepose-fp2-monitor
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    envVars:
+      - key: AQARA_EMAIL
+        value: ${AQARA_EMAIL}
+      - key: AQARA_PASSWORD
+        value: ${AQARA_PASSWORD}
+      - key: AQARA_API_DOMAIN
+        value: ${AQARA_API_DOMAIN}
+      - key: AQARA_APP_ID
+        value: ${AQARA_APP_ID}
+      - key: AQARA_APP_KEY
+        value: ${AQARA_APP_KEY}
+      - key: AQARA_KEY_ID
+        value: ${AQARA_KEY_ID}
+      - key: AQARA_ACCESS_TOKEN
+        value: ${AQARA_ACCESS_TOKEN}
+      - key: AQARA_REFRESH_TOKEN
+        value: ${AQARA_REFRESH_TOKEN}
+      - key: AQARA_OPEN_ID
+        value: ${AQARA_OPEN_ID}
+      - key: FP2_DEVICE_ID
+        value: ${FP2_DEVICE_ID}
+      - key: FP2_NAME
+        value: ${FP2_NAME}
+      - key: FP2_MODEL
+        value: ${FP2_MODEL}
+      - key: BACKEND_URL
+        value: ${BACKEND_URL}
+    startCommand: python scripts/fp2_aqara_cloud_monitor.py --backend $BACKEND_URL --interval 2 --log-level INFO

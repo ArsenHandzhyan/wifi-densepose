@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Debug Buttons</title>
+    <style>
+        body { background: #1a1a1a; color: #fff; padding: 20px; font-family: monospace; }
+        .log { background: #2a2a2a; padding: 10px; margin: 10px 0; border-left: 3px solid #38bdf8; }
+        .error { border-left-color: #f87171; color: #f87171; }
+        .success { border-left-color: #4ade80; color: #4ade80; }
+    </style>
+</head>
+<body>
+    <h1>🔍 Debug: Кнопки FP2 UI</h1>
+    <div id="logs"></div>
+    
+    <script type="module">
+        const logs = document.getElementById('logs');
+        
+        function log(msg, type = 'log') {
+            const div = document.createElement('div');
+            div.className = `log ${type}`;
+            div.textContent = msg;
+            logs.appendChild(div);
+            console.log(msg);
+        }
+        
+        // Check if app.js loaded
+        log('Loading app.js...');
+        
+        import('http://127.0.0.1:3000/app.js')
+            .then(module => {
+                log('✅ app.js loaded successfully', 'success');
+                
+                // Wait for app to initialize
+                setTimeout(() => {
+                    log('Checking window.wifiDensePoseApp...');
+                    
+                    if (window.wifiDensePoseApp) {
+                        log('✅ window.wifiDensePoseApp exists', 'success');
+                        log('   - currentLang: ' + window.wifiDensePoseApp.currentLang);
+                        log('   - isInitialized: ' + window.wifiDensePoseApp.isReady());
+                    } else {
+                        log('❌ window.wifiDensePoseApp NOT found', 'error');
+                    }
+                    
+                    log('Checking i18n functions...');
+                    
+                    if (typeof window.t === 'function') {
+                        log('✅ window.t exists', 'success');
+                        log('   - t("present") = ' + window.t('present'));
+                    } else {
+                        log('❌ window.t NOT found', 'error');
+                    }
+                    
+                    if (typeof window.getCurrentLang === 'function') {
+                        log('✅ getCurrentLang exists', 'success');
+                        log('   - getCurrentLang() = ' + window.getCurrentLang());
+                    } else {
+                        log('❌ getCurrentLang NOT found', 'error');
+                    }
+                    
+                    if (window.i18n) {
+                        log('✅ window.i18n exists', 'success');
+                        log('   - Languages: en, ru');
+                        log('   - EN present: ' + window.i18n.en.present);
+                        log('   - RU present: ' + window.i18n.ru.present);
+                    } else {
+                        log('❌ window.i18n NOT found', 'error');
+                    }
+                    
+                    // Check tabs
+                    log('Checking tab buttons...');
+                    const tabs = document.querySelectorAll('.nav-tab');
+                    log(`Found ${tabs.length} tab buttons`);
+                    
+                    tabs.forEach((tab, idx) => {
+                        const dataTab = tab.getAttribute('data-tab');
+                        log(`Tab ${idx}: ${dataTab}`);
+                        
+                        // Try to click
+                        tab.addEventListener('click', () => {
+                            log(`✅ Tab "${dataTab}" was clicked!`, 'success');
+                        });
+                    });
+                    
+                    // Check language toggle
+                    const langToggle = document.getElementById('lang-toggle');
+                    if (langToggle) {
+                        log('✅ Language toggle button exists', 'success');
+                        
+                        langToggle.addEventListener('click', () => {
+                            log('✅ Language toggle was clicked!', 'success');
+                            
+                            if (window.wifiDensePoseApp && window.wifiDensePoseApp.applyLanguage) {
+                                const newLang = window.getCurrentLang() === 'ru' ? 'en' : 'ru';
+                                window.wifiDensePoseApp.applyLanguage(newLang);
+                                log(`Switched to: ${newLang}`, 'success');
+                            } else {
+                                log('❌ applyLanguage method NOT found', 'error');
+                            }
+                        });
+                    } else {
+                        log('❌ Language toggle button NOT found', 'error');
+                    }
+                    
+                }, 2000);
+            })
+            .catch(error => {
+                log('❌ Failed to load app.js: ' + error.message, 'error');
+            });
+    </script>
+</body>
+</html>

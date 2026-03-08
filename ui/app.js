@@ -402,12 +402,21 @@ class WiFiDensePoseApp {
   // Setup language toggle button
   setupLanguageToggle() {
     const langToggle = document.getElementById('lang-toggle');
-    if (!langToggle) return;
+    if (!langToggle) {
+      console.error('❌ Language toggle button NOT found!');
+      return;
+    }
+    
+    console.log('✅ Language toggle button found, setting up listener...');
     
     langToggle.addEventListener('click', () => {
+      console.log('🔵 Language toggle clicked!');
       const newLang = this.currentLang === 'ru' ? 'en' : 'ru';
+      console.log(`Switching from ${this.currentLang} to ${newLang}`);
       this.applyLanguage(newLang);
     });
+    
+    console.log('✅ Language toggle listener attached');
   }
 
   // Public API

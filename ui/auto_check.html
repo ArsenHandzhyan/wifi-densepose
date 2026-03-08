@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Автоматическая проверка</title>
+    <!-- Load app.js first to get all functions -->
+    <script type="module" src="app.js?v=20260308-v5"></script>
+    <style>
+        body { background: #0f172a; color: #fff; padding: 30px; font-family: monospace; }
+        .section { background: #1e293b; padding: 20px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #38bdf8; }
+        .success { border-left-color: #4ade80; }
+        .error { border-left-color: #f87171; }
+        .warning { border-left-color: #fbbf24; }
+        h1 { color: #38bdf8; }
+        h2 { color: #a78bfa; font-size: 1.2rem; }
+        pre { background: #0f172a; padding: 15px; border-radius: 4px; overflow-x: auto; }
+        .result { font-size: 0.9rem; }
+        button { background: #38bdf8; color: #000; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; margin: 5px; }
+        button:hover { background: #7dd3fc; }
+    </style>
+</head>
+<body>
+    <h1>🔍 Автоматическая проверка кнопок FP2 UI</h1>
+    
+    <div class="section">
+        <h2>Нажмите для проверки:</h2>
+        <button onclick="runAllChecks()">▶️ Запустить проверку</button>
+        <button onclick="location.reload()">🔄 Обновить</button>
+        <button onclick="openMainUI()">🌐 Открыть основной UI</button>
+    </div>
+    
+    <div id="results"></div>
+    
+    <script>
+        const resultsDiv = document.getElementById('results');
+        
+        function addResult(title, content, status = 'info') {
+            const section = document.createElement('div');
+            section.className = `section ${status}`;
+            section.innerHTML = `
+                <h2>${title}</h2>
+                <pre class="result">${content}</pre>
+            `;
+            resultsDiv.appendChild(section);
+        }
+        
+        function runAllChecks() {
+            resultsDiv.innerHTML = '';
+            
+            // Check 1: App initialization
+            setTimeout(() => {
+                const app = window.wifiDensePoseApp;
+                if (app) {
+                    addResult(
+                        '✅ Приложение загружено',
+                        `App exists: true\nReady: ${app.isReady()}\nCurrent lang: ${app.currentLang || 'not set'}`,
+                        'success'
+                    );
+                } else {
+                    addResult(
+                        '❌ Приложение НЕ загружено',
+                        'window.wifiDensePoseApp = undefined\n\nВозможно app.js ещё не загрузился или есть ошибка.',
+                        'error'
+                    );
+                }
+                
+                // Check 2: Translation functions
+                const tFunc = window.t;
+                const getCurrentLang = window.getCurrentLang;
+                const i18n = window.i18n;
+                
+                let translationCheck = '';
+                if (tFunc && typeof tFunc === 'function') {
+                    translationCheck += `✅ window.t(): работает\n`;
+                    translationCheck += `   t("present") = "${tFunc('present')}"\n`;
+                    translationCheck += `   t("moving") = "${tFunc('moving')}"\n`;
+                } else {
+                    translationCheck += `❌ window.t(): НЕ работает\n`;
+                }
+                
+                if (getCurrentLang && typeof getCurrentLang === 'function') {
+                    translationCheck += `\n✅ getCurrentLang(): работает\n`;
+                    translationCheck += `   Current lang = "${getCurrentLang()}"\n`;
+                } else {
+                    translationCheck += `\n❌ getCurrentLang(): НЕ работает\n`;
+                }
+                
+                if (i18n) {
+                    translationCheck += `\n✅ window.i18n: существует\n`;
+                    translationCheck += `   Languages: en, ru\n`;
+                    translationCheck += `   EN present: "${i18n.en?.present || 'N/A'}"\n`;
+                    translationCheck += `   RU present: "${i18n.ru?.present || 'N/A'}"\n`;
+                } else {
+                    translationCheck += `\n❌ window.i18n: НЕ существует\n`;
+                }
+                
+                addResult('Проверка функций перевода', translationCheck, 
+                    (tFunc && getCurrentLang && i18n) ? 'success' : 'error');
+                
+                // Check 3: Tab buttons
+                setTimeout(() => {
+                    const tabs = document.querySelectorAll('.nav-tab');
+                    let tabCheck = `Найдено кнопок: ${tabs.length}\n\n`;
+                    
+                    if (tabs.length > 0) {
+                        tabs.forEach((tab, idx) => {
+                            const dataTab = tab.getAttribute('data-tab');
+                            const hasClass = tab.classList.contains('nav-tab');
+                            const isActive = tab.classList.contains('active');
+                            tabCheck += `Кнопка ${idx + 1}:\n`;
+                            tabCheck += `  data-tab: "${dataTab}"\n`;
+                            tabCheck += `  class: "${tab.className}"\n`;
+                            tabCheck += `  active: ${isActive}\n\n`;
+                        });
+                        
+                        addResult('Проверка кнопок вкладок', tabCheck, 'success');
+                        
+                        // Test click on each tab
+                        tabs.forEach((tab, idx) => {
+                            const dataTab = tab.getAttribute('data-tab');
+                            tab.addEventListener('click', () => {
+                                console.log(`✅ Кнопка "${dataTab}" была нажата!`);
+                            });
+                        });
+                    } else {
+                        tabCheck += `❌ Кнопки НЕ найдены!\n\n`;
+                        tabCheck += `Возможные причины:\n`;
+                        tabCheck += `1. Страница ещё не загрузилась\n`;
+                        tabCheck += `2. Ошибка в index.html\n`;
+                        tabCheck += `3. Неправильный селектор (.nav-tab)\n`;
+                        
+                        addResult('Проверка кнопок вкладок', tabCheck, 'error');
+                    }
+                    
+                    // Check 4: Language toggle
+                    const langToggle = document.getElementById('lang-toggle');
+                    let langCheck = '';
+                    
+                    if (langToggle) {
+                        langCheck = `✅ Кнопка переключения языка найдена\n\n`;
+                        langCheck += `ID: "lang-toggle"\n`;
+                        langCheck += `Text: "${langToggle.textContent}"\n`;
+                        langCheck += `Classes: "${langToggle.className}"\n`;
+                        
+                        // Add click listener
+                        langToggle.addEventListener('click', () => {
+                            console.log('✅ Кнопка переключения языка нажата!');
+                            if (window.wifiDensePoseApp && window.wifiDensePoseApp.applyLanguage) {
+                                const newLang = window.getCurrentLang() === 'ru' ? 'en' : 'ru';
+                                window.wifiDensePoseApp.applyLanguage(newLang);
+                                console.log(`Переключено на: ${newLang}`);
+                            } else {
+                                console.error('❌ applyLanguage не доступен!');
+                            }
+                        });
+                        
+                        addResult('Проверка переключателя языка', langCheck, 'success');
+                    } else {
+                        langCheck = `❌ Кнопка переключения языка НЕ найдена!\n\n`;
+                        langCheck += `Проверьте index.html на наличие:\n`;
+                        langCheck += `<button id="lang-toggle" ...>\n`;
+                        
+                        addResult('Проверка переключателя языка', langCheck, 'error');
+                    }
+                    
+                }, 500);
+                
+            }, 1000);
+        }
+        
+        function openMainUI() {
+            window.open('http://127.0.0.1:3000', '_blank');
+        }
+        
+        // Auto-run on load with longer delay
+        window.addEventListener('load', () => {
+            console.log('Page loaded, waiting for app.js...');
+            setTimeout(() => {
+                console.log('Running checks...');
+                runAllChecks();
+            }, 3000); // Increased to 3 seconds
+        });
+    </script>
+</body>
+</html>

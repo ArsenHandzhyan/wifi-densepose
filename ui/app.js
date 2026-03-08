@@ -1,8 +1,8 @@
 // Aqara FP2 Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js?v=20260308-v2';
-import { FP2Tab } from './components/FP2Tab.js?v=20260308-v2';
+import { DashboardTab } from './components/DashboardTab.js?v=20260308-v5';
+import { FP2Tab } from './components/FP2Tab.js?v=20260308-v5';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
@@ -402,21 +402,12 @@ class WiFiDensePoseApp {
   // Setup language toggle button
   setupLanguageToggle() {
     const langToggle = document.getElementById('lang-toggle');
-    if (!langToggle) {
-      console.error('❌ Language toggle button NOT found!');
-      return;
-    }
-    
-    console.log('✅ Language toggle button found, setting up listener...');
+    if (!langToggle) return;
     
     langToggle.addEventListener('click', () => {
-      console.log('🔵 Language toggle clicked!');
       const newLang = this.currentLang === 'ru' ? 'en' : 'ru';
-      console.log(`Switching from ${this.currentLang} to ${newLang}`);
       this.applyLanguage(newLang);
     });
-    
-    console.log('✅ Language toggle listener attached');
   }
 
   // Public API

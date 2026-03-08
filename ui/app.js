@@ -48,17 +48,17 @@ const i18n = {
     online: 'ONLINE',
     offline_short: 'OFF',
     // Movement events
-    no_event: 'Нет события',
-    static_presence: 'Статичное присутствие',
-    micro_movement: 'Микро-движение',
-    significant_movement: 'Заметное движение',
-    large_movement: 'Большое движение',
-    approaching: 'Приближение',
-    departing: 'Удаление',
-    moving: 'Движение',
-    static_after_movement: 'Покой после движения',
-    entering_zone: 'Вход в зону',
-    leaving_zone: 'Выход из зоны'
+    no_event: 'No event',
+    static_presence: 'Static presence',
+    micro_movement: 'Micro-movement',
+    significant_movement: 'Significant movement',
+    large_movement: 'Large movement',
+    approaching: 'Approaching',
+    departing: 'Departing',
+    moving: 'Moving',
+    static_after_movement: 'Static after movement',
+    entering_zone: 'Entering zone',
+    leaving_zone: 'Leaving zone'
   },
   ru: {
     subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',

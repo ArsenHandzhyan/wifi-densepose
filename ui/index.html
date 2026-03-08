@@ -13,8 +13,11 @@
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>Aqara FP2 Telemetry Console</h1>
-            <p class="subtitle">Полная телеметрия с сенсора Aqara FP2 в реальном времени</p>
+            <div class="header-top">
+                <h1>Aqara FP2 Telemetry Console</h1>
+                <button id="lang-toggle" class="lang-toggle" title="Switch language">🇬🇧 EN</button>
+            </div>
+            <p class="subtitle" data-i18n="subtitle">Complete telemetry from Aqara FP2 sensor in real-time</p>
             <div class="header-info">
                 <span class="api-version"></span>
                 <span class="api-environment"></span>
@@ -24,8 +27,8 @@
 
         <!-- Navigation -->
         <nav class="nav-tabs">
-            <button class="nav-tab active" data-tab="dashboard">Dashboard</button>
-            <button class="nav-tab" data-tab="fp2">FP2 Monitor</button>
+            <button class="nav-tab active" data-tab="dashboard" data-i18n="tab_dashboard">Dashboard</button>
+            <button class="nav-tab" data-tab="fp2" data-i18n="tab_fp2">FP2 Monitor</button>
         </nav>
 
         <!-- Dashboard Tab -->

@@ -7,11 +7,26 @@ import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
 
+// Internationalization (i18n) translations
+const i18n = {
+  en: {
+    subtitle: 'Complete telemetry from Aqara FP2 sensor in real-time',
+    tab_dashboard: 'Dashboard',
+    tab_fp2: 'FP2 Monitor'
+  },
+  ru: {
+    subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',
+    tab_dashboard: 'Панель управления',
+    tab_fp2: 'Монитор FP2'
+  }
+};
+
 class WiFiDensePoseApp {
   constructor() {
     this.components = {};
     this.isInitialized = false;
     this.lastBackendToastState = null;
+    this.currentLang = localStorage.getItem('fp2_lang') || 'en'; // Default to English
   }
 
   // Initialize application
@@ -30,6 +45,12 @@ class WiFiDensePoseApp {
       
       // Set up global event listeners
       this.setupEventListeners();
+      
+      // Setup language toggle
+      this.setupLanguageToggle();
+      
+      // Apply initial language
+      this.applyLanguage(this.currentLang);
       
       this.isInitialized = true;
       console.log('Aqara FP2 Monitor initialized successfully');
@@ -235,6 +256,37 @@ class WiFiDensePoseApp {
     setTimeout(() => {
       errorToast.classList.remove('show');
     }, 5000);
+  }
+
+  // Setup language toggle button
+  setupLanguageToggle() {
+    const langToggle = document.getElementById('lang-toggle');
+    if (!langToggle) return;
+    
+    langToggle.addEventListener('click', () => {
+      const newLang = this.currentLang === 'ru' ? 'en' : 'ru';
+      this.applyLanguage(newLang);
+    });
+  }
+
+  // Apply language to UI
+  applyLanguage(lang) {
+    this.currentLang = lang;
+    localStorage.setItem('fp2_lang', lang);
+    
+    // Update button text
+    const langToggle = document.getElementById('lang-toggle');
+    if (langToggle) {
+      langToggle.textContent = lang === 'ru' ? '🇷🇺 RU' : '🇬🇧 EN';
+    }
+    
+    // Update all elements with data-i18n attribute
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const key = el.getAttribute('data-i18n');
+      if (i18n[lang] && i18n[lang][key]) {
+        el.textContent = i18n[lang][key];
+      }
+    });
   }
 
   // Clean up resources

@@ -86,6 +86,13 @@ body::before {
   text-align: center;
   margin-bottom: var(--gap-lg);
 }
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 600px;
+  margin: 0 auto;
+}
 .header h1 {
   font-size: 1.8rem;
   font-weight: 700;
@@ -94,6 +101,22 @@ body::before {
   -webkit-text-fill-color: transparent;
   background-clip: text;
   letter-spacing: -0.02em;
+  flex-grow: 1;
+}
+.lang-toggle {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.lang-toggle:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
 }
 .header .subtitle {
   color: var(--text-dim);

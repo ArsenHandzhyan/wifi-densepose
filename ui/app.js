@@ -7,11 +7,48 @@ import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
 
+// Internationalization (i18n) translations
+const i18n = {
+  en: {
+    subtitle: 'Complete telemetry from Aqara FP2 sensor in real-time',
+    tab_dashboard: 'Dashboard',
+    tab_fp2: 'FP2 Monitor',
+    system_status: 'System Status',
+    presence: 'Presence',
+    movement: 'Movement',
+    targets: 'Targets',
+    fall_detection: 'Fall Detection',
+    light_level: 'Light Level',
+    rssi: 'Signal Strength',
+    sensor_angle: 'Sensor Angle',
+    coordinates: 'Coordinates',
+    event_log: 'Event Log',
+    resource_channels: 'Resource Channels'
+  },
+  ru: {
+    subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',
+    tab_dashboard: 'Панель управления',
+    tab_fp2: 'Монитор FP2',
+    system_status: 'Статус системы',
+    presence: 'Присутствие',
+    movement: 'Движение',
+    targets: 'Цели',
+    fall_detection: 'Обнаружение падения',
+    light_level: 'Освещённость',
+    rssi: 'Уровень сигнала',
+    sensor_angle: 'Угол сенсора',
+    coordinates: 'Координаты',
+    event_log: 'Журнал событий',
+    resource_channels: 'Каналы ресурсов'
+  }
+};
+
 class WiFiDensePoseApp {
   constructor() {
     this.components = {};
     this.isInitialized = false;
     this.lastBackendToastState = null;
+    this.currentLang = localStorage.getItem('fp2_lang') || 'ru'; // Default to Russian
   }
 
   // Initialize application
@@ -101,6 +138,12 @@ class WiFiDensePoseApp {
     this.components.tabManager.onTabChange((newTab, oldTab) => {
       this.handleTabChange(newTab, oldTab);
     });
+    
+    // Apply current language
+    this.applyLanguage(this.currentLang);
+    
+    // Setup language toggle button
+    this.setupLanguageToggle();
   }
 
   // Initialize individual tab components
@@ -253,6 +296,40 @@ class WiFiDensePoseApp {
     
     // Stop health monitoring
     healthService.dispose();
+  }
+  
+  // Apply language to UI elements
+  applyLanguage(lang) {
+    this.currentLang = lang;
+    localStorage.setItem('fp2_lang', lang);
+    
+    // Update all elements with data-i18n attribute
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const key = el.getAttribute('data-i18n');
+      if (i18n[lang][key]) {
+        el.textContent = i18n[lang][key];
+      }
+    });
+    
+    // Update language toggle button
+    const langToggle = document.getElementById('lang-toggle');
+    if (langToggle) {
+      langToggle.textContent = lang === 'ru' ? '🇷🇺 RU' : '🇬🇧 EN';
+      langToggle.classList.toggle('active', lang === 'ru');
+    }
+    
+    console.log(`Language switched to: ${lang}`);
+  }
+  
+  // Setup language toggle button
+  setupLanguageToggle() {
+    const langToggle = document.getElementById('lang-toggle');
+    if (!langToggle) return;
+    
+    langToggle.addEventListener('click', () => {
+      const newLang = this.currentLang === 'ru' ? 'en' : 'ru';
+      this.applyLanguage(newLang);
+    });
   }
 
   // Public API

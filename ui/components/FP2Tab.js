@@ -15,23 +15,23 @@ const RESOURCE_LABELS = {
 };
 
 const MOVEMENT_LABELS = {
-  0: window.t('no_event') || 'No event',
-  1: window.t('static_presence') || 'Static presence',
-  2: window.t('micro_movement') || 'Micro-movement',
-  3: window.t('significant_movement') || 'Significant movement',
-  4: window.t('large_movement') || 'Large movement',
-  5: window.t('approaching') || 'Approaching',
-  6: window.t('departing') || 'Departing',
-  7: window.t('moving') || 'Moving',
-  8: window.t('static_after_movement') || 'Static after movement',
-  9: window.t('entering_zone') || 'Entering zone',
-  10: window.t('leaving_zone') || 'Leaving zone'
+  0: 'No event',
+  1: 'Static presence',
+  2: 'Micro-movement',
+  3: 'Significant movement',
+  4: 'Large movement',
+  5: 'Approaching',
+  6: 'Departing',
+  7: 'Moving',
+  8: 'Static after movement',
+  9: 'Entering zone',
+  10: 'Leaving zone'
 };
 
 const FALL_LABELS = {
-  0: window.t('no_fall') || 'No fall detected',
-  1: window.t('possible_fall') || 'Possible fall',
-  2: window.t('fall_detected') || 'Fall detected'
+  0: 'No fall detected',
+  1: 'Possible fall',
+  2: 'Fall detected'
 };
 
 // Colors for target rendering
@@ -345,7 +345,7 @@ export class FP2Tab {
     // Update elements
     this.elements.entityId.textContent = metadata.entity_id || metadata.source || 'fp2';
     this.elements.updatedAt.textContent = timestampLabel;
-    this.elements.presenceValue.textContent = available ? (presence ? window.t('present') : window.t('absent')) : 'UNAVAILABLE';
+    this.elements.presenceValue.textContent = available ? (presence ? 'PRESENT' : 'ABSENT') : 'UNAVAILABLE';
     this.elements.presenceValue.className = `presence-pill ${available && presence ? 'present' : 'absent'}`;
     this.elements.personsCount.textContent = String(targets.length);
     this.elements.zonesCount.textContent = String(zones.length);
@@ -828,7 +828,7 @@ export class FP2Tab {
         <article class="fp2-zone-window ${zone.occupied ? 'active' : ''} ${isCurrent ? 'current' : ''}">
           <div class="fp2-zone-window-header">
             <h4>${zone.displayName}</h4>
-            <span class="fp2-zone-window-status">${zone.occupied ? window.t('zone_occupied') : window.t('zone_clear')}</span>
+            <span class="fp2-zone-window-status">${zone.occupied ? 'OCCUPIED' : 'CLEAR'}</span>
           </div>
           <div class="fp2-zone-window-body">
             <span class="fp2-zone-window-count">${zone.target_count || 0}</span>
@@ -927,7 +927,7 @@ export class FP2Tab {
       el.innerHTML = `
         <span>${entry.timestamp}</span>
         <strong class="${entry.presence === null ? 'err' : entry.presence ? 'ok' : 'muted'}">
-          ${entry.presence === null ? 'UNAVAILABLE' : entry.presence ? window.t('present') : window.t('absent')}
+          ${entry.presence === null ? 'UNAVAILABLE' : entry.presence ? 'PRESENT' : 'ABSENT'}
         </strong>`;
       this.elements.historyList.appendChild(el);
     });
@@ -986,7 +986,7 @@ export class FP2Tab {
 
       ctx.fillStyle = active ? '#4ade80' : '#475569';
       ctx.font = '700 36px sans-serif';
-      ctx.fillText(active ? window.t('zone_occupied') : window.t('zone_clear'), x + 18, y + zoneHeight / 2 + 12);
+      ctx.fillText(active ? 'OCCUPIED' : 'CLEAR', x + 18, y + zoneHeight / 2 + 12);
 
       ctx.fillStyle = '#94a3b8';
       ctx.font = '13px sans-serif';

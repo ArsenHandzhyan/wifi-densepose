@@ -10,28 +10,19 @@ export class TabManager {
 
   // Initialize tabs
   init() {
-    console.log('🔵 TabManager.init() called');
-    
     // Find all tabs and contents
     this.tabs = Array.from(this.container.querySelectorAll('.nav-tab'));
     this.tabContents = Array.from(this.container.querySelectorAll('.tab-content'));
     
-    console.log(`✅ Found ${this.tabs.length} tabs:`, this.tabs.map(t => t.getAttribute('data-tab')));
-    
     // Set up event listeners
     this.tabs.forEach(tab => {
-      console.log(`Setting up click listener for tab: ${tab.getAttribute('data-tab')}`);
-      tab.addEventListener('click', () => {
-        console.log(`🔵 Tab clicked: ${tab.getAttribute('data-tab')}`);
-        this.switchTab(tab);
-      });
+      tab.addEventListener('click', () => this.switchTab(tab));
     });
 
     // Activate first tab if none active
     const activeTab = this.tabs.find(tab => tab.classList.contains('active'));
     if (activeTab) {
       this.activeTab = activeTab.getAttribute('data-tab');
-      console.log(`✅ Initial active tab: ${this.activeTab}`);
     } else if (this.tabs.length > 0) {
       this.switchTab(this.tabs[0]);
     }
@@ -41,10 +32,7 @@ export class TabManager {
   switchTab(tabElement) {
     const tabId = tabElement.getAttribute('data-tab');
     
-    console.log(`🔵 switchTab called with: ${tabId}`);
-    
     if (tabId === this.activeTab) {
-      console.log('Already on this tab, ignoring');
       return;
     }
 
@@ -61,8 +49,6 @@ export class TabManager {
     // Update active tab
     const previousTab = this.activeTab;
     this.activeTab = tabId;
-    
-    console.log(`✅ Switched from ${previousTab} to ${tabId}`);
 
     // Notify callbacks
     this.notifyTabChange(tabId, previousTab);

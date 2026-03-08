@@ -198,11 +198,11 @@ export class DashboardTab {
         const apiStatusMessage = apiElement.querySelector('.status-message');
         
         if (apiStatusText) {
-          apiStatusText.textContent = window.t('healthy');
+          apiStatusText.textContent = 'HEALTHY';
         }
-              
+        
         if (apiStatusMessage) {
-          apiStatusMessage.textContent = 'Backend API работает нормально';
+          apiStatusMessage.textContent = 'API server is running normally';
         }
       }
     }
@@ -421,7 +421,7 @@ export class DashboardTab {
       apiCard.className = 'component-status status-healthy';
       const statusText = apiCard.querySelector('.status-text');
       const statusMessage = apiCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = window.t('healthy');
+      if (statusText) statusText.textContent = 'HEALTHY';
       if (statusMessage) statusMessage.textContent = 'Local backend is responding';
     }
 

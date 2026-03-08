@@ -1,132 +1,17 @@
 // Aqara FP2 Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js?v=20260308-v5';
-import { FP2Tab } from './components/FP2Tab.js?v=20260308-v5';
+import { DashboardTab } from './components/DashboardTab.js?v=20260308-v2';
+import { FP2Tab } from './components/FP2Tab.js?v=20260308-v2';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
-
-// Internationalization (i18n) translations
-const i18n = {
-  en: {
-    subtitle: 'Complete telemetry from Aqara FP2 sensor in real-time',
-    tab_dashboard: 'Dashboard',
-    tab_fp2: 'FP2 Monitor',
-    system_status: 'System Status',
-    presence: 'Presence',
-    movement: 'Movement',
-    targets: 'Targets',
-    fall_detection: 'Fall Detection',
-    light_level: 'Light Level',
-    rssi: 'Signal Strength',
-    sensor_angle: 'Sensor Angle',
-    coordinates: 'Coordinates',
-    event_log: 'Event Log',
-    resource_channels: 'Resource Channels',
-    // Dashboard specific
-    api_server: 'API Server',
-    cloud_monitor: 'Cloud Monitor',
-    ui_server: 'UI Server',
-    healthy: 'HEALTHY',
-    running: 'RUNNING',
-    offline: 'OFFLINE',
-    // FP2 specific
-    present: 'PRESENT',
-    absent: 'ABSENT',
-    moving: 'Moving',
-    static: 'Static',
-    no_fall: 'No fall detected',
-    possible_fall: 'Possible fall',
-    fall_detected: 'Fall detected',
-    detection_area: 'Detection Area',
-    zone_occupied: 'OCCUPIED',
-    zone_clear: 'CLEAR',
-    live: 'LIVE',
-    slow: 'SLOW',
-    stale: 'STALE',
-    online: 'ONLINE',
-    offline_short: 'OFF',
-    // Movement events
-    no_event: 'No event',
-    static_presence: 'Static presence',
-    micro_movement: 'Micro-movement',
-    significant_movement: 'Significant movement',
-    large_movement: 'Large movement',
-    approaching: 'Approaching',
-    departing: 'Departing',
-    moving: 'Moving',
-    static_after_movement: 'Static after movement',
-    entering_zone: 'Entering zone',
-    leaving_zone: 'Leaving zone'
-  },
-  ru: {
-    subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',
-    tab_dashboard: 'Панель управления',
-    tab_fp2: 'Монитор FP2',
-    system_status: 'Статус системы',
-    presence: 'Присутствие',
-    movement: 'Движение',
-    targets: 'Цели',
-    fall_detection: 'Обнаружение падения',
-    light_level: 'Освещённость',
-    rssi: 'Уровень сигнала',
-    sensor_angle: 'Угол сенсора',
-    coordinates: 'Координаты',
-    event_log: 'Журнал событий',
-    resource_channels: 'Каналы ресурсов',
-    // Dashboard specific
-    api_server: 'Backend API',
-    cloud_monitor: 'Cloud Monitor',
-    ui_server: 'UI Server',
-    healthy: 'РАБОТАЕТ',
-    running: 'РАБОТАЕТ',
-    offline: 'ОФФЛАЙН',
-    // FP2 specific
-    present: 'ЕСТЬ',
-    absent: 'НЕТ',
-    moving: 'Движение',
-    static: 'Покой',
-    no_fall: 'Нет падения',
-    possible_fall: 'Возможно падение',
-    fall_detected: 'Падение обнаружено',
-    detection_area: 'Зона детекции',
-    zone_occupied: 'ЗАНЯТО',
-    zone_clear: 'СВОБОДНО',
-    live: 'LIVE',
-    slow: 'SLOW',
-    stale: 'STALE',
-    online: 'ОНЛАЙН',
-    offline_short: 'ОФФ',
-    // Movement events
-    no_event: 'Нет события',
-    static_presence: 'Статичное присутствие',
-    micro_movement: 'Микро-движение',
-    significant_movement: 'Заметное движение',
-    large_movement: 'Большое движение',
-    approaching: 'Приближение',
-    departing: 'Удаление',
-    moving: 'Движение',
-    static_after_movement: 'Покой после движения',
-    entering_zone: 'Вход в зону',
-    leaving_zone: 'Выход из зоны'
-  }
-};
-
-// Export i18n for use in components
-window.i18n = i18n;
-window.getCurrentLang = () => window.wifiDensePoseApp?.currentLang || 'ru';
-window.t = (key) => {
-  const lang = window.getCurrentLang();
-  return i18n[lang][key] || i18n['ru'][key] || key;
-};
 
 class WiFiDensePoseApp {
   constructor() {
     this.components = {};
     this.isInitialized = false;
     this.lastBackendToastState = null;
-    this.currentLang = localStorage.getItem('fp2_lang') || 'ru'; // Default to Russian
   }
 
   // Initialize application
@@ -216,12 +101,6 @@ class WiFiDensePoseApp {
     this.components.tabManager.onTabChange((newTab, oldTab) => {
       this.handleTabChange(newTab, oldTab);
     });
-    
-    // Apply current language
-    this.applyLanguage(this.currentLang);
-    
-    // Setup language toggle button
-    this.setupLanguageToggle();
   }
 
   // Initialize individual tab components
@@ -375,40 +254,6 @@ class WiFiDensePoseApp {
     // Stop health monitoring
     healthService.dispose();
   }
-  
-  // Apply language to UI elements
-  applyLanguage(lang) {
-    this.currentLang = lang;
-    localStorage.setItem('fp2_lang', lang);
-    
-    // Update all elements with data-i18n attribute
-    document.querySelectorAll('[data-i18n]').forEach(el => {
-      const key = el.getAttribute('data-i18n');
-      if (i18n[lang][key]) {
-        el.textContent = i18n[lang][key];
-      }
-    });
-    
-    // Update language toggle button
-    const langToggle = document.getElementById('lang-toggle');
-    if (langToggle) {
-      langToggle.textContent = lang === 'ru' ? '🇷🇺 RU' : '🇬🇧 EN';
-      langToggle.classList.toggle('active', lang === 'ru');
-    }
-    
-    console.log(`Language switched to: ${lang}`);
-  }
-  
-  // Setup language toggle button
-  setupLanguageToggle() {
-    const langToggle = document.getElementById('lang-toggle');
-    if (!langToggle) return;
-    
-    langToggle.addEventListener('click', () => {
-      const newLang = this.currentLang === 'ru' ? 'en' : 'ru';
-      this.applyLanguage(newLang);
-    });
-  }
 
   // Public API
   getComponent(name) {
@@ -424,14 +269,6 @@ class WiFiDensePoseApp {
 document.addEventListener('DOMContentLoaded', () => {
   window.wifiDensePoseApp = new WiFiDensePoseApp();
   window.wifiDensePoseApp.init();
-  
-  // Export i18n for use in components
-  window.i18n = i18n;
-  window.getCurrentLang = () => window.wifiDensePoseApp?.currentLang || 'ru';
-  window.t = (key) => {
-    const lang = window.getCurrentLang();
-    return i18n[lang][key] || i18n['ru'][key] || key;
-  };
 });
 
 // Export for testing

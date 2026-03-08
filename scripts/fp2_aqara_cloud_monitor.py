@@ -359,6 +359,7 @@ class FP2CloudMonitor:
                     FALL_EVENT_RESOURCE_ID: self._resource_value(resource_map, FALL_EVENT_RESOURCE_ID),
                     ANGLE_RESOURCE_ID: self._resource_value(resource_map, ANGLE_RESOURCE_ID),
                     TOTAL_COUNT_RESOURCE_ID: self._resource_value(resource_map, TOTAL_COUNT_RESOURCE_ID),
+                    COORDINATES_RESOURCE_ID: self._resource_value(resource_map, COORDINATES_RESOURCE_ID),
                 },
             },
             "device": {
@@ -452,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interval",
         type=float,
-        default=2.0,
+        default=1.0,
         help="Polling interval in seconds",
     )
     parser.add_argument(

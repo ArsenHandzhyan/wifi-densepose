@@ -52,7 +52,7 @@ fi
 echo "Starting Aqara Cloud monitor..."
 nohup python3 "$ROOT_DIR/scripts/fp2_aqara_cloud_monitor.py" \
   --backend http://127.0.0.1:8000 \
-  --interval "${FP2_POLL_INTERVAL:-2}" \
+  --interval "${FP2_POLL_INTERVAL:-1}" \
   --log-level INFO >"$MONITOR_LOG" 2>&1 &
 MONITOR_PID=$!
 

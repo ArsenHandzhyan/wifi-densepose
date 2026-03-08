@@ -1,8 +1,8 @@
 // Aqara FP2 Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js?v=20260307-fp2only8';
-import { FP2Tab } from './components/FP2Tab.js?v=20260307-fp2only8';
+import { DashboardTab } from './components/DashboardTab.js?v=20260308-v2';
+import { FP2Tab } from './components/FP2Tab.js?v=20260308-v2';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';

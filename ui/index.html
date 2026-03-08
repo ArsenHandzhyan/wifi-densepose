@@ -1,17 +1,20 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aqara FP2 Monitor</title>
-    <link rel="stylesheet" href="style.css?v=20260307-fp2only6">
+    <title>Aqara FP2 Telemetry Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=20260308-v2">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <header class="header">
-            <h1>Aqara FP2 Monitor</h1>
-            <p class="subtitle">Live FP2 telemetry over the active transport, including Aqara Cloud and direct sensor modes.</p>
+            <h1>Aqara FP2 Telemetry Console</h1>
+            <p class="subtitle">Полная телеметрия с сенсора Aqara FP2 в реальном времени</p>
             <div class="header-info">
                 <span class="api-version"></span>
                 <span class="api-environment"></span>
@@ -28,16 +31,14 @@
         <!-- Dashboard Tab -->
         <section id="dashboard" class="tab-content active">
             <div class="hero-section">
-                <h2>Local FP2 Presence Monitoring</h2>
-                <p class="hero-description">
-                    This instance is running in FP2-only mode. Presence data is read locally from
-                    your Aqara FP2 and pushed directly into the backend and UI over the currently available transport.
-                </p>
-                
-                <!-- Error container -->
+                <div class="dash-hero">
+                    <h2>FP2 Presence Monitoring</h2>
+                    <p>FP2-only режим. Живая телеметрия с сенсора через активный транспорт.</p>
+                </div>
+
                 <div class="error-container" style="display: none;"></div>
 
-                <!-- Live Status Panel -->
+                <!-- System Status -->
                 <div class="live-status-panel">
                     <h3>System Status</h3>
                     <div class="status-grid">
@@ -69,14 +70,14 @@
                     <h3>System Metrics</h3>
                     <div class="metrics-grid">
                         <div class="metric-item">
-                            <span class="metric-label">CPU Usage</span>
+                            <span class="metric-label">System CPU</span>
                             <div class="progress-bar" data-type="cpu">
                                 <div class="progress-fill normal" style="width: 0%"></div>
                             </div>
                             <span class="cpu-usage">0%</span>
                         </div>
                         <div class="metric-item">
-                            <span class="metric-label">Memory Usage</span>
+                            <span class="metric-label">System Memory</span>
                             <div class="progress-bar" data-type="memory">
                                 <div class="progress-fill normal" style="width: 0%"></div>
                             </div>
@@ -89,59 +90,67 @@
                             </div>
                             <span class="disk-usage">0%</span>
                         </div>
+                        <div class="metric-item">
+                            <span class="metric-label">App CPU</span>
+                            <span class="app-cpu-usage">0%</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">App Memory</span>
+                            <span class="app-memory-usage">0 MB</span>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Features Status -->
+                <!-- Features -->
                 <div class="features-panel">
                     <h3>Features</h3>
                     <div class="features-status"></div>
                 </div>
 
-                <!-- Live Statistics -->
+                <!-- Live Stats -->
                 <div class="live-stats-panel">
                     <h3>Live Statistics</h3>
                     <div class="stats-grid">
                         <div class="stat-item">
                             <span class="stat-label">Active Targets</span>
-                            <span class="person-count">-</span>
+                            <span class="person-count stat-value">-</span>
                         </div>
                         <div class="stat-item">
                             <span class="stat-label">Presence State</span>
-                            <span class="avg-confidence">-</span>
+                            <span class="avg-confidence stat-value">-</span>
                         </div>
                         <div class="stat-item">
                             <span class="stat-label">Transport</span>
-                            <span class="detection-count">FP2</span>
+                            <span class="detection-count stat-value">FP2</span>
                         </div>
                     </div>
-                    
                     <div class="zones-panel">
                         <h4>Zone Occupancy</h4>
                         <div class="zones-summary"></div>
                     </div>
                 </div>
-                
+
+                <!-- Benefit cards -->
                 <div class="key-benefits">
                     <div class="benefit-card">
-                        <div class="benefit-icon">🏠</div>
+                        <div class="benefit-icon">&#x1F3E0;</div>
                         <h3>Direct Sensor</h3>
-                        <p>Reads live presence and movement data from Aqara FP2 over the currently active transport.</p>
+                        <p>Живые данные присутствия и движения с Aqara FP2.</p>
                     </div>
                     <div class="benefit-card">
-                        <div class="benefit-icon">🔒</div>
-                        <h3>Privacy-Preserving</h3>
-                        <p>No cameras and no image recording. Only occupancy/presence telemetry.</p>
+                        <div class="benefit-icon">&#x1F512;</div>
+                        <h3>Privacy</h3>
+                        <p>Без камер, без записи. Только телеметрия присутствия.</p>
                     </div>
                     <div class="benefit-card">
-                        <div class="benefit-icon">⚡</div>
-                        <h3>Local Updates</h3>
-                        <p>Real-time FP2 snapshots are pushed into the backend and rendered in the UI.</p>
+                        <div class="benefit-icon">&#x26A1;</div>
+                        <h3>Real-time</h3>
+                        <p>Обновление каждую секунду через Aqara Cloud API.</p>
                     </div>
                     <div class="benefit-card">
-                        <div class="benefit-icon">💰</div>
-                        <h3>Current Mode</h3>
-                        <p>FP2-only operation. CSI pipeline is intentionally disabled on this setup.</p>
+                        <div class="benefit-icon">&#x1F4E1;</div>
+                        <h3>FP2 Mode</h3>
+                        <p>FP2-only операция. CSI pipeline отключен.</p>
                     </div>
                 </div>
 
@@ -152,7 +161,7 @@
                     </div>
                     <div class="stat" data-stat="sampling-rate">
                         <span class="stat-value">1s</span>
-                        <span class="stat-label">Update Interval</span>
+                        <span class="stat-label">Interval</span>
                     </div>
                     <div class="stat" data-stat="accuracy">
                         <span class="stat-value">FP2</span>
@@ -168,22 +177,83 @@
 
         <!-- FP2 Monitor Tab -->
         <section id="fp2" class="tab-content">
-            <h2>FP2 Presence Monitor</h2>
-            <p class="help-text">A single live view bound to your Aqara FP2. No entity selection, no HA fallback controls. The source below reflects the transport currently delivering live telemetry.</p>
-
-            <div class="fp2-toolbar fp2-toolbar--compact">
-                <button id="fp2Refresh" class="btn btn--secondary">Refresh Snapshot</button>
+            <div class="fp2-page-header">
+                <div class="fp2-page-header-left">
+                    <h2>FP2 Telemetry Monitor</h2>
+                    <p class="help-text">Консоль: координаты, зоны, события, диагностика транспорта.</p>
+                </div>
+                <div class="fp2-page-header-right">
+                    <button id="fp2Refresh" class="btn btn--secondary btn--sm">Refresh</button>
+                    <span id="fp2UpdatedAt" class="fp2-last-update">-</span>
+                </div>
             </div>
 
-            <div class="fp2-grid fp2-grid--top">
+            <!-- Fall Detection Alert -->
+            <div id="fp2FallAlert" class="fp2-fall-alert" style="display:none;">
+                <div class="fp2-fall-alert-icon">&#x26A0;</div>
+                <div class="fp2-fall-alert-body">
+                    <strong>Fall Detected</strong>
+                    <span id="fp2FallAlertText">Возможное падение зарегистрировано сенсором</span>
+                </div>
+                <span id="fp2FallAlertTime" class="fp2-fall-alert-time">-</span>
+            </div>
+
+            <!-- Hero Metrics Bar -->
+            <div class="fp2-hero-bar">
+                <div class="fp2-hero-metric fp2-hero-metric--presence">
+                    <span class="fp2-hero-label">Presence</span>
+                    <span id="fp2PresenceValue" class="presence-pill absent">ABSENT</span>
+                    <span id="fp2PresenceDuration" class="fp2-hero-sub">0s</span>
+                </div>
+                <div class="fp2-hero-metric">
+                    <span class="fp2-hero-label">Targets</span>
+                    <span id="fp2PersonsCount" class="fp2-hero-value">0</span>
+                    <span id="fp2CoordinateStream" class="chip chip--warn fp2-hero-sub">WAITING</span>
+                </div>
+                <div class="fp2-hero-metric">
+                    <span class="fp2-hero-label">Movement</span>
+                    <strong id="fp2MovementEvent" class="fp2-hero-value fp2-hero-value--sm">-</strong>
+                </div>
+                <div class="fp2-hero-metric">
+                    <span class="fp2-hero-label">Light</span>
+                    <strong id="fp2LightLevel" class="fp2-hero-value">-</strong>
+                </div>
+                <div class="fp2-hero-metric fp2-hero-metric--rssi">
+                    <span class="fp2-hero-label">Signal</span>
+                    <div class="fp2-rssi-gauge">
+                        <canvas id="fp2RssiGauge" width="80" height="44"></canvas>
+                        <strong id="fp2RssiValue" class="fp2-rssi-text">-</strong>
+                    </div>
+                </div>
+                <div class="fp2-hero-metric">
+                    <span class="fp2-hero-label">Zones</span>
+                    <strong id="fp2ZonesCount" class="fp2-hero-value">0</strong>
+                    <strong id="fp2CurrentZone" class="fp2-hero-sub">-</strong>
+                </div>
+            </div>
+
+            <!-- Movement Map -->
+            <div class="fp2-card fp2-card--map">
+                <div class="fp2-card-header-row">
+                    <h3>Movement Map</h3>
+                    <div class="fp2-map-badges">
+                        <span id="fp2MapMode" class="chip chip--info">-</span>
+                        <span id="fp2CoordinateCount" class="fp2-map-badge-count">0 targets</span>
+                    </div>
+                </div>
+                <canvas id="fp2MovementCanvas" width="960" height="500" style="width:100%;height:500px;"></canvas>
+            </div>
+
+            <!-- Connection / Device / Diagnostics -->
+            <div class="fp2-grid fp2-grid--info">
                 <div class="fp2-card fp2-card--accent">
                     <h3>Connection</h3>
-                    <div class="fp2-kv"><span>API</span><span id="fp2ApiStatus" class="chip">-</span></div>
-                    <div class="fp2-kv"><span>Sensor Link</span><span id="fp2StreamStatus" class="chip">OFFLINE</span></div>
+                    <div class="fp2-kv"><span>API</span><span id="fp2ApiStatus" class="chip chip--neutral">-</span></div>
+                    <div class="fp2-kv"><span>Sensor Link</span><span id="fp2StreamStatus" class="chip chip--neutral">OFFLINE</span></div>
                     <div class="fp2-kv"><span>State</span><strong id="fp2ConnectionState">-</strong></div>
                     <div class="fp2-kv"><span>Transport</span><strong id="fp2TransportValue">-</strong></div>
                     <div class="fp2-kv"><span>Source</span><code id="fp2EntityId">fp2</code></div>
-                    <div class="fp2-kv"><span>Last Update</span><span id="fp2UpdatedAt">-</span></div>
+                    <div class="fp2-kv"><span>Last Packet</span><strong id="fp2LastPacketAge">-</strong></div>
                 </div>
 
                 <div class="fp2-card">
@@ -196,70 +266,92 @@
                     <div class="fp2-kv"><span>MAC</span><code id="fp2DeviceMac">-</code></div>
                     <div class="fp2-kv"><span>Endpoint</span><code id="fp2DeviceIp">-</code></div>
                     <div class="fp2-kv"><span>Pairing ID</span><code id="fp2PairingId">-</code></div>
+                    <div class="fp2-kv"><span>Cloud DID</span><code id="fp2CloudDid">-</code></div>
+                    <div class="fp2-kv"><span>Position ID</span><code id="fp2PositionId">-</code></div>
                     <div class="fp2-kv"><span>Room</span><strong id="fp2RoomValue">-</strong></div>
                     <div class="fp2-kv"><span>Firmware</span><strong id="fp2FirmwareValue">-</strong></div>
                     <div class="fp2-kv"><span>Network</span><strong id="fp2NetworkValue">-</strong></div>
                 </div>
 
                 <div class="fp2-card">
-                    <h3>Live Readings</h3>
-                    <div class="fp2-kv"><span>Presence</span><span id="fp2PresenceValue" class="presence-pill absent">ABSENT</span></div>
-                    <div class="fp2-kv"><span>Targets</span><strong id="fp2PersonsCount">0</strong></div>
-                    <div class="fp2-kv"><span>Zones</span><strong id="fp2ZonesCount">0</strong></div>
-                    <div class="fp2-kv"><span>Light</span><strong id="fp2LightLevel">-</strong></div>
-                    <div class="fp2-kv"><span>Current Zone</span><strong id="fp2CurrentZone">-</strong></div>
-                    <div class="fp2-kv"><span>Last Packet</span><strong id="fp2LastPacketAge">-</strong></div>
-                    <div class="fp2-kv"><span>Presence Duration</span><strong id="fp2PresenceDuration">0s</strong></div>
+                    <h3>Sensor Diagnostics</h3>
+                    <div class="fp2-kv"><span>Online</span><strong id="fp2OnlineState">-</strong></div>
+                    <div class="fp2-kv"><span>Sensor Angle</span>
+                        <span class="fp2-angle-row"><strong id="fp2SensorAngle">-</strong><canvas id="fp2AngleDial" width="32" height="32"></canvas></span>
+                    </div>
+                    <div class="fp2-kv"><span>Fall State</span><strong id="fp2FallState">-</strong></div>
+                    <div class="fp2-kv"><span>Device Timestamp</span><strong id="fp2DeviceTimestamp">-</strong></div>
+                    <div class="fp2-kv"><span>Coordinate Change</span><strong id="fp2CoordinateChangeAge">-</strong></div>
+                    <div class="fp2-kv"><span>API Domain</span><strong id="fp2ApiDomain">-</strong></div>
                 </div>
             </div>
 
+            <!-- Targets -->
             <div class="fp2-card">
-                <h3>Zone Windows</h3>
-                <p class="help-text">Each window reflects one live occupancy channel reported by your FP2.</p>
+                <div class="fp2-card-header-row">
+                    <h3>Target Telemetry</h3>
+                    <div class="fp2-target-summary">
+                        <span>Primary: <strong id="fp2PrimaryTargetId">-</strong></span>
+                        <span>Type: <strong id="fp2PrimaryTargetType">-</strong></span>
+                        <span>Coords: <strong id="fp2PrimaryTargetCoords">-</strong></span>
+                        <span>Dist: <strong id="fp2PrimaryTargetDistance">-</strong></span>
+                        <span>Angle: <strong id="fp2PrimaryTargetAngle">-</strong></span>
+                    </div>
+                </div>
+                <div id="fp2TargetList" class="fp2-target-list"></div>
+            </div>
+
+            <!-- Zone Occupancy -->
+            <div class="fp2-card">
+                <h3>Zone Occupancy</h3>
                 <div id="fp2ZoneWindows" class="fp2-zone-windows"></div>
             </div>
 
-            <div class="fp2-grid fp2-grid--events">
-                <div class="fp2-card">
-                    <h3>Recent Presence Changes</h3>
+            <!-- Presence Timeline + Events -->
+            <div class="fp2-grid fp2-grid--timeline">
+                <div class="fp2-card fp2-card--graph">
+                    <h3>Presence Timeline</h3>
+                    <canvas id="fp2RealtimeGraph" width="960" height="220" style="width:100%;height:220px;border-radius:8px;"></canvas>
+                    <div class="fp2-graph-legend">
+                        <span class="legend-item"><span class="legend-color present"></span> Present</span>
+                        <span class="legend-item"><span class="legend-color absent"></span> Absent</span>
+                        <span class="legend-item"><span class="legend-color targets"></span> Targets</span>
+                    </div>
+                </div>
+
+                <div class="fp2-card fp2-card--events">
+                    <h3>Event Log</h3>
+                    <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
+                    <h4 class="fp2-events-divider">Presence History</h4>
                     <ul id="fp2HistoryList" class="fp2-history-list"></ul>
                 </div>
-
-                <div class="fp2-card">
-                    <h3>Movement Events</h3>
-                    <p class="help-text">Detected presence, target, and zone transitions from the active FP2 stream.</p>
-                    <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
-                </div>
             </div>
 
+            <!-- Resource Channels -->
             <div class="fp2-card">
-                <h3>Movement Map</h3>
-                <p class="help-text">A live room view that highlights active FP2 zones and targets right now.</p>
-                <canvas id="fp2MovementCanvas" width="960" height="260" style="width: 100%; height: 260px;"></canvas>
+                <h3>Resource Channels</h3>
+                <p class="help-text" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:8px;">Raw Aqara resource ID и текущие значения из live payload.</p>
+                <div id="fp2ResourceGrid" class="fp2-resource-grid"></div>
             </div>
 
-            <div class="fp2-card">
-                <h3>Real-time Presence Graph</h3>
-                <p class="help-text">Live visualization of FP2 presence state over time (last 60 seconds).</p>
-                <canvas id="fp2RealtimeGraph" width="960" height="200" style="width: 100%; height: 200px; background: #1a1a2e; border-radius: 8px;"></canvas>
-                <div class="fp2-graph-legend">
-                    <span class="legend-item"><span class="legend-color present"></span> Presence detected</span>
-                    <span class="legend-item"><span class="legend-color absent"></span> No presence</span>
-                </div>
+            <!-- Raw Payloads -->
+            <div class="fp2-grid fp2-grid--payloads">
+                <details class="fp2-payload-details">
+                    <summary>Raw Sensor Telemetry</summary>
+                    <pre id="fp2SensorOutput" class="fp2-raw-output">{}</pre>
+                </details>
+                <details class="fp2-payload-details">
+                    <summary>Compatibility Payload</summary>
+                    <pre id="fp2RawOutput" class="fp2-raw-output">{}</pre>
+                </details>
             </div>
-
-            <details class="fp2-payload-details">
-                <summary>Raw Payload</summary>
-                <pre id="fp2RawOutput" class="fp2-raw-output">{}</pre>
-            </details>
         </section>
-
     </div>
 
     <!-- Error Toast -->
     <div id="globalErrorToast" class="error-toast"></div>
 
-    <!-- Load application scripts as modules -->
-    <script type="module" src="app.js?v=20260307-fp2only6"></script>
+    <!-- Load application -->
+    <script type="module" src="app.js?v=20260308-v2"></script>
 </body>
 </html>

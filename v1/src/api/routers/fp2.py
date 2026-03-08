@@ -9,6 +9,8 @@ Supports two data sources:
 import asyncio
 import json
 import logging
+import re
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +30,7 @@ _hap_latest: Dict[str, Any] = {}
 _hap_listeners: list = []
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _PAIRING_DATA_PATH = _PROJECT_ROOT / ".fp2_pairing.json"
+_MAC_RE = re.compile(r"([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}", re.IGNORECASE)
 
 
 def _get_latest_hap_snapshot() -> Optional[FP2Snapshot]:
@@ -57,10 +60,43 @@ def _load_pairing_metadata() -> Dict[str, Any]:
         return {}
 
     try:
-        return json.loads(_PAIRING_DATA_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(_PAIRING_DATA_PATH.read_text(encoding="utf-8"))
     except Exception:
         logger.warning("Failed to read FP2 pairing metadata from %s", _PAIRING_DATA_PATH)
         return {}
+
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _normalize_mac(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = _MAC_RE.search(value)
+    if not match:
+        return None
+    return match.group(0).lower().replace("-", ":")
+
+
+def _lookup_local_ip_by_mac(mac_address: str | None) -> str | None:
+    """Best-effort local ARP lookup for the current device IP."""
+    normalized = _normalize_mac(mac_address)
+    if not normalized:
+        return None
+
+    try:
+        output = subprocess.check_output(["arp", "-a"], text=True, timeout=3)
+    except Exception:
+        return None
+
+    for line in output.splitlines():
+        if normalized not in line.lower():
+            continue
+        match = re.search(r"\(([^)]+)\)", line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _has_direct_hap_pairing() -> bool:
@@ -97,33 +133,58 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
     if latest_snapshot is not None:
         snapshot_device = dict(latest_snapshot.raw_attributes.get("device") or {})
 
-    device_ip = pairing.get("AccessoryIP") or settings.fp2_ip_address
-    device_port = pairing.get("AccessoryPort")
     device_label = settings.fp2_name or "Aqara FP2"
     room_label = settings.fp2_room or "-"
-    wifi_channel = settings.fp2_wifi_channel or "-"
-    signal_strength = settings.fp2_signal_strength or "-"
+    connection = _hap_latest.get("connection") or {}
+    transport = (
+        connection.get("transport")
+        or pushed_device.get("transport")
+        or snapshot_device.get("transport")
+        or "hap_direct"
+    )
+    transport_key = str(transport).lower()
+    is_cloud = transport_key == "aqara_cloud"
 
-    base = {
-        "name": device_label,
-        "room": room_label,
-        "model": settings.fp2_model or "Aqara FP2",
-        "sku": settings.fp2_sku or None,
-        "device_id": settings.fp2_device_id or None,
-        "mac_address": settings.fp2_mac_address or None,
-        "firmware": settings.fp2_firmware or None,
-        "ip_address": device_ip or None,
-        "hap_port": device_port,
-        "pairing_id": pairing.get("AccessoryPairingID"),
-        "transport": "HomeKit / HAP",
-        "wifi": {
-            "ssid": settings.router_ssid or None,
-            "router_ip": settings.router_ip or None,
-            "channel": wifi_channel,
-            "signal_strength": signal_strength,
-            "bssid": settings.fp2_bssid or None,
-        },
-    }
+    if is_cloud:
+        base = {
+            "name": device_label,
+            "room": room_label,
+            "model": settings.fp2_model or "Aqara FP2",
+            "sku": settings.fp2_sku or None,
+            "device_id": settings.fp2_device_id or None,
+            "mac_address": settings.fp2_mac_address or None,
+            "firmware": settings.fp2_firmware or None,
+            "ip_address": None,
+            "hap_port": None,
+            "pairing_id": None,
+            "transport": "Aqara Cloud",
+            "wifi": {},
+        }
+    else:
+        device_ip = pairing.get("AccessoryIP") or settings.fp2_ip_address
+        device_port = pairing.get("AccessoryPort")
+        wifi_channel = settings.fp2_wifi_channel or "-"
+        signal_strength = settings.fp2_signal_strength or "-"
+        base = {
+            "name": device_label,
+            "room": room_label,
+            "model": settings.fp2_model or "Aqara FP2",
+            "sku": settings.fp2_sku or None,
+            "device_id": settings.fp2_device_id or None,
+            "mac_address": settings.fp2_mac_address or None,
+            "firmware": settings.fp2_firmware or None,
+            "ip_address": device_ip or None,
+            "hap_port": device_port,
+            "pairing_id": pairing.get("AccessoryPairingID"),
+            "transport": "HomeKit / HAP",
+            "wifi": {
+                "ssid": settings.router_ssid or None,
+                "router_ip": settings.router_ip or None,
+                "channel": wifi_channel,
+                "signal_strength": signal_strength,
+                "bssid": settings.fp2_bssid or None,
+            },
+        }
 
     merged = {**base, **snapshot_device, **pushed_device}
     merged_wifi = {
@@ -133,9 +194,16 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
     }
     merged["wifi"] = merged_wifi
 
-    connection = _hap_latest.get("connection") or {}
     if connection.get("transport"):
         merged["transport"] = connection.get("transport")
+    if connection.get("position_id"):
+        merged["position_id"] = connection.get("position_id")
+    if connection.get("api_domain"):
+        merged["api_domain"] = connection.get("api_domain")
+
+    local_ip = _lookup_local_ip_by_mac(merged.get("mac_address"))
+    if local_ip:
+        merged["ip_address"] = local_ip
 
     return merged
 
@@ -182,6 +250,8 @@ async def get_fp2_status(
             ],
             "rssi": connection.get("rssi") or hap_snapshot.raw_attributes.get("rssi"),
             "online": connection.get("online"),
+            "position_id": connection.get("position_id"),
+            "api_domain": connection.get("api_domain"),
         }
     elif latest_hap_snapshot is not None or _has_direct_hap_pairing():
         source = "hap_direct"
@@ -218,6 +288,8 @@ async def get_fp2_status(
             "zones": [],
             "rssi": connection.get("rssi") or (latest_hap_snapshot.raw_attributes.get("rssi") if latest_hap_snapshot else None),
             "online": connection.get("online"),
+            "position_id": connection.get("position_id"),
+            "api_domain": connection.get("api_domain"),
         }
     else:
         status["source"] = "home_assistant"

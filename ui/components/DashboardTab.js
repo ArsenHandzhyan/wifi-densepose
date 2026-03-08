@@ -1,7 +1,7 @@
 // Dashboard Tab Component
 
 import { healthService } from '../services/health.service.js';
-import { fp2Service } from '../services/fp2.service.js?v=20260307-dashboardlive1';
+import { fp2Service } from '../services/fp2.service.js?v=20260307-fp2max1';
 
 export class DashboardTab {
   constructor(containerElement) {
@@ -216,6 +216,8 @@ export class DashboardTab {
     const cpuPercent = systemMetrics.cpu?.percent || systemMetrics.cpu_percent;
     const memoryPercent = systemMetrics.memory?.percent || systemMetrics.memory_percent;
     const diskPercent = systemMetrics.disk?.percent || systemMetrics.disk_percent;
+    const appCpuPercent = systemMetrics.process?.cpu_percent;
+    const appMemoryMb = systemMetrics.process?.memory_mb;
 
     // CPU usage
     const cpuElement = this.container.querySelector('.cpu-usage');
@@ -236,6 +238,16 @@ export class DashboardTab {
     if (diskElement && diskPercent !== undefined) {
       diskElement.textContent = `${diskPercent.toFixed(1)}%`;
       this.updateProgressBar('disk', diskPercent);
+    }
+
+    const appCpuElement = this.container.querySelector('.app-cpu-usage');
+    if (appCpuElement && appCpuPercent !== undefined) {
+      appCpuElement.textContent = `${appCpuPercent.toFixed(1)}%`;
+    }
+
+    const appMemoryElement = this.container.querySelector('.app-memory-usage');
+    if (appMemoryElement && appMemoryMb !== undefined) {
+      appMemoryElement.textContent = `${appMemoryMb.toFixed(0)} MB`;
     }
   }
 
@@ -360,7 +372,7 @@ export class DashboardTab {
 
     const heroDescription = this.container.querySelector('.hero-description');
     if (heroDescription) {
-      heroDescription.textContent = 'This dashboard is running in FP2-only mode. Presence is read from Aqara FP2 and pushed directly into the backend over the currently active transport.';
+      heroDescription.textContent = 'This dashboard is running in FP2-only mode. It exposes live FP2 telemetry, including transport health, zone occupancy, event codes, and raw sensor diagnostics from the active transport.';
     }
 
     const detectionCount = this.container.querySelector('.detection-count');
@@ -463,8 +475,10 @@ export class DashboardTab {
     const metadata = current?.metadata || {};
     const available = metadata.available !== false;
     const presence = Boolean(metadata.presence);
-    const persons = Array.isArray(current?.persons) ? current.persons.length : 0;
     const connection = status?.connection || {};
+    const rawAttributes = current?.metadata?.raw_attributes || {};
+    const coordinateTargets = Array.isArray(rawAttributes.coordinates) ? rawAttributes.coordinates.length : 0;
+    const persons = Number(connection.targets ?? coordinateTargets ?? (Array.isArray(current?.persons) ? current.persons.length : 0)) || 0;
     const zones = Array.isArray(connection.zones) ? connection.zones : [];
     const liveZoneCount = zones.length > 0 ? zones.length : Object.keys(current?.zone_summary || {}).length;
     const transportLabel = this.formatTransport(connection.transport || status?.source || 'fp2');
@@ -538,7 +552,7 @@ export class DashboardTab {
       }
       if (statusMessage) {
         statusMessage.textContent = hasLiveStream
-          ? `Live FP2 snapshots are being pushed to the backend over ${transportLabel}`
+          ? `Live FP2 snapshots are being pushed to the backend over ${transportLabel} (${persons} target${persons === 1 ? '' : 's'}, ${liveZoneCount} zone${liveZoneCount === 1 ? '' : 's'})`
           : 'No live FP2 snapshots are currently reaching the backend';
       }
     }

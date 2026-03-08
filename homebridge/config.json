@@ -1,0 +1,17 @@
+{
+    "bridge": {
+        "name": "Homebridge 7D8E",
+        "username": "0E:94:E9:C1:7D:8E",
+        "port": 51459,
+        "pin": "599-97-417",
+        "advertiser": "bonjour-hap"
+    },
+    "accessories": [],
+    "platforms": [
+        {
+            "name": "Config",
+            "port": 8581,
+            "platform": "config"
+        }
+    ]
+}

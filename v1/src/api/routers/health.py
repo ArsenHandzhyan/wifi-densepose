@@ -15,6 +15,9 @@ from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+PROCESS = psutil.Process()
+psutil.cpu_percent(interval=None)
+PROCESS.cpu_percent(interval=None)
 
 
 # Response models
@@ -310,8 +313,11 @@ def get_system_metrics() -> Dict[str, Any]:
     """Get basic system metrics."""
     try:
         # CPU metrics
-        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_percent = psutil.cpu_percent(interval=None)
         cpu_count = psutil.cpu_count()
+        process_cpu_percent = PROCESS.cpu_percent(interval=None)
+        process_memory = PROCESS.memory_info().rss / (1024**2)
+        process_memory_percent = PROCESS.memory_percent()
         
         # Memory metrics
         memory = psutil.virtual_memory()
@@ -344,6 +350,12 @@ def get_system_metrics() -> Dict[str, Any]:
             "cpu": {
                 "percent": cpu_percent,
                 "count": cpu_count
+            },
+            "process": {
+                "cpu_percent": round(process_cpu_percent, 1),
+                "memory_mb": round(process_memory, 2),
+                "memory_percent": round(process_memory_percent, 1),
+                "pid": PROCESS.pid,
             },
             "memory": memory_metrics,
             "disk": disk_metrics,

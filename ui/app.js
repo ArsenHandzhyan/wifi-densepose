@@ -23,7 +23,42 @@ const i18n = {
     sensor_angle: 'Sensor Angle',
     coordinates: 'Coordinates',
     event_log: 'Event Log',
-    resource_channels: 'Resource Channels'
+    resource_channels: 'Resource Channels',
+    // Dashboard specific
+    api_server: 'API Server',
+    cloud_monitor: 'Cloud Monitor',
+    ui_server: 'UI Server',
+    healthy: 'HEALTHY',
+    running: 'RUNNING',
+    offline: 'OFFLINE',
+    // FP2 specific
+    present: 'PRESENT',
+    absent: 'ABSENT',
+    moving: 'Moving',
+    static: 'Static',
+    no_fall: 'No fall detected',
+    possible_fall: 'Possible fall',
+    fall_detected: 'Fall detected',
+    detection_area: 'Detection Area',
+    zone_occupied: 'OCCUPIED',
+    zone_clear: 'CLEAR',
+    live: 'LIVE',
+    slow: 'SLOW',
+    stale: 'STALE',
+    online: 'ONLINE',
+    offline_short: 'OFF',
+    // Movement events
+    no_event: 'Нет события',
+    static_presence: 'Статичное присутствие',
+    micro_movement: 'Микро-движение',
+    significant_movement: 'Заметное движение',
+    large_movement: 'Большое движение',
+    approaching: 'Приближение',
+    departing: 'Удаление',
+    moving: 'Движение',
+    static_after_movement: 'Покой после движения',
+    entering_zone: 'Вход в зону',
+    leaving_zone: 'Выход из зоны'
   },
   ru: {
     subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',
@@ -39,8 +74,51 @@ const i18n = {
     sensor_angle: 'Угол сенсора',
     coordinates: 'Координаты',
     event_log: 'Журнал событий',
-    resource_channels: 'Каналы ресурсов'
+    resource_channels: 'Каналы ресурсов',
+    // Dashboard specific
+    api_server: 'Backend API',
+    cloud_monitor: 'Cloud Monitor',
+    ui_server: 'UI Server',
+    healthy: 'РАБОТАЕТ',
+    running: 'РАБОТАЕТ',
+    offline: 'ОФФЛАЙН',
+    // FP2 specific
+    present: 'ЕСТЬ',
+    absent: 'НЕТ',
+    moving: 'Движение',
+    static: 'Покой',
+    no_fall: 'Нет падения',
+    possible_fall: 'Возможно падение',
+    fall_detected: 'Падение обнаружено',
+    detection_area: 'Зона детекции',
+    zone_occupied: 'ЗАНЯТО',
+    zone_clear: 'СВОБОДНО',
+    live: 'LIVE',
+    slow: 'SLOW',
+    stale: 'STALE',
+    online: 'ОНЛАЙН',
+    offline_short: 'ОФФ',
+    // Movement events
+    no_event: 'Нет события',
+    static_presence: 'Статичное присутствие',
+    micro_movement: 'Микро-движение',
+    significant_movement: 'Заметное движение',
+    large_movement: 'Большое движение',
+    approaching: 'Приближение',
+    departing: 'Удаление',
+    moving: 'Движение',
+    static_after_movement: 'Покой после движения',
+    entering_zone: 'Вход в зону',
+    leaving_zone: 'Выход из зоны'
   }
+};
+
+// Export i18n for use in components
+window.i18n = i18n;
+window.getCurrentLang = () => window.wifiDensePoseApp?.currentLang || 'ru';
+window.t = (key) => {
+  const lang = window.getCurrentLang();
+  return i18n[lang][key] || i18n['ru'][key] || key;
 };
 
 class WiFiDensePoseApp {

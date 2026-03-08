@@ -424,6 +424,14 @@ class WiFiDensePoseApp {
 document.addEventListener('DOMContentLoaded', () => {
   window.wifiDensePoseApp = new WiFiDensePoseApp();
   window.wifiDensePoseApp.init();
+  
+  // Export i18n for use in components
+  window.i18n = i18n;
+  window.getCurrentLang = () => window.wifiDensePoseApp?.currentLang || 'ru';
+  window.t = (key) => {
+    const lang = window.getCurrentLang();
+    return i18n[lang][key] || i18n['ru'][key] || key;
+  };
 });
 
 // Export for testing

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>i18n Language Toggle Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .test-section {
+            background: #2a2a2a;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+        button {
+            background: #38bdf8;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #7dd3fc;
+        }
+        .result {
+            background: #1e1e1e;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .success { color: #4ade80; }
+        .error { color: #f87171; }
+        h1 { color: #38bdf8; }
+        h2 { color: #a78bfa; }
+    </style>
+</head>
+<body>
+    <h1>🧪 Тест переключения языка FP2 UI</h1>
+    
+    <div class="test-section">
+        <h2>1. Проверка функции перевода window.t()</h2>
+        <button onclick="testTFunction()">Тестировать window.t()</button>
+        <div id="t-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>2. Проверка текущего языка</h2>
+        <button onclick="checkCurrentLang()">Проверить getCurrentLang()</button>
+        <div id="lang-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>3. Переключить язык</h2>
+        <button onclick="toggleLanguage()">Переключить RU ↔ EN</button>
+        <div id="toggle-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>4. Тест всех переводов</h2>
+        <button onclick="testAllTranslations()">Тестировать все переводы</button>
+        <div id="all-translations-result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>5. Открыть UI</h2>
+        <button onclick="openUI()">Открыть http://127.0.0.1:3000</button>
+    </div>
+
+    <script>
+        // Импортируем i18n из app.js
+        const script = document.createElement('script');
+        script.src = 'http://127.0.0.1:3000/app.js';
+        script.onload = () => {
+            console.log('App.js loaded');
+        };
+        document.head.appendChild(script);
+
+        function testTFunction() {
+            const resultDiv = document.getElementById('t-result');
+            try {
+                if (typeof window.t !== 'function') {
+                    resultDiv.innerHTML = '<span class="error">❌ window.t() не определена</span>';
+                    return;
+                }
+                
+                const tests = [
+                    { key: 'present', expected_ru: 'ЕСТЬ', expected_en: 'PRESENT' },
+                    { key: 'moving', expected_ru: 'Движение', expected_en: 'Moving' },
+                    { key: 'zone_occupied', expected_ru: 'ЗАНЯТО', expected_en: 'OCCUPIED' }
+                ];
+                
+                let html = '<div><strong>Текущий язык:</strong> ' + (window.getCurrentLang ? window.getCurrentLang() : 'неизвестно') + '</div>';
+                html += '<br/><strong>Тесты:</strong><br/>';
+                
+                tests.forEach(test => {
+                    const translation = window.t(test.key);
+                    const passed = translation === test.expected_ru || translation === test.expected_en;
+                    const icon = passed ? '✅' : '❌';
+                    html += `<div>${icon} ${test.key}: "${translation}"</div>`;
+                });
+                
+                resultDiv.innerHTML = html;
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ Ошибка: ${error.message}</span>`;
+            }
+        }
+        
+        function checkCurrentLang() {
+            const resultDiv = document.getElementById('lang-result');
+            try {
+                if (typeof window.getCurrentLang !== 'function') {
+                    resultDiv.innerHTML = '<span class="error">❌ getCurrentLang не определена</span>';
+                    return;
+                }
+                
+                const lang = window.getCurrentLang();
+                const saved = localStorage.getItem('fp2_lang');
+                
+                resultDiv.innerHTML = `
+                    <div><strong>Текущий язык:</strong> ${lang}</div>
+                    <div><strong>Сохранён в localStorage:</strong> ${saved || 'нет'}</div>
+                    <div><strong>По умолчанию:</strong> ru</div>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ Ошибка: ${error.message}</span>`;
+            }
+        }
+        
+        function toggleLanguage() {
+            const resultDiv = document.getElementById('toggle-result');
+            try {
+                const oldLang = window.getCurrentLang ? window.getCurrentLang() : 'неизвестно';
+                
+                // Переключаем через applyLanguage если доступна
+                if (window.wifiDensePoseApp && typeof window.wifiDensePoseApp.applyLanguage === 'function') {
+                    const newLang = oldLang === 'ru' ? 'en' : 'ru';
+                    window.wifiDensePoseApp.applyLanguage(newLang);
+                    
+                    resultDiv.innerHTML = `
+                        <div class="success">✅ Язык переключен!</div>
+                        <div><strong>Был:</strong> ${oldLang}</div>
+                        <div><strong>Стал:</strong> ${newLang}</div>
+                        <div><strong>Перевод present:</strong> ${window.t('present')}</div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = '<span class="error">❌ applyLanguage не доступна<br/>Попробуйте обновить страницу</span>';
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ Ошибка: ${error.message}</span>`;
+            }
+        }
+        
+        function testAllTranslations() {
+            const resultDiv = document.getElementById('all-translations-result');
+            try {
+                const keys = ['present', 'absent', 'moving', 'no_fall', 'zone_occupied', 'zone_clear'];
+                
+                let html = '<table style="width:100%; text-align:left;">';
+                html += '<tr><th>Ключ</th><th>RU</th><th>EN</th></tr>';
+                
+                keys.forEach(key => {
+                    const ru = window.i18n.ru[key] || '❌ нет';
+                    const en = window.i18n.en[key] || '❌ нет';
+                    html += `<tr><td>${key}</td><td>${ru}</td><td>${en}</td></tr>`;
+                });
+                
+                html += '</table>';
+                resultDiv.innerHTML = html;
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">❌ Ошибка: ${error.message}</span>`;
+            }
+        }
+        
+        function openUI() {
+            window.open('http://127.0.0.1:3000', '_blank');
+        }
+        
+        // Автозапуск теста при загрузке
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                testTFunction();
+                checkCurrentLang();
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

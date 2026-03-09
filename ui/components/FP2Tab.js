@@ -675,6 +675,8 @@ export class FP2Tab {
       canvas.height = pixelHeight;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if ('imageSmoothingEnabled' in ctx) ctx.imageSmoothingEnabled = true;
+    if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
     return { width: cssWidth, height: cssHeight };
   }
 
@@ -690,6 +692,98 @@ export class FP2Tab {
     return `${trimmed}…`;
   }
 
+  fitCanvasTextLines(ctx, text, maxWidth, maxLines = 2) {
+    const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (!normalized || !Number.isFinite(maxWidth) || maxWidth <= 0 || maxLines <= 0) return [];
+    if (ctx.measureText(normalized).width <= maxWidth) return [normalized];
+
+    const words = normalized.split(' ');
+    if (words.length === 1) return [this.fitCanvasText(ctx, normalized, maxWidth)];
+
+    const lines = [];
+    let current = '';
+
+    for (let i = 0; i < words.length; i += 1) {
+      const word = words[i];
+      const candidate = current ? `${current} ${word}` : word;
+      if (ctx.measureText(candidate).width <= maxWidth) {
+        current = candidate;
+        continue;
+      }
+
+      if (current) {
+        lines.push(current);
+      }
+
+      if (lines.length >= maxLines - 1) {
+        const remainder = [word, ...words.slice(i + 1)].join(' ');
+        lines.push(this.fitCanvasText(ctx, remainder, maxWidth));
+        return lines.slice(0, maxLines);
+      }
+
+      current = word;
+      if (ctx.measureText(current).width > maxWidth) {
+        lines.push(this.fitCanvasText(ctx, current, maxWidth));
+        current = '';
+      }
+    }
+
+    if (current) {
+      lines.push(current);
+    }
+
+    return lines.slice(0, maxLines);
+  }
+
+  drawCanvasTag(ctx, x, y, text, options = {}) {
+    const value = String(text ?? '').trim();
+    if (!value) return;
+
+    const {
+      bounds = null,
+      maxWidth = 180,
+      paddingX = 10,
+      paddingY = 6,
+      font = '600 12px Inter, system-ui, sans-serif',
+      color = '#e2e8f0',
+      background = 'rgba(8, 15, 28, 0.82)',
+      border = 'rgba(148, 163, 184, 0.2)',
+      radius = 999,
+      align = 'center'
+    } = options;
+
+    ctx.save();
+    ctx.font = font;
+    const fitted = this.fitCanvasText(ctx, value, maxWidth);
+    const textWidth = ctx.measureText(fitted).width;
+    const boxWidth = Math.ceil(textWidth + paddingX * 2);
+    const boxHeight = 28;
+    let boxX = align === 'left' ? x : x - boxWidth / 2;
+    let boxY = y;
+
+    if (bounds) {
+      const minX = Number.isFinite(bounds.left) ? bounds.left : boxX;
+      const maxX = Number.isFinite(bounds.right) ? bounds.right : boxX + boxWidth;
+      const minY = Number.isFinite(bounds.top) ? bounds.top : boxY;
+      const maxY = Number.isFinite(bounds.bottom) ? bounds.bottom : boxY + boxHeight;
+      boxX = Math.min(Math.max(boxX, minX), Math.max(minX, maxX - boxWidth));
+      boxY = Math.min(Math.max(boxY, minY), Math.max(minY, maxY - boxHeight));
+    }
+
+    this.drawRoundedRect(ctx, boxX, boxY, boxWidth, boxHeight, radius);
+    ctx.fillStyle = background;
+    ctx.fill();
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fitted, boxX + boxWidth / 2, boxY + boxHeight / 2 + 1);
+    ctx.restore();
+  }
+
   drawCanvasTextBubble(ctx, x, y, lines, options = {}) {
     const visibleLines = (lines || []).filter(Boolean);
     if (!visibleLines.length) return;
@@ -700,22 +794,35 @@ export class FP2Tab {
       offsetY = -18,
       paddingX = 10,
       paddingY = 7,
-      titleFont = '600 13px "SFMono-Regular", "JetBrains Mono", monospace',
-      bodyFont = '12px "SFMono-Regular", "JetBrains Mono", monospace',
+      titleFont = '700 13px Inter, system-ui, sans-serif',
+      bodyFont = '600 12px Inter, system-ui, sans-serif',
       background = 'rgba(8, 15, 28, 0.82)',
       border = 'rgba(148, 163, 184, 0.18)',
       titleColor = '#e2e8f0',
       bodyColor = '#94a3b8',
-      radius = 10
+      radius = 10,
+      maxWidth = null
     } = options;
 
     ctx.save();
+    const maxBubbleContentWidth = (() => {
+      if (Number.isFinite(maxWidth) && maxWidth > 24) return maxWidth;
+      if (!bounds) return null;
+      const left = Number.isFinite(bounds.left) ? bounds.left : 0;
+      const right = Number.isFinite(bounds.right) ? bounds.right : 0;
+      const available = right - left - paddingX * 2 - 8;
+      return available > 24 ? available : null;
+    })();
     const fonts = visibleLines.map((_, index) => (index === 0 ? titleFont : bodyFont));
-    const lineMetrics = visibleLines.map((line, index) => {
+    const fittedLines = visibleLines.map((line, index) => {
+      ctx.font = fonts[index];
+      return maxBubbleContentWidth ? this.fitCanvasText(ctx, line, maxBubbleContentWidth) : line;
+    });
+    const lineMetrics = fittedLines.map((line, index) => {
       ctx.font = fonts[index];
       return ctx.measureText(line).width;
     });
-    const lineHeights = visibleLines.map((_, index) => (index === 0 ? 14 : 13));
+    const lineHeights = fittedLines.map((_, index) => (index === 0 ? 15 : 14));
     const contentWidth = Math.max(...lineMetrics);
     const boxWidth = Math.ceil(contentWidth + paddingX * 2);
     const boxHeight = Math.ceil(lineHeights.reduce((sum, value) => sum + value, 0) + paddingY * 2 + Math.max(0, visibleLines.length - 1) * 2);
@@ -741,7 +848,7 @@ export class FP2Tab {
     ctx.stroke();
 
     let cursorY = boxY + paddingY + 10;
-    visibleLines.forEach((line, index) => {
+    fittedLines.forEach((line, index) => {
       ctx.font = fonts[index];
       ctx.fillStyle = index === 0 ? titleColor : bodyColor;
       ctx.fillText(line, boxX + paddingX, cursorY);
@@ -4368,10 +4475,10 @@ export class FP2Tab {
     }
 
     ctx.fillStyle = '#f8fafc';
-    ctx.font = '600 13px sans-serif';
+    ctx.font = '700 13px Inter, system-ui, sans-serif';
     ctx.fillText(this.getRoomProfileLabel(profile), roomRect.x + 16, roomRect.y + 28);
     ctx.fillStyle = 'rgba(148,163,184,0.75)';
-    ctx.font = '11px monospace';
+    ctx.font = '600 11px Inter, system-ui, sans-serif';
     ctx.fillText(
       `${Math.round(widthCm)} × ${Math.round(depthCm)} cm${calibrated ? ` · ${t('fp2.layout.calibrated_short')}` : ''}`,
       roomRect.x + 16,
@@ -4419,7 +4526,7 @@ export class FP2Tab {
     ctx.arc(originX, originY, 6, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = 'rgba(248,250,252,0.6)';
-    ctx.font = '11px sans-serif';
+    ctx.font = '600 11px Inter, system-ui, sans-serif';
     ctx.fillText(t('fp2.sensor_label'), originX - 18, originY + 22);
 
     if (Number.isFinite(sensorAngle)) {
@@ -4462,6 +4569,13 @@ export class FP2Tab {
       const centerY = toCanvasY(item.y);
       const isSelected = item.id === this.state.selectedRoomItemId;
       const icon = this.getRoomItemIcon(item);
+      const labelText = this.getRoomItemLabel(item);
+      const labelBounds = {
+        left: roomRect.x + 10,
+        right: roomRect.x + roomRect.width - 10,
+        top: roomRect.y + 10,
+        bottom: roomRect.y + roomRect.height - 10
+      };
 
       ctx.save();
       ctx.translate(centerX, centerY);
@@ -4494,26 +4608,34 @@ export class FP2Tab {
       }
 
       const minBox = Math.min(width, depth);
-      const iconFontPx = Math.max(14, Math.min(22, Math.round(minBox / 2.9)));
-      const labelFontPx = Math.max(11, Math.min(16, Math.round(minBox / 3.8)));
+      const iconFontPx = Math.max(14, Math.min(22, Math.round(minBox / 2.8)));
+      const labelFontPx = Math.max(12, Math.min(15, Math.round(minBox / 3.5)));
       const showInlineLabel = !['door', 'curtain', 'tv'].includes(item.type)
-        && (isSelected || (width >= 110 && depth >= 54));
+        && (isSelected || (width >= 118 && depth >= 58));
 
       ctx.fillStyle = '#e2e8f0';
-      ctx.font = `600 ${iconFontPx}px sans-serif`;
+      ctx.font = `700 ${iconFontPx}px Inter, system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.shadowColor = 'rgba(8, 15, 28, 0.85)';
-      ctx.shadowBlur = 6;
-      ctx.fillText(icon, 0, showInlineLabel ? -8 : 0);
+      ctx.shadowBlur = 8;
 
+      let inlineLabelLines = [];
       if (showInlineLabel) {
-        ctx.font = `600 ${labelFontPx}px sans-serif`;
-        const label = this.fitCanvasText(ctx, this.getRoomItemLabel(item), Math.max(40, width - 18));
-        const labelY = Math.min(depth / 2 - 12, 18);
-        const textMetrics = ctx.measureText(label);
-        const backgroundWidth = Math.max(30, textMetrics.width + 14);
-        const backgroundHeight = labelFontPx + 8;
+        ctx.font = `700 ${labelFontPx}px Inter, system-ui, sans-serif`;
+        inlineLabelLines = this.fitCanvasTextLines(ctx, labelText, Math.max(52, width - 22), 2);
+      }
+      const iconOffsetY = inlineLabelLines.length ? -Math.min(12, depth * 0.14) : 0;
+      ctx.font = `700 ${iconFontPx}px Inter, system-ui, sans-serif`;
+      ctx.fillText(icon, 0, iconOffsetY);
+
+      if (inlineLabelLines.length) {
+        ctx.font = `700 ${labelFontPx}px Inter, system-ui, sans-serif`;
+        const lineWidths = inlineLabelLines.map((line) => ctx.measureText(line).width);
+        const backgroundWidth = Math.max(46, Math.max(...lineWidths) + 18);
+        const lineGap = labelFontPx + 1;
+        const backgroundHeight = inlineLabelLines.length * lineGap + 10;
+        const labelY = Math.min(depth / 2 - backgroundHeight / 2 - 8, 20);
         ctx.fillStyle = 'rgba(8, 15, 28, 0.72)';
         this.drawRoundedRect(
           ctx,
@@ -4528,9 +4650,13 @@ export class FP2Tab {
         ctx.lineWidth = 1;
         ctx.stroke();
         ctx.fillStyle = '#e2e8f0';
-        ctx.fillText(label, 0, labelY + 1);
+        inlineLabelLines.forEach((line, index) => {
+          const lineYOffset = ((index - (inlineLabelLines.length - 1) / 2) * lineGap) + 1;
+          ctx.fillText(line, 0, labelY + lineYOffset);
+        });
       }
       ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
 
       if (isSelected) {
         ctx.strokeStyle = 'rgba(248,250,252,0.85)';
@@ -4544,10 +4670,24 @@ export class FP2Tab {
         ctx.fillRect(width / 2 - 10, depth / 2 - 10, 12, 12);
       }
       ctx.restore();
+
+      const shouldDrawExternalLabel = !inlineLabelLines.length || depth < 70;
+      if (shouldDrawExternalLabel) {
+        const tagY = centerY - (depth / 2) - 34 < labelBounds.top
+          ? centerY + (depth / 2) + 10
+          : centerY - (depth / 2) - 30;
+        this.drawCanvasTag(ctx, centerX, tagY, labelText, {
+          bounds: labelBounds,
+          maxWidth: Math.min(190, Math.max(90, roomRect.width * 0.22)),
+          font: `700 ${Math.max(11, Math.min(13, labelFontPx))}px Inter, system-ui, sans-serif`,
+          background: isSelected ? 'rgba(8, 15, 28, 0.9)' : 'rgba(8, 15, 28, 0.78)',
+          border: isSelected ? 'rgba(248,250,252,0.34)' : 'rgba(148, 163, 184, 0.18)'
+        });
+      }
     });
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
-    ctx.font = '12px sans-serif';
+    ctx.font = '12px Inter, system-ui, sans-serif';
   }
 
   drawCoordinateMap(ctx, width, height, targets, allTargets, sensorAngle, available, roomProfile, presence) {
@@ -4672,7 +4812,7 @@ export class FP2Tab {
       ctx.fillStyle = available
         ? (targets.length > 0 ? 'rgba(74,222,128,0.9)' : 'rgba(251,191,36,0.9)')
         : 'rgba(248,113,113,0.9)';
-      ctx.font = '700 12px monospace';
+      ctx.font = '700 12px Inter, system-ui, sans-serif';
       ctx.textAlign = 'right';
       ctx.fillText(
         available
@@ -4688,7 +4828,7 @@ export class FP2Tab {
       ctx.textAlign = 'left';
 
       ctx.fillStyle = 'rgba(148,163,184,0.45)';
-      ctx.font = '9px monospace';
+      ctx.font = '600 10px Inter, system-ui, sans-serif';
       ctx.fillText('+Y', originX + 4, roomRect.y + 10);
       ctx.fillText('+X', roomRect.x + roomRect.width - 18, originY - 6);
       ctx.fillText('-X', roomRect.x + 6, originY - 6);
@@ -4768,7 +4908,7 @@ export class FP2Tab {
       ctx.setLineDash([]);
 
       ctx.fillStyle = 'rgba(250,204,21,0.85)';
-      ctx.font = '10px monospace';
+      ctx.font = '600 10px Inter, system-ui, sans-serif';
       ctx.fillText(`${Math.round(sensorAngle)}°`, rx + 6, ry - 4);
     }
 
@@ -4891,7 +5031,7 @@ export class FP2Tab {
 
     // Status badge
     ctx.fillStyle = available ? 'rgba(74,222,128,0.9)' : 'rgba(248,113,113,0.9)';
-    ctx.font = '700 12px monospace';
+    ctx.font = '700 12px Inter, system-ui, sans-serif';
     ctx.textAlign = 'right';
     ctx.fillText(
       available
@@ -4904,7 +5044,7 @@ export class FP2Tab {
 
     // Axis labels
     ctx.fillStyle = 'rgba(148,163,184,0.4)';
-    ctx.font = '9px monospace';
+    ctx.font = '600 10px Inter, system-ui, sans-serif';
     ctx.fillText('+Y', originX + 4, plotTop + 8);
     ctx.fillText('-Y', originX + 4, plotTop + plotHeight - 4);
     ctx.fillText('+X', plotLeft + plotWidth - 18, originY - 4);

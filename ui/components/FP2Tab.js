@@ -4536,12 +4536,11 @@ export class FP2Tab {
       const ry = originY - Math.sin(rad) * rayLen;
       const fovHalf = 30 * (Math.PI / 180);
 
-      ctx.fillStyle = 'rgba(250,204,21,0.05)';
-      ctx.beginPath();
-      ctx.moveTo(originX, originY);
-      ctx.arc(originX, originY, rayLen, -(rad + fovHalf), -(rad - fovHalf));
-      ctx.closePath();
-      ctx.fill();
+      this.drawFovCone(ctx, originX, originY, rayLen, rad, fovHalf, {
+        fill: 'rgba(250,204,21,0.045)',
+        edge: 'rgba(250,204,21,0.12)',
+        edgeWidth: 1
+      });
 
       ctx.strokeStyle = 'rgba(250,204,21,0.45)';
       ctx.lineWidth = 2;
@@ -4670,14 +4669,14 @@ export class FP2Tab {
       }
       ctx.restore();
 
-      const shouldDrawExternalLabel = true;
+      const shouldDrawExternalLabel = isSelected;
       if (shouldDrawExternalLabel) {
         const tagY = centerY - (depth / 2) - 34 < labelBounds.top
           ? centerY + (depth / 2) + 10
           : centerY - (depth / 2) - 30;
         this.drawCanvasTag(ctx, centerX, tagY, labelText, {
           bounds: labelBounds,
-          maxWidth: Math.min(220, Math.max(112, roomRect.width * 0.25)),
+          maxWidth: Math.min(260, Math.max(136, roomRect.width * 0.34)),
           font: `700 ${Math.max(11, Math.min(13, labelFontPx))}px Inter, system-ui, sans-serif`,
           background: isSelected ? 'rgba(8, 15, 28, 0.94)' : 'rgba(8, 15, 28, 0.86)',
           border: isSelected ? 'rgba(248,250,252,0.38)' : 'rgba(148, 163, 184, 0.22)'
@@ -4902,12 +4901,11 @@ export class FP2Tab {
 
       // FOV cone
       const fovHalf = 30 * (Math.PI / 180);
-      ctx.fillStyle = 'rgba(250,204,21,0.05)';
-      ctx.beginPath();
-      ctx.moveTo(originX, originY);
-      ctx.arc(originX, originY, rayLen, -(rad + fovHalf), -(rad - fovHalf));
-      ctx.closePath();
-      ctx.fill();
+      this.drawFovCone(ctx, originX, originY, rayLen, rad, fovHalf, {
+        fill: 'rgba(250,204,21,0.05)',
+        edge: 'rgba(250,204,21,0.12)',
+        edgeWidth: 1
+      });
 
       ctx.strokeStyle = 'rgba(250,204,21,0.5)';
       ctx.lineWidth = 2;
@@ -5071,6 +5069,36 @@ export class FP2Tab {
     ctx.lineTo(x, y + r);
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.closePath();
+  }
+
+  drawFovCone(ctx, originX, originY, rayLen, rad, fovHalf, options = {}) {
+    const {
+      fill = 'rgba(250,204,21,0.05)',
+      edge = 'rgba(250,204,21,0.12)',
+      edgeWidth = 1
+    } = options;
+
+    const leftX = originX + Math.cos(rad - fovHalf) * rayLen;
+    const leftY = originY - Math.sin(rad - fovHalf) * rayLen;
+    const rightX = originX + Math.cos(rad + fovHalf) * rayLen;
+    const rightY = originY - Math.sin(rad + fovHalf) * rayLen;
+
+    ctx.beginPath();
+    ctx.moveTo(originX, originY);
+    ctx.lineTo(leftX, leftY);
+    ctx.lineTo(rightX, rightY);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = edgeWidth;
+    ctx.beginPath();
+    ctx.moveTo(originX, originY);
+    ctx.lineTo(leftX, leftY);
+    ctx.moveTo(originX, originY);
+    ctx.lineTo(rightX, rightY);
+    ctx.stroke();
   }
 
   // ── Real-time Presence Graph (enhanced with target count) ──

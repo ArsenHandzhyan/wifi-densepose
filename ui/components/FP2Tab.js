@@ -1,6 +1,6 @@
 // FP2 Monitor Tab Component — Ultra Edition
 
-import { fp2Service } from '../services/fp2.service.js?v=20260309-v3';
+import { fp2Service } from '../services/fp2.service.js?v=20260309-v4';
 import { t, tp } from '../services/i18n.js?v=20260309-v22';
 import {
   BUILTIN_ROOM_ITEM_LIBRARY,
@@ -175,6 +175,8 @@ export class FP2Tab {
       coordinateEnableBusy: false,
       selectedScenarioId: null,
       scenarioBusyId: null,
+      roomConfigBackendReady: false,
+      roomConfigHydrating: false,
       lastRoomProjection: null,
       rawTargets: [],
       filteredTargets: [],
@@ -190,12 +192,14 @@ export class FP2Tab {
         lastSampleAtMs: 0
       }
     };
+    this.roomConfigSaveTimer = null;
     this.renderLoopUntilMs = 0;
   }
 
   async init() {
     this.cacheElements();
     this.loadRoomProfiles();
+    await this.syncRoomConfigWithBackend();
     this.loadLocalHistory();
     this.loadScenarioPreference();
     this.bindEvents();
@@ -433,6 +437,7 @@ export class FP2Tab {
       this.elements.roomTemplateSelect.addEventListener('change', (event) => {
         this.state.selectedRoomTemplateId = event.target.value;
         this.renderRoomProfileControls();
+        this.scheduleRoomConfigSave();
       });
     }
 
@@ -655,6 +660,94 @@ export class FP2Tab {
     this.drawCoordinateQualityGraph();
   }
 
+  prepareCanvasForDrawing(canvas, ctx) {
+    const rect = canvas.getBoundingClientRect();
+    const cssWidth = Math.max(1, Math.round(rect.width || canvas.clientWidth || canvas.width || 1));
+    const cssHeight = Math.max(1, Math.round(rect.height || canvas.clientHeight || canvas.height || 1));
+    const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+    const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+    const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { width: cssWidth, height: cssHeight };
+  }
+
+  fitCanvasText(ctx, text, maxWidth) {
+    const normalized = String(text ?? '');
+    if (!normalized || !Number.isFinite(maxWidth) || maxWidth <= 0) return '';
+    if (ctx.measureText(normalized).width <= maxWidth) return normalized;
+
+    let trimmed = normalized;
+    while (trimmed.length > 1 && ctx.measureText(`${trimmed}…`).width > maxWidth) {
+      trimmed = trimmed.slice(0, -1);
+    }
+    return `${trimmed}…`;
+  }
+
+  drawCanvasTextBubble(ctx, x, y, lines, options = {}) {
+    const visibleLines = (lines || []).filter(Boolean);
+    if (!visibleLines.length) return;
+
+    const {
+      bounds = null,
+      offsetX = 14,
+      offsetY = -18,
+      paddingX = 8,
+      paddingY = 6,
+      titleFont = '600 11px monospace',
+      bodyFont = '10px monospace',
+      background = 'rgba(8, 15, 28, 0.82)',
+      border = 'rgba(148, 163, 184, 0.18)',
+      titleColor = '#e2e8f0',
+      bodyColor = '#94a3b8',
+      radius = 10
+    } = options;
+
+    ctx.save();
+    const fonts = visibleLines.map((_, index) => (index === 0 ? titleFont : bodyFont));
+    const lineMetrics = visibleLines.map((line, index) => {
+      ctx.font = fonts[index];
+      return ctx.measureText(line).width;
+    });
+    const lineHeights = visibleLines.map((_, index) => (index === 0 ? 13 : 12));
+    const contentWidth = Math.max(...lineMetrics);
+    const boxWidth = Math.ceil(contentWidth + paddingX * 2);
+    const boxHeight = Math.ceil(lineHeights.reduce((sum, value) => sum + value, 0) + paddingY * 2 + Math.max(0, visibleLines.length - 1) * 2);
+
+    let boxX = x + offsetX;
+    let boxY = y + offsetY;
+    if (bounds) {
+      const minX = Number.isFinite(bounds.left) ? bounds.left : 0;
+      const maxX = Number.isFinite(bounds.right) ? bounds.right : boxX + boxWidth;
+      const minY = Number.isFinite(bounds.top) ? bounds.top : 0;
+      const maxY = Number.isFinite(bounds.bottom) ? bounds.bottom : boxY + boxHeight;
+      if (boxX + boxWidth > maxX) boxX = x - boxWidth - 14;
+      if (boxX < minX) boxX = minX;
+      if (boxY < minY) boxY = y + 12;
+      if (boxY + boxHeight > maxY) boxY = Math.max(minY, maxY - boxHeight);
+    }
+
+    this.drawRoundedRect(ctx, boxX, boxY, boxWidth, boxHeight, radius);
+    ctx.fillStyle = background;
+    ctx.fill();
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    let cursorY = boxY + paddingY + 10;
+    visibleLines.forEach((line, index) => {
+      ctx.font = fonts[index];
+      ctx.fillStyle = index === 0 ? titleColor : bodyColor;
+      ctx.fillText(line, boxX + paddingX, cursorY);
+      cursorY += lineHeights[index] + 2;
+    });
+    ctx.restore();
+  }
+
   isPageVisible() {
     return typeof document === 'undefined' ? true : !document.hidden;
   }
@@ -739,6 +832,111 @@ export class FP2Tab {
     window.localStorage.setItem(LOCAL_ENTRY_KEY, JSON.stringify(this.state.localPresenceEntries || []));
   }
 
+  hasMeaningfulRoomConfig(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+
+    const nonEmptyObject = (value) => Boolean(value && typeof value === 'object' && Object.keys(value).length);
+
+    return (
+      Array.isArray(payload.customRoomProfiles) && payload.customRoomProfiles.length > 0
+    ) || (
+      Array.isArray(payload.customRoomTemplates) && payload.customRoomTemplates.length > 0
+    ) || nonEmptyObject(payload.roomProfileFilters)
+      || nonEmptyObject(payload.roomProfileCalibration)
+      || nonEmptyObject(payload.roomProfileLayouts)
+      || payload.activeRoomProfileId !== DEFAULT_ROOM_PROFILE_ID
+      || payload.selectedRoomTemplateId !== 'living_room';
+  }
+
+  applyRoomConfigPayload(payload, { persistLocal = true } = {}) {
+    if (!payload || typeof payload !== 'object') {
+      return;
+    }
+
+    if (persistLocal) {
+      persistRoomProfiles(Array.isArray(payload.customRoomProfiles) ? payload.customRoomProfiles : []);
+      persistRoomTemplates(Array.isArray(payload.customRoomTemplates) ? payload.customRoomTemplates : []);
+      persistRoomProfileFilters(
+        payload.roomProfileFilters && typeof payload.roomProfileFilters === 'object'
+          ? payload.roomProfileFilters
+          : {}
+      );
+      persistRoomProfileCalibration(
+        payload.roomProfileCalibration && typeof payload.roomProfileCalibration === 'object'
+          ? payload.roomProfileCalibration
+          : {}
+      );
+      persistRoomProfileLayouts(
+        payload.roomProfileLayouts && typeof payload.roomProfileLayouts === 'object'
+          ? payload.roomProfileLayouts
+          : {}
+      );
+      persistActiveRoomProfileId(
+        typeof payload.activeRoomProfileId === 'string' ? payload.activeRoomProfileId : DEFAULT_ROOM_PROFILE_ID
+      );
+    }
+
+    this.loadRoomProfiles();
+    if (
+      typeof payload.selectedRoomTemplateId === 'string'
+      && this.state.roomTemplates.some((template) => template.id === payload.selectedRoomTemplateId)
+    ) {
+      this.state.selectedRoomTemplateId = payload.selectedRoomTemplateId;
+    }
+    this.renderRoomProfileControls();
+    if (this.lastCurrentData) {
+      this.renderCurrent(this.lastCurrentData);
+    }
+  }
+
+  async syncRoomConfigWithBackend() {
+    this.state.roomConfigHydrating = true;
+    try {
+      const remoteState = await fp2Service.getLayoutState();
+      if (remoteState?.found && remoteState.payload && typeof remoteState.payload === 'object') {
+        this.applyRoomConfigPayload(remoteState.payload, { persistLocal: true });
+      } else {
+        const localPayload = this.buildRoomConfigExportPayload();
+        if (this.hasMeaningfulRoomConfig(localPayload)) {
+          await fp2Service.saveLayoutState(localPayload);
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to sync FP2 room config with backend:', error);
+    } finally {
+      this.state.roomConfigHydrating = false;
+      this.state.roomConfigBackendReady = true;
+    }
+  }
+
+  scheduleRoomConfigSave({ immediate = false } = {}) {
+    if (!this.state.roomConfigBackendReady || this.state.roomConfigHydrating) return;
+
+    if (this.roomConfigSaveTimer) {
+      clearTimeout(this.roomConfigSaveTimer);
+      this.roomConfigSaveTimer = null;
+    }
+
+    if (immediate) {
+      void this.flushRoomConfigSave();
+      return;
+    }
+
+    this.roomConfigSaveTimer = window.setTimeout(() => {
+      this.roomConfigSaveTimer = null;
+      void this.flushRoomConfigSave();
+    }, 600);
+  }
+
+  async flushRoomConfigSave() {
+    if (!this.state.roomConfigBackendReady || this.state.roomConfigHydrating) return;
+    try {
+      await fp2Service.saveLayoutState(this.buildRoomConfigExportPayload());
+    } catch (error) {
+      console.warn('Failed to persist FP2 room config to backend:', error);
+    }
+  }
+
   buildRoomConfigExportPayload() {
     return {
       version: 1,
@@ -778,39 +976,8 @@ export class FP2Tab {
       if (!payload || typeof payload !== 'object') {
         throw new Error('Invalid payload');
       }
-
-      persistRoomProfiles(Array.isArray(payload.customRoomProfiles) ? payload.customRoomProfiles : []);
-      persistRoomTemplates(Array.isArray(payload.customRoomTemplates) ? payload.customRoomTemplates : []);
-      persistRoomProfileFilters(
-        payload.roomProfileFilters && typeof payload.roomProfileFilters === 'object'
-          ? payload.roomProfileFilters
-          : {}
-      );
-      persistRoomProfileCalibration(
-        payload.roomProfileCalibration && typeof payload.roomProfileCalibration === 'object'
-          ? payload.roomProfileCalibration
-          : {}
-      );
-      persistRoomProfileLayouts(
-        payload.roomProfileLayouts && typeof payload.roomProfileLayouts === 'object'
-          ? payload.roomProfileLayouts
-          : {}
-      );
-      persistActiveRoomProfileId(
-        typeof payload.activeRoomProfileId === 'string' ? payload.activeRoomProfileId : DEFAULT_ROOM_PROFILE_ID
-      );
-
-      this.loadRoomProfiles();
-      if (
-        typeof payload.selectedRoomTemplateId === 'string'
-        && this.state.roomTemplates.some((template) => template.id === payload.selectedRoomTemplateId)
-      ) {
-        this.state.selectedRoomTemplateId = payload.selectedRoomTemplateId;
-      }
-      this.renderRoomProfileControls();
-      if (this.lastCurrentData) {
-        this.renderCurrent(this.lastCurrentData);
-      }
+      this.applyRoomConfigPayload(payload, { persistLocal: true });
+      this.scheduleRoomConfigSave({ immediate: true });
     } catch (error) {
       console.error('Failed to import FP2 room config:', error);
       window.alert(t('fp2.layout.import_failed'));
@@ -1578,6 +1745,7 @@ export class FP2Tab {
     this.ensureSelectedRoomItem(profile);
     this.renderRoomProfileControls();
     this.renderAnimatedMap();
+    this.scheduleRoomConfigSave();
   }
 
   getLayoutBounds(geometry) {
@@ -1887,6 +2055,7 @@ export class FP2Tab {
     this.renderRoomProfileControls();
     this.renderCurrent(this.lastCurrentData);
     this.renderAnimatedMap();
+    this.scheduleRoomConfigSave();
   }
 
   isAnimalFilterEnabled(profile = this.getActiveRoomProfile()) {
@@ -1905,6 +2074,7 @@ export class FP2Tab {
     persistRoomProfileFilters(this.state.roomProfileFilters);
     this.renderRoomProfileControls();
     this.renderCurrent(this.lastCurrentData);
+    this.scheduleRoomConfigSave();
   }
 
   getCalibrationDraft(profile = this.getActiveRoomProfile()) {
@@ -1989,6 +2159,7 @@ export class FP2Tab {
     persistRoomProfileCalibration(this.state.roomProfileCalibration);
     this.renderRoomProfileControls();
     this.renderCurrent(this.lastCurrentData);
+    this.scheduleRoomConfigSave();
   }
 
   resetCalibrationForActiveProfile() {
@@ -2004,6 +2175,7 @@ export class FP2Tab {
     persistRoomProfileCalibration(this.state.roomProfileCalibration);
     this.renderRoomProfileControls();
     this.renderCurrent(this.lastCurrentData);
+    this.scheduleRoomConfigSave();
   }
 
   estimateRoomProfileDefaults() {
@@ -2100,6 +2272,7 @@ export class FP2Tab {
       persistRoomProfileLayouts(this.state.roomProfileLayouts);
     }
     this.setActiveRoomProfile(profile.id);
+    this.scheduleRoomConfigSave({ immediate: true });
   }
 
   handleDeleteRoomProfile() {
@@ -2123,6 +2296,7 @@ export class FP2Tab {
     persistRoomProfileFilters(this.state.roomProfileFilters);
     persistRoomProfileLayouts(this.state.roomProfileLayouts);
     this.setActiveRoomProfile(DEFAULT_ROOM_PROFILE_ID);
+    this.scheduleRoomConfigSave({ immediate: true });
   }
 
   handleApplyRoomTemplate() {
@@ -2160,6 +2334,7 @@ export class FP2Tab {
     this.state.selectedRoomTemplateId = template.id;
     persistRoomTemplates(this.state.customRoomTemplates);
     this.renderRoomProfileControls();
+    this.scheduleRoomConfigSave({ immediate: true });
   }
 
   getSuggestedRoomItemPosition(geometry) {
@@ -3966,8 +4141,7 @@ export class FP2Tab {
     const ctx = this.canvasCtx;
     if (!canvas || !ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    const { width, height } = this.prepareCanvasForDrawing(canvas, ctx);
     ctx.clearRect(0, 0, width, height);
 
     // Background
@@ -4247,12 +4421,25 @@ export class FP2Tab {
         ctx.stroke();
       }
 
+      const minBox = Math.min(width, depth);
+      const iconFontPx = Math.max(10, Math.min(14, Math.round(minBox / 4)));
+      const labelFontPx = Math.max(8, Math.min(11, Math.round(minBox / 6)));
+      const showInlineLabel = width >= 64 && depth >= 34 && !['door', 'curtain', 'tv'].includes(item.type);
+
       ctx.fillStyle = '#e2e8f0';
-      ctx.font = '600 13px sans-serif';
+      ctx.font = `600 ${iconFontPx}px sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(icon, 0, 4);
-      ctx.font = '600 10px monospace';
-      ctx.fillText(this.getRoomItemLabel(item), 0, Math.min(depth / 2 + 14, 22));
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = 'rgba(8, 15, 28, 0.85)';
+      ctx.shadowBlur = 6;
+      ctx.fillText(icon, 0, showInlineLabel ? -4 : 0);
+
+      if (showInlineLabel) {
+        ctx.font = `600 ${labelFontPx}px sans-serif`;
+        const label = this.fitCanvasText(ctx, this.getRoomItemLabel(item), Math.max(24, width - 16));
+        ctx.fillText(label, 0, Math.min(depth / 2 - 10, 14));
+      }
+      ctx.shadowBlur = 0;
 
       if (isSelected) {
         ctx.strokeStyle = 'rgba(248,250,252,0.85)';
@@ -4268,6 +4455,7 @@ export class FP2Tab {
       ctx.restore();
     });
     ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
     ctx.font = '12px sans-serif';
   }
 
@@ -4347,14 +4535,23 @@ export class FP2Tab {
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 1.5;
         ctx.stroke();
-
-        ctx.fillStyle = '#e2e8f0';
-        ctx.font = '600 11px monospace';
-        ctx.fillText(target.target_id, px + 12, py - 10);
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '10px monospace';
-        ctx.fillText(`${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`, px + 12, py + 4);
-        ctx.fillText(`${this.formatDistance(target.distance)} · ${this.formatAngle(target.angle)}`, px + 12, py + 16);
+        this.drawCanvasTextBubble(
+          ctx,
+          px,
+          py,
+          [
+            String(target.target_id || `target_${i}`),
+            `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`
+          ],
+          {
+            bounds: {
+              left: roomRect.x + 8,
+              right: roomRect.x + roomRect.width - 8,
+              top: roomRect.y + 8,
+              bottom: roomRect.y + roomRect.height - 8
+            }
+          }
+        );
       });
 
       suppressedTargets.forEach((target) => {
@@ -4385,6 +4582,7 @@ export class FP2Tab {
         ? (targets.length > 0 ? 'rgba(74,222,128,0.9)' : 'rgba(251,191,36,0.9)')
         : 'rgba(248,113,113,0.9)';
       ctx.font = '700 12px monospace';
+      ctx.textAlign = 'right';
       ctx.fillText(
         available
           ? (targets.length > 0
@@ -4393,9 +4591,10 @@ export class FP2Tab {
               ? t('fp2.layout.recent_trace')
               : (presence ? t('fp2.layout.presence_only') : t('fp2.zone.room_clear'))))
           : t('fp2.zone.targets_unavailable'),
-        width - 280,
+        width - 16,
         22
       );
+      ctx.textAlign = 'left';
 
       ctx.fillStyle = 'rgba(148,163,184,0.45)';
       ctx.font = '9px monospace';
@@ -4580,27 +4779,37 @@ export class FP2Tab {
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 1.5;
       ctx.stroke();
-
-      // Label
-      ctx.fillStyle = '#e2e8f0';
-      ctx.font = '600 11px monospace';
-      ctx.fillText(target.target_id, px + 12, py - 10);
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px monospace';
-      ctx.fillText(`${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`, px + 12, py + 4);
-      ctx.fillText(`${this.formatDistance(target.distance)} · ${this.formatAngle(target.angle)}`, px + 12, py + 16);
+      this.drawCanvasTextBubble(
+        ctx,
+        px,
+        py,
+        [
+          String(target.target_id || `target_${i}`),
+          `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`
+        ],
+        {
+          bounds: {
+            left: plotLeft + 6,
+            right: plotLeft + plotWidth - 6,
+            top: plotTop + 6,
+            bottom: plotTop + plotHeight - 6
+          }
+        }
+      );
     });
 
     // Status badge
     ctx.fillStyle = available ? 'rgba(74,222,128,0.9)' : 'rgba(248,113,113,0.9)';
     ctx.font = '700 12px monospace';
+    ctx.textAlign = 'right';
     ctx.fillText(
       available
         ? t('fp2.zone.coordinate_mode', { targets: tp('fp2.count.targets', targets.length) })
         : t('fp2.zone.targets_unavailable'),
-      width - 260,
+      width - 16,
       22
     );
+    ctx.textAlign = 'left';
 
     // Axis labels
     ctx.fillStyle = 'rgba(148,163,184,0.4)';
@@ -5069,6 +5278,10 @@ export class FP2Tab {
   dispose() {
     this.stopPolling();
     this.stopDurationTicker();
+    if (this.roomConfigSaveTimer) {
+      clearTimeout(this.roomConfigSaveTimer);
+      this.roomConfigSaveTimer = null;
+    }
     this.stopGraphAnimation();
     fp2Service.stopStream();
     if (this.unsubscribe) { this.unsubscribe(); this.unsubscribe = null; }

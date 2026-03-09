@@ -589,6 +589,7 @@ body::before {
 /* ── Movement Map ──────────────────────────────────────────── */
 .fp2-card--map {
   margin-bottom: var(--gap);
+  overflow: hidden;
 }
 .fp2-card-header-row {
   display: flex;
@@ -616,7 +617,9 @@ body::before {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
 }
+.fp2-map-toolbar > * { min-width: 0; }
 .fp2-map-profile-picker {
   display: flex;
   flex-direction: column;
@@ -684,11 +687,20 @@ body::before {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .fp2-map-badge-count {
   font-size: 0.72rem;
   color: var(--text-dim);
   font-family: var(--mono);
+}
+.fp2-movement-canvas {
+  display: block;
+  width: 100%;
+  height: clamp(360px, 44vw, 500px);
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.22);
 }
 .btn-reset {
   appearance: none;
@@ -763,11 +775,14 @@ body::before {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 .fp2-layout-inspector-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .fp2-layout-inspector-grid {
   display: grid;
@@ -893,7 +908,7 @@ body::before {
 /* ── Info grid (connection / device / diagnostics) ─────────── */
 .fp2-grid--info {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--gap);
   margin-bottom: var(--gap);
 }
@@ -1254,13 +1269,14 @@ body::before {
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 /* ═══ RESPONSIVE ═══════════════════════════════════════════════ */
-@media (max-width: 1024px) {
-  .fp2-hero-bar { grid-template-columns: repeat(3, 1fr); }
-  .fp2-grid--info { grid-template-columns: 1fr; }
-  .fp2-grid--timeline { grid-template-columns: 1fr; }
-  .fp2-grid--payloads { grid-template-columns: 1fr; }
+@media (max-width: 1360px) {
   .fp2-card-header-row--map { flex-direction: column; }
   .fp2-map-toolbar { width: 100%; justify-content: flex-start; }
+}
+@media (max-width: 1024px) {
+  .fp2-hero-bar { grid-template-columns: repeat(3, 1fr); }
+  .fp2-grid--timeline { grid-template-columns: 1fr; }
+  .fp2-grid--payloads { grid-template-columns: 1fr; }
   .fp2-scenario-detail-head { flex-direction: column; }
 }
 @media (max-width: 640px) {
@@ -1278,6 +1294,7 @@ body::before {
   .fp2-layout-item-actions .fp2-layout-item-btn:last-child { justify-self: stretch; }
   .fp2-scenario-tab { min-width: 100%; }
   .fp2-scenario-sections { grid-template-columns: 1fr; }
+  .fp2-movement-canvas { height: 360px; }
 }
 
 /* Utility: use as .card on the existing fp2-card elements */

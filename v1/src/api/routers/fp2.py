@@ -20,12 +20,17 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_aqara_cloud_service, get_fp2_service
+from src.api.dependencies import (
+    get_aqara_cloud_service,
+    get_fp2_layout_store_service,
+    get_fp2_service,
+)
 from src.services.aqara_cloud_service import (
     AqaraCloudAPIError,
     AqaraCloudConfigurationError,
     AqaraCloudService,
 )
+from src.services.fp2_layout_store import FP2LayoutStoreService
 from src.services.fp2_service import FP2Service, FP2Snapshot, FP2Zone, FP2Target
 
 logger = logging.getLogger(__name__)
@@ -634,6 +639,20 @@ class AqaraResourceSubscriptionRequest(BaseModel):
     attach: str | None = None
 
 
+class FP2LayoutStateWriteRequest(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    scope: str | None = None
+
+
+class FP2LayoutStateResponse(BaseModel):
+    found: bool
+    scope: str
+    payload: Dict[str, Any] | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    storage_backend: str | None = None
+
+
 @router.get("/cloud/config")
 async def get_fp2_cloud_config(
     aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
@@ -705,6 +724,30 @@ async def write_fp2_cloud_resource(
         return response
     except Exception as exc:
         _raise_cloud_http_error(exc)
+
+
+@router.get("/layout-state", response_model=FP2LayoutStateResponse)
+async def get_fp2_layout_state(
+    scope: str | None = Query(default=None, description="Optional override for layout storage scope"),
+    layout_store: FP2LayoutStoreService = Depends(get_fp2_layout_store_service),
+):
+    """Return persisted FP2 room/template/layout state."""
+    state = await layout_store.get_state(scope=scope)
+    resolved_scope = scope or layout_store.default_scope()
+    if state is None:
+        return FP2LayoutStateResponse(found=False, scope=resolved_scope)
+    return FP2LayoutStateResponse(found=True, **state)
+
+
+@router.put("/layout-state", response_model=FP2LayoutStateResponse)
+async def put_fp2_layout_state(
+    request: FP2LayoutStateWriteRequest,
+    layout_store: FP2LayoutStoreService = Depends(get_fp2_layout_store_service),
+):
+    """Persist FP2 room/template/layout state."""
+    payload = request.payload if isinstance(request.payload, dict) else {}
+    state = await layout_store.save_state(payload=payload, scope=request.scope)
+    return FP2LayoutStateResponse(found=True, **state)
 
 
 @router.get("/cloud/history")

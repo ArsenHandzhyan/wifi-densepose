@@ -2,7 +2,7 @@
 
 import { TabManager } from './components/TabManager.js';
 import { DashboardTab } from './components/DashboardTab.js?v=20260309-v21';
-import { FP2Tab } from './components/FP2Tab.js?v=20260309-v38';
+import { FP2Tab } from './components/FP2Tab.js?v=20260309-v40';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';

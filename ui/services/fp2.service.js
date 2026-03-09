@@ -59,6 +59,23 @@ export class FP2Service {
     return data;
   }
 
+  async getLayoutState() {
+    return this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.LAYOUT_STATE);
+  }
+
+  async saveLayoutState(payload, scope = null) {
+    return this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.LAYOUT_STATE, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        payload,
+        scope
+      })
+    });
+  }
+
   async getEntities() {
     return this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.ENTITIES);
   }

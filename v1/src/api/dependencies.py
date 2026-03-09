@@ -16,6 +16,7 @@ from src.services.stream_service import StreamService
 from src.services.hardware_service import HardwareService
 from src.services.fp2_service import FP2Service
 from src.services.aqara_cloud_service import AqaraCloudService
+from src.services.fp2_layout_store import FP2LayoutStoreService
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,13 @@ def get_aqara_cloud_service() -> AqaraCloudService:
     """Get Aqara cloud service instance."""
     settings = get_settings()
     return AqaraCloudService(settings=settings)
+
+
+@lru_cache()
+def get_fp2_layout_store_service() -> FP2LayoutStoreService:
+    """Get persistent FP2 room layout store service."""
+    settings = get_settings()
+    return FP2LayoutStoreService(settings=settings)
 
 
 # Authentication dependencies

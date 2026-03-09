@@ -90,6 +90,7 @@ export const API_CONFIG = {
       CURRENT: '/api/v1/fp2/current',
       ENTITIES: '/api/v1/fp2/entities',
       RECOMMENDED: '/api/v1/fp2/recommended-entity',
+      LAYOUT_STATE: '/api/v1/fp2/layout-state',
       CLOUD_RESOURCE_WRITE: '/api/v1/fp2/cloud/resources/write',
       WS: '/api/v1/fp2/ws'
     },

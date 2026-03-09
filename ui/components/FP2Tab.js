@@ -3575,7 +3575,7 @@ export class FP2Tab {
   getCoordinateSnapshotState(movementEvent = this.state.currentMovementEvent) {
     if (!this.state.lastCoordinateChangeAtMs) return 'live';
     const ageSec = Math.max(0, Date.now() - this.state.lastCoordinateChangeAtMs) / 1000;
-    const thresholdSec = this.isActiveMovementEvent(movementEvent) ? 8 : 15;
+    const thresholdSec = this.isActiveMovementEvent(movementEvent) ? 5 : 10;
     if (ageSec <= thresholdSec) return 'live';
     if (this.hasRecentCoordinateSample()) return 'last_known';
     return 'frozen';
@@ -3824,7 +3824,7 @@ export class FP2Tab {
     } else if (ageSec <= 2.5) {
       statusKey = 'fp2.coordinate.status.static';
       cls = 'warn';
-    } else if (ageSec <= 10) {
+    } else if (ageSec <= 5) {
       statusKey = 'fp2.coordinate.status.repeating';
       cls = 'warn';
     } else {

@@ -1,45 +1,38 @@
-# Aqara FP2 Local Monitor
+# Aqara FP2 Telemetry Console
 
-This repository is currently maintained in a single purpose mode:
+This repository is currently maintained as a single-purpose `Aqara FP2` telemetry stack.
+
+Active runtime:
 
 `Aqara FP2 -> Aqara Open API -> scripts/fp2_aqara_cloud_monitor.py -> FastAPI backend -> UI`
 
 The old CSI / DensePose / WiFi sensing experiments are not part of the active runtime anymore.
 
-## Active Runtime
+## Current Entry Points
 
-Kept in git:
-- `v1/src/` — active backend
-- `ui/` — active UI
-- `scripts/aqara_api_probe.py` — Aqara API diagnostics
-- `scripts/fp2_aqara_cloud_monitor.py` — live FP2 cloud monitor
-- `scripts/start_fp2_stack.sh` — local startup entrypoint
-- `docker-compose.yml` — minimal local stack
-- `render.yaml` — Render deployment
-- `docs/FP2_RUNTIME_STATUS_2026-03-07.md`
-- `docs/FP2_INTEGRATION_FINAL_STATUS.md`
-- `docs/README_FP2_DOCS.md`
-- `docs/LOCAL_ARCHIVE.md`
+- Public Render deployment: [https://wifi-densepose-qtgc.onrender.com](https://wifi-densepose-qtgc.onrender.com)
+- Local backend: `http://127.0.0.1:8000`
+- Local UI: `http://127.0.0.1:3000`
 
-Moved out of git-tracked runtime:
-- legacy CSI code
-- Home Assistant and Homebridge experiments
-- old deployment variants
-- one-off probes and reverse-engineering scripts
-- historical docs and backups
+## What Works Now
 
-Those materials are stored only in the local ignored folder:
-- `.local-archive/`
+- Aqara Open API auth and token refresh
+- Live cloud-backed FP2 telemetry in the backend
+- Continuous target coordinate upload via `4.22.85`
+- `FP2 Monitor` and `Dashboard` as the only active UI surfaces
+- Scenario presets for room, corridor, fall, and bedside modes
+- Public Render deployment with backend-served UI
+- Room/layout export from local UI and import into Render UI
 
 ## Local Start
 
-1. Start backend and cloud monitor:
+1. Start backend and Aqara Cloud monitor:
 
 ```bash
 ./scripts/start_fp2_stack.sh
 ```
 
-2. Start UI:
+2. Start the local UI in a second terminal:
 
 ```bash
 cd ui
@@ -47,23 +40,69 @@ cd ui
 ```
 
 3. Open:
+
+- `http://127.0.0.1:8000/health/live`
 - `http://127.0.0.1:8000/api/v1/fp2/status`
 - `http://127.0.0.1:8000/api/v1/fp2/current`
 - `http://127.0.0.1:3000`
 
+## Render Deployment
+
+The current production deployment is a single Render `web service`.
+
+- The backend serves the UI directly from `v1/src/app.py`
+- The public site and the API share the same origin
+- No separate paid worker is required for the deployed runtime
+- On Render free tier, cold starts after idle time are still possible
+
+Current public site:
+
+- [https://wifi-densepose-qtgc.onrender.com](https://wifi-densepose-qtgc.onrender.com)
+
+Useful public endpoints:
+
+- [https://wifi-densepose-qtgc.onrender.com/health/live](https://wifi-densepose-qtgc.onrender.com/health/live)
+- [https://wifi-densepose-qtgc.onrender.com/api/v1/fp2/status](https://wifi-densepose-qtgc.onrender.com/api/v1/fp2/status)
+- [https://wifi-densepose-qtgc.onrender.com/api/v1/fp2/current](https://wifi-densepose-qtgc.onrender.com/api/v1/fp2/current)
+
+## Room Layout Transfer
+
+Room profiles, calibration, templates, and room items are still stored in browser `localStorage`, not in the backend.
+
+That means:
+
+- local `127.0.0.1:3000` and Render use different browser-local state
+- the current supported transfer path is `Export Layout` -> `Import Layout`
+- this is a one-time move or sync by file, not shared server-side storage
+
+Recommended transfer flow:
+
+1. Open local UI at `http://127.0.0.1:3000`
+2. Click `Export Layout`
+3. Open Render UI at [https://wifi-densepose-qtgc.onrender.com](https://wifi-densepose-qtgc.onrender.com)
+4. Click `Import Layout`
+5. Select the exported JSON
+
 ## Runtime Notes
 
-- Current live source is `aqara_cloud`.
-- Direct `HAP` pairing was investigated separately and is documented, but it is not the active runtime path.
-- Secrets remain local and ignored:
-  - `.env`
-  - `.fp2_pairing.json`
-  - `.fp2_homekit_code`
-  - `.fp2_pairing.backup.*.json`
+- Current live transport is `aqara_cloud`
+- The backend now refreshes cloud snapshots before stale fallback in cloud mode
+- The UI now polls `/api/v1/fp2/current` in cloud mode so Render shows fresh target coordinates
+- Direct `HomeKit/HAP` pairing was investigated, but it is not the active runtime path
+
+## Secrets And Local Files
+
+These files remain local and must not be committed:
+
+- `.env`
+- `.fp2_pairing.json`
+- `.fp2_homekit_code`
+- `.fp2_pairing.backup.*.json`
 
 ## Documentation
 
-- [Runtime Status](docs/FP2_RUNTIME_STATUS_2026-03-07.md)
+- [Current Runtime Status](docs/FP2_RUNTIME_STATUS_2026-03-09.md)
+- [Previous Runtime Snapshot](docs/FP2_RUNTIME_STATUS_2026-03-07.md)
 - [Integration Status](docs/FP2_INTEGRATION_FINAL_STATUS.md)
 - [Docs Index](docs/README_FP2_DOCS.md)
 - [Local Archive](docs/LOCAL_ARCHIVE.md)

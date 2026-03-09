@@ -3944,7 +3944,7 @@ export class FP2Tab {
       return;
     }
     const displayTargets = this.hasFrozenCoordinates()
-      ? []
+      ? (this.state.rawTargets || []).filter((target) => this.hasCoordinates(target))
       : this.getInterpolatedTargets();
     const signature = this.buildMapRenderSignature(displayTargets, this.state.rawTargets);
     if (!force && signature === this.state.lastMapSignature) {

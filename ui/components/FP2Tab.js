@@ -5043,7 +5043,9 @@ export class FP2Tab {
     this.pollTimer = setInterval(async () => {
       if (!this.isPageVisible()) return;
       await this.loadStatus();
-      if (this.state.streamState !== 'live') {
+      const transport = String(this.state.connection?.transport || this.state.device?.transport || '').toLowerCase();
+      const shouldPollCurrent = this.state.streamState !== 'live' || transport === 'aqara_cloud';
+      if (shouldPollCurrent) {
         await this.loadCurrent();
       }
     }, 3000);

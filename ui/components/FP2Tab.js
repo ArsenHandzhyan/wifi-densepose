@@ -313,6 +313,9 @@ export class FP2Tab {
       roomItemAdd: this.container.querySelector('#fp2RoomItemAdd'),
       roomItemsClear: this.container.querySelector('#fp2RoomItemsClear'),
       roomEditMode: this.container.querySelector('#fp2RoomEditMode'),
+      roomConfigExport: this.container.querySelector('#fp2RoomConfigExport'),
+      roomConfigImport: this.container.querySelector('#fp2RoomConfigImport'),
+      roomConfigFile: this.container.querySelector('#fp2RoomConfigFile'),
       roomEditModeStatus: this.container.querySelector('#fp2RoomEditModeStatus'),
       roomItemsSummary: this.container.querySelector('#fp2RoomItemsSummary'),
       roomItemsList: this.container.querySelector('#fp2RoomItemsList'),
@@ -460,6 +463,27 @@ export class FP2Tab {
     if (this.elements.roomEditMode) {
       this.elements.roomEditMode.addEventListener('click', () => {
         this.toggleEditLayoutMode();
+      });
+    }
+
+    if (this.elements.roomConfigExport) {
+      this.elements.roomConfigExport.addEventListener('click', () => {
+        this.exportRoomConfig();
+      });
+    }
+
+    if (this.elements.roomConfigImport) {
+      this.elements.roomConfigImport.addEventListener('click', () => {
+        this.elements.roomConfigFile?.click();
+      });
+    }
+
+    if (this.elements.roomConfigFile) {
+      this.elements.roomConfigFile.addEventListener('change', async (event) => {
+        const [file] = Array.from(event.target.files || []);
+        event.target.value = '';
+        if (!file) return;
+        await this.importRoomConfig(file);
       });
     }
 
@@ -713,6 +737,84 @@ export class FP2Tab {
     if (typeof window === 'undefined' || !window.localStorage) return;
     window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(this.state.localTelemetryHistory || []));
     window.localStorage.setItem(LOCAL_ENTRY_KEY, JSON.stringify(this.state.localPresenceEntries || []));
+  }
+
+  buildRoomConfigExportPayload() {
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      customRoomProfiles: this.state.customRoomProfiles || [],
+      customRoomTemplates: this.state.customRoomTemplates || [],
+      roomProfileFilters: this.state.roomProfileFilters || {},
+      roomProfileCalibration: this.state.roomProfileCalibration || {},
+      roomProfileLayouts: this.state.roomProfileLayouts || {},
+      activeRoomProfileId: this.state.activeRoomProfileId || DEFAULT_ROOM_PROFILE_ID,
+      selectedRoomTemplateId: this.state.selectedRoomTemplateId || 'empty_room'
+    };
+  }
+
+  exportRoomConfig() {
+    try {
+      const payload = this.buildRoomConfigExportPayload();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `fp2-room-config-${Date.now()}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export FP2 room config:', error);
+      window.alert(t('fp2.layout.export_failed'));
+    }
+  }
+
+  async importRoomConfig(file) {
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      if (!payload || typeof payload !== 'object') {
+        throw new Error('Invalid payload');
+      }
+
+      persistRoomProfiles(Array.isArray(payload.customRoomProfiles) ? payload.customRoomProfiles : []);
+      persistRoomTemplates(Array.isArray(payload.customRoomTemplates) ? payload.customRoomTemplates : []);
+      persistRoomProfileFilters(
+        payload.roomProfileFilters && typeof payload.roomProfileFilters === 'object'
+          ? payload.roomProfileFilters
+          : {}
+      );
+      persistRoomProfileCalibration(
+        payload.roomProfileCalibration && typeof payload.roomProfileCalibration === 'object'
+          ? payload.roomProfileCalibration
+          : {}
+      );
+      persistRoomProfileLayouts(
+        payload.roomProfileLayouts && typeof payload.roomProfileLayouts === 'object'
+          ? payload.roomProfileLayouts
+          : {}
+      );
+      persistActiveRoomProfileId(
+        typeof payload.activeRoomProfileId === 'string' ? payload.activeRoomProfileId : DEFAULT_ROOM_PROFILE_ID
+      );
+
+      this.loadRoomProfiles();
+      if (
+        typeof payload.selectedRoomTemplateId === 'string'
+        && this.state.roomTemplates.some((template) => template.id === payload.selectedRoomTemplateId)
+      ) {
+        this.state.selectedRoomTemplateId = payload.selectedRoomTemplateId;
+      }
+      this.renderRoomProfileControls();
+      if (this.lastCurrentData) {
+        this.renderCurrent(this.lastCurrentData);
+      }
+    } catch (error) {
+      console.error('Failed to import FP2 room config:', error);
+      window.alert(t('fp2.layout.import_failed'));
+    }
   }
 
   setSelectedScenario(scenarioId, { persist = true } = {}) {

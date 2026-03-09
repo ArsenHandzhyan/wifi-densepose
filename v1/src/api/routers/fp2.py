@@ -7,6 +7,7 @@ Supports two data sources:
 """
 
 import asyncio
+from collections import deque
 import json
 import logging
 import re
@@ -16,10 +17,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
+from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_fp2_service
+from src.api.dependencies import get_aqara_cloud_service, get_fp2_service
+from src.services.aqara_cloud_service import (
+    AqaraCloudAPIError,
+    AqaraCloudConfigurationError,
+    AqaraCloudService,
+)
 from src.services.fp2_service import FP2Service, FP2Snapshot, FP2Zone, FP2Target
 
 logger = logging.getLogger(__name__)
@@ -28,9 +34,12 @@ router = APIRouter()
 # ── In-memory store for HAP push data ────────────────────────
 _hap_latest: Dict[str, Any] = {}
 _hap_listeners: list = []
+_raw_capture_history = deque(maxlen=400)
+_raw_capture_sequence = 0
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _PAIRING_DATA_PATH = _PROJECT_ROOT / ".fp2_pairing.json"
 _MAC_RE = re.compile(r"([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}", re.IGNORECASE)
+_PRESENCE_MOVEMENT_EVENTS = {1, 2, 3, 4, 8, 9}
 
 
 def _get_latest_hap_snapshot() -> Optional[FP2Snapshot]:
@@ -104,6 +113,76 @@ def _has_direct_hap_pairing() -> bool:
     return _PAIRING_DATA_PATH.exists()
 
 
+def _copy_resource_values(raw_attributes: Dict[str, Any]) -> Dict[str, Any]:
+    values = raw_attributes.get("resource_values") or {}
+    if not isinstance(values, dict):
+        return {}
+    return {str(key): value for key, value in values.items()}
+
+
+def _build_changed_resources(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    changed: Dict[str, Dict[str, Any]] = {}
+    for rid in sorted(set(previous.keys()) | set(current.keys())):
+        previous_value = previous.get(rid)
+        current_value = current.get(rid)
+        if previous_value == current_value:
+            continue
+        changed[rid] = {
+            "previous": previous_value,
+            "current": current_value,
+        }
+    return changed
+
+
+def _record_raw_capture(snapshot: FP2Snapshot) -> None:
+    """Store a compact raw capture entry for later FP2 debugging."""
+    global _raw_capture_sequence
+
+    raw = snapshot.raw_attributes or {}
+    resource_values = _copy_resource_values(raw)
+    previous_entry = _raw_capture_history[-1] if _raw_capture_history else None
+    previous_values = previous_entry.get("resource_values", {}) if previous_entry else {}
+    active_targets = [
+        {
+            "target_id": target.target_id,
+            "zone_id": target.zone_id,
+            "x": target.x,
+            "y": target.y,
+            "distance": target.distance,
+            "angle": target.angle,
+            "activity": target.activity,
+            "confidence": target.confidence,
+        }
+        for target in snapshot.targets
+    ]
+
+    _raw_capture_sequence += 1
+    _raw_capture_history.append(
+        {
+            "sequence": _raw_capture_sequence,
+            "captured_at": time.time(),
+            "snapshot_timestamp": snapshot.timestamp.isoformat(),
+            "source": raw.get("source") or "unknown",
+            "presence": snapshot.presence,
+            "movement_event": raw.get("movement_event"),
+            "fall_state": raw.get("fall_state"),
+            "current_zone": raw.get("current_zone"),
+            "online": raw.get("online"),
+            "rssi": raw.get("rssi"),
+            "light_level": raw.get("light_level"),
+            "sensor_angle": raw.get("sensor_angle"),
+            "active_target_count": len(snapshot.targets),
+            "active_targets": active_targets,
+            "zones": raw.get("zones") or [],
+            "advanced_metrics": raw.get("advanced_metrics") or {},
+            "zone_metrics": raw.get("zone_metrics") or {},
+            "resource_ids": sorted(resource_values.keys()),
+            "resource_values": resource_values,
+            "changed_resources": _build_changed_resources(previous_values, resource_values),
+        }
+    )
+
+
 def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) -> Dict[str, Any]:
     """Convert the last known pushed FP2 snapshot into an explicit offline payload."""
     fp2_service = get_fp2_service()
@@ -121,6 +200,65 @@ def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) ->
     payload["persons"] = []
     payload["zone_summary"] = {}
     return payload
+
+
+def _evaluate_presence_signals(snapshot: Optional[FP2Snapshot]) -> Dict[str, Any]:
+    """Build a best-effort presence view without overwriting the raw sensor flag."""
+    if snapshot is None:
+        return {
+            "raw_presence": False,
+            "effective_presence": False,
+            "derived_presence": False,
+            "presence_mode": "none",
+            "presence_reason": None,
+            "presence_signals": {},
+        }
+
+    raw_presence = bool(snapshot.presence)
+    raw = snapshot.raw_attributes or {}
+    advanced_metrics = raw.get("advanced_metrics") or {}
+    movement_event = raw.get("movement_event")
+    target_count = len(snapshot.targets)
+    occupied_zones = sum(1 for zone in snapshot.zones if zone.occupied)
+    realtime_people_count = advanced_metrics.get("realtime_people_count")
+    has_current_zone = bool(raw.get("current_zone"))
+    has_coordinates = bool(raw.get("coordinates") or raw.get("live_coordinates"))
+    movement_presence = movement_event in _PRESENCE_MOVEMENT_EVENTS
+
+    signals = {
+        "targets": target_count > 0,
+        "zones": occupied_zones > 0,
+        "realtime_people": isinstance(realtime_people_count, (int, float)) and realtime_people_count > 0,
+        "movement": movement_presence,
+        "current_zone": has_current_zone,
+        "coordinates": has_coordinates,
+    }
+
+    derived_presence = False
+    reason = None
+    if not raw_presence:
+        for signal_name in ("targets", "zones", "realtime_people", "coordinates", "current_zone", "movement"):
+            if signals[signal_name]:
+                derived_presence = True
+                reason = signal_name
+                break
+
+    effective_presence = raw_presence or derived_presence
+    if raw_presence:
+        mode = "raw"
+    elif derived_presence:
+        mode = "derived"
+    else:
+        mode = "none"
+
+    return {
+        "raw_presence": raw_presence,
+        "effective_presence": effective_presence,
+        "derived_presence": derived_presence,
+        "presence_mode": mode,
+        "presence_reason": reason,
+        "presence_signals": signals,
+    }
 
 
 def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
@@ -208,6 +346,58 @@ def _build_device_metadata(fp2_service: FP2Service) -> Dict[str, Any]:
     return merged
 
 
+def _parse_csv_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _parse_csv_int_list(raw: str | None) -> list[int]:
+    values: list[int] = []
+    for item in _parse_csv_list(raw):
+        try:
+            values.append(int(item))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid integer value '{item}'") from exc
+    return values
+
+
+def _raise_cloud_http_error(exc: Exception) -> None:
+    if isinstance(exc, AqaraCloudConfigurationError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if isinstance(exc, AqaraCloudAPIError):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": str(exc),
+                "intent": exc.intent,
+                "code": exc.code,
+                "http_status": exc.http_status,
+            },
+        ) from exc
+    raise exc
+
+
+def _update_cloud_event_state(message: Dict[str, Any]) -> None:
+    event_type = str(message.get("eventType") or "").strip()
+    if not event_type:
+        return
+
+    connection = dict(_hap_latest.get("connection") or {})
+    connection["transport"] = "aqara_cloud"
+    connection["last_event_type"] = event_type
+    connection["last_event_at"] = datetime.utcnow().isoformat()
+    if event_type.endswith("_online"):
+        connection["state"] = "live"
+        connection["online"] = True
+    elif event_type.endswith("_offline"):
+        connection["state"] = "offline"
+        connection["online"] = False
+    _hap_latest["connection"] = connection
+    _hap_latest.setdefault("device", {})
+    _hap_latest["updated_at"] = _hap_latest.get("updated_at") or time.time()
+
+
 @router.get("/status")
 async def get_fp2_status(
     fp2_service: FP2Service = Depends(get_fp2_service),
@@ -221,11 +411,15 @@ async def get_fp2_status(
         source = str(hap_snapshot.raw_attributes.get("source") or "hap_direct")
         connection = dict(_hap_latest.get("connection") or {})
         transport = connection.get("transport") or str(hap_snapshot.raw_attributes.get("transport") or source)
+        presence_eval = _evaluate_presence_signals(hap_snapshot)
         status["status"] = "healthy"
         status["running"] = True
         status["entity_id"] = source
         status["last_snapshot"] = hap_snapshot.timestamp.isoformat()
-        status["presence"] = hap_snapshot.presence
+        status["presence"] = presence_eval["effective_presence"]
+        status["presence_raw"] = presence_eval["raw_presence"]
+        status["presence_mode"] = presence_eval["presence_mode"]
+        status["presence_reason"] = presence_eval["presence_reason"]
         status["source"] = source
         status["hap_connected"] = source == "hap_direct"
         status["stream_connected"] = True
@@ -256,6 +450,7 @@ async def get_fp2_status(
     elif latest_hap_snapshot is not None or _has_direct_hap_pairing():
         source = "hap_direct"
         connection = dict(_hap_latest.get("connection") or {})
+        presence_eval = _evaluate_presence_signals(latest_hap_snapshot)
         if latest_hap_snapshot is not None:
             source = str(latest_hap_snapshot.raw_attributes.get("source") or "hap_direct")
         transport = connection.get("transport") or (
@@ -268,6 +463,9 @@ async def get_fp2_status(
         status["entity_id"] = source
         status["last_snapshot"] = latest_hap_snapshot.timestamp.isoformat() if latest_hap_snapshot else None
         status["presence"] = False
+        status["presence_raw"] = presence_eval["raw_presence"]
+        status["presence_mode"] = "stale"
+        status["presence_reason"] = presence_eval["presence_reason"]
         status["source"] = source
         status["hap_connected"] = False
         status["stream_connected"] = False
@@ -345,6 +543,13 @@ async def get_fp2_current_pose_like_data(
     payload["metadata"]["available"] = snapshot is not None
     if snapshot is None and fp2_service._stats.get("last_error"):
         payload["metadata"]["error"] = fp2_service._stats["last_error"]
+    presence_eval = _evaluate_presence_signals(snapshot)
+    payload["metadata"]["presence_raw"] = presence_eval["raw_presence"]
+    payload["metadata"]["effective_presence"] = presence_eval["effective_presence"]
+    payload["metadata"]["derived_presence"] = presence_eval["derived_presence"]
+    payload["metadata"]["presence_mode"] = presence_eval["presence_mode"]
+    payload["metadata"]["presence_reason"] = presence_eval["presence_reason"]
+    payload["metadata"]["presence_signals"] = presence_eval["presence_signals"]
     payload["metadata"]["entity_id"] = resolved_entity_id
     payload["metadata"]["source"] = source
     return payload
@@ -372,6 +577,254 @@ async def get_recommended_fp2_entity(
 
     entity_id = await fp2_service.recommend_entity_id()
     return {"recommended_entity_id": entity_id, "enabled": True}
+
+
+class AqaraResourceWriteRequest(BaseModel):
+    resource_id: str
+    value: Any
+    subject_id: str | None = None
+    refresh_state: bool = True
+
+
+class AqaraResourceSubscriptionRequest(BaseModel):
+    resource_ids: list[str]
+    subject_id: str | None = None
+    attach: str | None = None
+
+
+@router.get("/cloud/config")
+async def get_fp2_cloud_config(
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Return Aqara cloud backend configuration status."""
+    return aqara_cloud_service.get_configuration_status()
+
+
+@router.get("/cloud/resources")
+async def get_fp2_cloud_resources(
+    resource_ids: str | None = Query(default=None, description="Comma-separated resource IDs"),
+    include_values: bool = Query(default=False, description="Fetch current resource values from Aqara"),
+    writable_only: bool = Query(default=False, description="Only return writable resources"),
+    reportable_only: bool = Query(default=False, description="Only return reportable resources"),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """List FP2 Aqara resources, access flags, and optional live values."""
+    try:
+        return await aqara_cloud_service.get_resource_catalog(
+            include_values=include_values,
+            resource_ids=_parse_csv_list(resource_ids) or None,
+            writable_only=writable_only,
+            reportable_only=reportable_only,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.get("/cloud/current")
+async def get_fp2_cloud_current(
+    ingest: bool = Query(default=True, description="Push the fresh Aqara snapshot into backend state"),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Fetch a live FP2 snapshot directly from Aqara cloud."""
+    try:
+        payload = await aqara_cloud_service.fetch_current_pose_payload()
+        payload.setdefault("metadata", {})
+        payload["metadata"]["source"] = "aqara_cloud"
+        payload["metadata"]["cloud_refresh"] = True
+        if ingest:
+            ingest_result = await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
+            payload["metadata"]["ingested"] = True
+            payload["metadata"]["ingest_summary"] = ingest_result
+        else:
+            payload["metadata"]["ingested"] = False
+        return payload
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.post("/cloud/resources/write")
+async def write_fp2_cloud_resource(
+    request: AqaraResourceWriteRequest,
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Write a configurable FP2 Aqara resource and optionally refresh state."""
+    try:
+        write_result = await aqara_cloud_service.write_resource(
+            resource_id=request.resource_id,
+            value=request.value,
+            subject_id=request.subject_id,
+        )
+        response: Dict[str, Any] = {"write": write_result}
+        if request.refresh_state:
+            payload = await aqara_cloud_service.fetch_current_pose_payload()
+            ingest_result = await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
+            response["current"] = payload
+            response["ingest_summary"] = ingest_result
+        return response
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.get("/cloud/history")
+async def get_fp2_cloud_history(
+    resource_ids: str = Query(..., description="Comma-separated resource IDs"),
+    start_time: int = Query(..., description="Unix timestamp in milliseconds"),
+    end_time: int | None = Query(default=None, description="Unix timestamp in milliseconds"),
+    size: int = Query(default=100, ge=1, le=500),
+    scan_id: str | None = Query(default=None),
+    subject_id: str | None = Query(default=None),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Fetch FP2 resource history from Aqara cloud."""
+    ids = _parse_csv_list(resource_ids)
+    if not ids:
+        raise HTTPException(status_code=400, detail="resource_ids is required")
+    try:
+        return await aqara_cloud_service.fetch_resource_history(
+            resource_ids=ids,
+            start_time=start_time,
+            end_time=end_time,
+            size=size,
+            scan_id=scan_id,
+            subject_id=subject_id,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.get("/cloud/statistics")
+async def get_fp2_cloud_statistics(
+    resource_ids: str = Query(..., description="Comma-separated resource IDs"),
+    start_time: int = Query(..., description="Unix timestamp in milliseconds"),
+    dimension: str = Query(..., description="Aqara statistics dimension, e.g. 1h or 1d"),
+    aggr_types: str = Query(..., description="Comma-separated Aqara aggregation types"),
+    end_time: int | None = Query(default=None, description="Unix timestamp in milliseconds"),
+    size: int = Query(default=100, ge=1, le=500),
+    scan_id: str | None = Query(default=None),
+    subject_id: str | None = Query(default=None),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Fetch FP2 resource statistics from Aqara cloud."""
+    ids = _parse_csv_list(resource_ids)
+    if not ids:
+        raise HTTPException(status_code=400, detail="resource_ids is required")
+    try:
+        return await aqara_cloud_service.fetch_resource_statistics(
+            resource_ids=ids,
+            start_time=start_time,
+            end_time=end_time,
+            dimension=dimension,
+            aggr_types=_parse_csv_int_list(aggr_types),
+            size=size,
+            scan_id=scan_id,
+            subject_id=subject_id,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.post("/cloud/subscribe")
+async def subscribe_fp2_cloud_resources(
+    request: AqaraResourceSubscriptionRequest,
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Subscribe the current app credentials to FP2 resource reports."""
+    if not request.resource_ids:
+        raise HTTPException(status_code=400, detail="resource_ids is required")
+    try:
+        return await aqara_cloud_service.subscribe_resources(
+            resource_ids=request.resource_ids,
+            attach=request.attach,
+            subject_id=request.subject_id,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.post("/cloud/unsubscribe")
+async def unsubscribe_fp2_cloud_resources(
+    request: AqaraResourceSubscriptionRequest,
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Remove FP2 resource subscriptions for the current app credentials."""
+    if not request.resource_ids:
+        raise HTTPException(status_code=400, detail="resource_ids is required")
+    try:
+        return await aqara_cloud_service.unsubscribe_resources(
+            resource_ids=request.resource_ids,
+            subject_id=request.subject_id,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.get("/cloud/push-errors")
+async def get_fp2_cloud_push_errors(
+    msg_type: str | None = Query(default=None, description="resource_report or control_fail"),
+    start_time: int | None = Query(default=None, description="Unix timestamp in milliseconds"),
+    end_time: int | None = Query(default=None, description="Unix timestamp in milliseconds"),
+    size: int = Query(default=50, ge=1, le=200),
+    scan_id: str | None = Query(default=None),
+    open_id: str | None = Query(default=None),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Inspect Aqara push delivery failures for the current app/openId."""
+    try:
+        return await aqara_cloud_service.get_push_errors(
+            open_id=open_id,
+            msg_type=msg_type,
+            start_time=start_time,
+            end_time=end_time,
+            size=size,
+            scan_id=scan_id,
+        )
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+
+@router.post("/cloud/push")
+async def receive_fp2_cloud_push(
+    message: Dict[str, Any] = Body(...),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
+):
+    """Receive Aqara Message Push payloads and update backend FP2 state."""
+    try:
+        result = await aqara_cloud_service.handle_message_push(message)
+    except Exception as exc:
+        _raise_cloud_http_error(exc)
+
+    if result.get("kind") == "resource_report":
+        ingest_result = await _ingest_fp2_payload(HAPPushPayload.model_validate(result["payload"]))
+        return {
+            "status": "ok",
+            "kind": "resource_report",
+            "resource_count": result.get("resource_count", 0),
+            "ingest_summary": ingest_result,
+        }
+
+    _update_cloud_event_state(message)
+    return {
+        "status": "accepted",
+        "kind": result.get("kind"),
+        "event_type": result.get("event_type"),
+    }
+
+
+@router.get("/raw-history")
+async def get_fp2_raw_history(
+    limit: int = Query(default=60, ge=1, le=400, description="Number of most recent raw captures to return"),
+    changed_only: bool = Query(default=False, description="Return only captures with changed resource values"),
+):
+    """Return recent raw FP2 captures for debugging Aqara Cloud payloads."""
+    entries = list(_raw_capture_history)
+    if changed_only:
+        entries = [entry for entry in entries if entry.get("changed_resources")]
+    return {
+        "count": min(limit, len(entries)),
+        "total": len(entries),
+        "latest_sequence": _raw_capture_sequence,
+        "captures": entries[-limit:],
+    }
 
 
 @router.websocket("/ws")
@@ -438,57 +891,66 @@ async def websocket_fp2_stream(
 class HAPPushPayload(BaseModel):
     timestamp: float
     presence: bool
-    zones: list = []
-    targets: list = []
+    zones: list[Dict[str, Any]] = Field(default_factory=list)
+    targets: list[Dict[str, Any]] = Field(default_factory=list)
     light_level: Optional[float] = None
     source: str = "hap_direct"
-    raw_attributes: Dict[str, Any] = {}
-    device: Dict[str, Any] = {}
-    connection: Dict[str, Any] = {}
+    raw_attributes: Dict[str, Any] = Field(default_factory=dict)
+    device: Dict[str, Any] = Field(default_factory=dict)
+    connection: Dict[str, Any] = Field(default_factory=dict)
 
 
-@router.post("/push")
-async def push_fp2_data(payload: HAPPushPayload):
-    """Receive FP2 data directly from HAP client (scripts/fp2_hap_client.py).
-
-    This bypasses HA entirely — the HAP client reads FP2 via HomeKit
-    and pushes snapshots here.
-    """
+async def _ingest_fp2_payload(payload: HAPPushPayload) -> Dict[str, Any]:
+    """Store normalized FP2 payload from HAP or Aqara Cloud into shared backend state."""
     global _hap_latest
 
-    # Convert to FP2Snapshot
-    zones = []
+    normalized_targets = []
     targets = []
+    target_counts_by_zone: Dict[str, int] = {}
+
+    for target in payload.targets:
+        zone_id = target.get("zone_id", "detection_area")
+        normalized_target = {
+            **target,
+            "zone_id": zone_id,
+        }
+        normalized_targets.append(normalized_target)
+        target_counts_by_zone[zone_id] = target_counts_by_zone.get(zone_id, 0) + 1
+        targets.append(FP2Target(
+            target_id=str(target.get("target_id") or target.get("id") or f"person_{len(targets)}"),
+            zone_id=zone_id,
+            x=float(target.get("x", 0.0) or 0.0),
+            y=float(target.get("y", 0.0) or 0.0),
+            distance=float(target.get("distance", 0.0) or 0.0),
+            angle=float(target.get("angle", 0.0) or 0.0),
+            activity=str(target.get("activity") or "present"),
+            confidence=float(target.get("confidence", 0.95) or 0.95),
+        ))
+
+    normalized_zones = []
+    zones = []
     for z in payload.zones:
         zone_id = z.get("zone_id", "unknown")
         occupied = z.get("occupied", False)
+        fallback_count = int(z.get("target_count", 0) or 0)
+        if payload.source == "aqara_cloud":
+            target_count = target_counts_by_zone.get(zone_id, 0)
+        else:
+            target_count = target_counts_by_zone.get(zone_id, fallback_count)
+        normalized_zone = {
+            **z,
+            "zone_id": zone_id,
+            "name": z.get("name", zone_id),
+            "occupied": occupied,
+            "target_count": target_count,
+        }
+        normalized_zones.append(normalized_zone)
         zones.append(FP2Zone(
             zone_id=zone_id,
-            name=z.get("name", zone_id),
+            name=normalized_zone["name"],
             occupied=occupied,
-            target_count=int(z.get("target_count", 1 if occupied else 0) or 0),
+            target_count=target_count,
         ))
-        if occupied and not payload.targets:
-            targets.append(FP2Target(
-                target_id=f"person_{zone_id}",
-                zone_id=zone_id,
-                activity="present",
-                confidence=0.95,
-            ))
-
-    if payload.targets:
-        for target in payload.targets:
-            zone_id = target.get("zone_id", "detection_area")
-            targets.append(FP2Target(
-                target_id=str(target.get("target_id") or target.get("id") or f"person_{len(targets)}"),
-                zone_id=zone_id,
-                x=float(target.get("x", 0.0) or 0.0),
-                y=float(target.get("y", 0.0) or 0.0),
-                distance=float(target.get("distance", 0.0) or 0.0),
-                angle=float(target.get("angle", 0.0) or 0.0),
-                activity=str(target.get("activity") or "present"),
-                confidence=float(target.get("confidence", 0.95) or 0.95),
-            ))
 
     snapshot = FP2Snapshot(
         timestamp=datetime.fromtimestamp(payload.timestamp),
@@ -498,8 +960,8 @@ async def push_fp2_data(payload: HAPPushPayload):
         raw_attributes={
             "source": payload.source,
             "transport": payload.connection.get("transport") or payload.source,
-            "zones": payload.zones,
-            "targets": payload.targets,
+            "zones": normalized_zones,
+            "targets": normalized_targets,
             "light_level": payload.light_level,
             "push_time": time.time(),
             **payload.raw_attributes,
@@ -511,6 +973,7 @@ async def push_fp2_data(payload: HAPPushPayload):
     _hap_latest["updated_at"] = time.time()
     _hap_latest["device"] = payload.device
     _hap_latest["connection"] = payload.connection
+    _record_raw_capture(snapshot)
 
     # Also update fp2_service's last snapshot if available
     try:
@@ -533,6 +996,12 @@ async def push_fp2_data(payload: HAPPushPayload):
         "zones": len(zones),
         "targets": len(targets),
     }
+
+
+@router.post("/push")
+async def push_fp2_data(payload: HAPPushPayload):
+    """Receive FP2 data directly from HAP client or external Aqara monitor."""
+    return await _ingest_fp2_payload(payload)
 
 
 @router.get("/hap-status")

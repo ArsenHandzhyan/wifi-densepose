@@ -49,11 +49,17 @@ ANGLE_RESOURCE_ID = "8.0.2116"
 COORDINATES_RESOURCE_ID = "4.22.700"
 MOVEMENT_EVENT_RESOURCE_ID = "13.27.85"
 FALL_EVENT_RESOURCE_ID = "4.31.85"
-TOTAL_COUNT_RESOURCE_ID = "13.120.85"
+AREA_ENTRY_COUNT_RESOURCE_ID = "13.120.85"
+REALTIME_PEOPLE_RESOURCE_ID = "0.60.85"
+PEOPLE_STATISTICS_RESOURCE_ID = "0.61.85"
+WALKING_DISTANCE_RESOURCE_ID = "0.63.85"
+PEOPLE_STATISTICS_SWITCH_RESOURCE_ID = "4.71.85"
+WALKING_DISTANCE_SWITCH_RESOURCE_ID = "4.75.85"
 ZONE_OCCUPANCY_PREFIX = "3."
-ZONE_COUNT_PREFIX = "13."
 ZONE_OCCUPANCY_SUFFIX = ".85"
-ZONE_COUNT_BASE = 120
+ZONE_MINUTE_STAT_PREFIX = "0."
+ZONE_STATISTICS_PREFIX = "13."
+ZONE_STAT_BASE = 120
 
 
 @dataclass
@@ -82,6 +88,13 @@ def parse_int(value: Any) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def parse_bool_flag(value: Any) -> bool | None:
+    parsed = parse_int(value)
+    if parsed is None:
+        return None
+    return parsed == 1
 
 
 def zone_id_for_number(zone_number: int | None) -> str:
@@ -221,6 +234,11 @@ class FP2CloudMonitor:
         self.client = AqaraCloudClient(settings)
         self.device: CloudFP2Device | None = None
         self.last_presence: bool | None = None
+        self.last_confirmed_targets: list[dict[str, Any]] = []
+        self.last_confirmed_zone: str | None = None
+        self.last_confirmed_targets_at: float | None = None
+        self.base_target_hold_seconds = max(4.0, interval * 4)
+        self.active_motion_hold_seconds = max(8.0, interval * 8)
 
     def _resource_map(self, resources: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return {str(item.get("resourceId")): item for item in resources if item.get("resourceId")}
@@ -283,18 +301,25 @@ class FP2CloudMonitor:
         *,
         presence: bool,
         active_targets: list[dict[str, Any]],
+        realtime_people_count: int | None,
     ) -> list[dict[str, Any]]:
+        # `13.121+` are visitor/statistics channels, not live zone occupancy counts.
+        target_counts_by_zone: dict[str, int] = {}
+        for target in active_targets:
+            zone_id = str(target.get("zone_id") or "detection_area")
+            target_counts_by_zone[zone_id] = target_counts_by_zone.get(zone_id, 0) + 1
+
         zones: list[dict[str, Any]] = []
         for zone_number in range(1, 31):
             occupancy_id = f"{ZONE_OCCUPANCY_PREFIX}{zone_number}{ZONE_OCCUPANCY_SUFFIX}"
-            count_id = f"{ZONE_COUNT_PREFIX}{ZONE_COUNT_BASE + zone_number}{ZONE_OCCUPANCY_SUFFIX}"
             occupied = str(self._resource_value(resource_map, occupancy_id) or "0") == "1"
-            target_count = parse_int(self._resource_value(resource_map, count_id)) or 0
+            zone_id = zone_id_for_number(zone_number)
+            target_count = target_counts_by_zone.get(zone_id, 0)
             if not occupied and target_count <= 0:
                 continue
             zones.append(
                 {
-                    "zone_id": zone_id_for_number(zone_number),
+                    "zone_id": zone_id,
                     "name": f"Zone {zone_number}",
                     "occupied": occupied,
                     "target_count": max(target_count, 1 if occupied else 0),
@@ -304,15 +329,100 @@ class FP2CloudMonitor:
         if zones:
             return zones
 
-        total_count = parse_int(self._resource_value(resource_map, TOTAL_COUNT_RESOURCE_ID)) or 0
+        target_hint = realtime_people_count
+        if target_hint is None:
+            target_hint = len(active_targets) if active_targets else 0
         return [
             {
                 "zone_id": "detection_area",
                 "name": "Detection Area",
                 "occupied": presence,
-                "target_count": max(total_count, len(active_targets), 1 if presence else 0),
+                "target_count": max(target_hint, len(active_targets), 1 if presence else 0),
             }
         ]
+
+    def _parse_zone_metrics(self, resource_map: dict[str, dict[str, Any]]) -> dict[str, dict[str, int]]:
+        zone_metrics: dict[str, dict[str, int]] = {}
+
+        area_entries_10s = parse_int(self._resource_value(resource_map, AREA_ENTRY_COUNT_RESOURCE_ID))
+        people_count_1m = parse_int(self._resource_value(resource_map, PEOPLE_STATISTICS_RESOURCE_ID))
+        if area_entries_10s is not None or people_count_1m is not None:
+            zone_metrics["detection_area"] = {
+                "people_entries_10s": area_entries_10s or 0,
+                "people_count_1m": people_count_1m or 0,
+            }
+
+        for zone_number in range(1, 31):
+            zone_id = zone_id_for_number(zone_number)
+            minute_id = f"{ZONE_MINUTE_STAT_PREFIX}{ZONE_STAT_BASE + zone_number}{ZONE_OCCUPANCY_SUFFIX}"
+            entry_id = f"{ZONE_STATISTICS_PREFIX}{ZONE_STAT_BASE + zone_number}{ZONE_OCCUPANCY_SUFFIX}"
+            people_entries_10s = parse_int(self._resource_value(resource_map, entry_id))
+            zone_people_count_1m = parse_int(self._resource_value(resource_map, minute_id))
+            if people_entries_10s is None and zone_people_count_1m is None:
+                continue
+            zone_metrics[zone_id] = {
+                "people_entries_10s": people_entries_10s or 0,
+                "people_count_1m": zone_people_count_1m or 0,
+            }
+
+        return zone_metrics
+
+    def _parse_advanced_metrics(self, resource_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "realtime_people_count": parse_int(self._resource_value(resource_map, REALTIME_PEOPLE_RESOURCE_ID)),
+            "people_count_1m": parse_int(self._resource_value(resource_map, PEOPLE_STATISTICS_RESOURCE_ID)),
+            "area_entries_10s": parse_int(self._resource_value(resource_map, AREA_ENTRY_COUNT_RESOURCE_ID)),
+            "walking_distance_m": parse_float(self._resource_value(resource_map, WALKING_DISTANCE_RESOURCE_ID)),
+            "people_statistics_enabled": parse_bool_flag(
+                self._resource_value(resource_map, PEOPLE_STATISTICS_SWITCH_RESOURCE_ID)
+            ),
+            "walking_distance_enabled": parse_bool_flag(
+                self._resource_value(resource_map, WALKING_DISTANCE_SWITCH_RESOURCE_ID)
+            ),
+        }
+
+    def _resource_values(self, resource_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        return {
+            rid: item.get("value")
+            for rid, item in resource_map.items()
+            if item.get("value") not in (None, "")
+        }
+
+    def _resource_labels(self, resource_values: dict[str, Any]) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for rid in resource_values:
+            meta = self.client.resource_info.get(rid) or {}
+            label = meta.get("name") or meta.get("description")
+            if label:
+                labels[rid] = str(label)
+        return labels
+
+    def _hold_window_for_event(self, movement_event: int | None) -> float:
+        if movement_event in {6, 7, 8, 9, 10}:
+            return self.active_motion_hold_seconds
+        return self.base_target_hold_seconds
+
+    def _build_held_targets(
+        self,
+        event_timestamp: float,
+        movement_event: int | None,
+    ) -> tuple[list[dict[str, Any]], float | None]:
+        if not self.last_confirmed_targets or self.last_confirmed_targets_at is None:
+            return [], None
+
+        hold_age_sec = max(0.0, event_timestamp - self.last_confirmed_targets_at)
+        if hold_age_sec > self._hold_window_for_event(movement_event):
+            return [], None
+
+        held_targets: list[dict[str, Any]] = []
+        for target in self.last_confirmed_targets:
+            held = dict(target)
+            held["activity"] = "held"
+            held["confidence"] = min(float(target.get("confidence", 0.95) or 0.95), 0.6)
+            held["held"] = True
+            held["hold_age_sec"] = round(hold_age_sec, 2)
+            held_targets.append(held)
+        return held_targets, round(hold_age_sec, 2)
 
     def _build_payload(self, resources: list[dict[str, Any]]) -> dict[str, Any]:
         if self.device is None:
@@ -326,10 +436,44 @@ class FP2CloudMonitor:
         movement_event = parse_int(self._resource_value(resource_map, MOVEMENT_EVENT_RESOURCE_ID))
         fall_state = parse_int(self._resource_value(resource_map, FALL_EVENT_RESOURCE_ID))
         sensor_angle = parse_float(self._resource_value(resource_map, ANGLE_RESOURCE_ID))
-        targets, current_zone = self._parse_targets(resource_map)
-        zones = self._parse_zones(resource_map, presence=presence, active_targets=targets)
-        device_timestamp = self._max_timestamp(resources)
+        advanced_metrics = self._parse_advanced_metrics(resource_map)
+        live_targets, current_zone = self._parse_targets(resource_map)
         event_timestamp = time.time()
+        coordinates_source = "live"
+        coordinates_hold_age_sec = None
+        if live_targets:
+            for target in live_targets:
+                target["held"] = False
+                target["hold_age_sec"] = 0.0
+            self.last_confirmed_targets = [dict(target) for target in live_targets]
+            self.last_confirmed_targets_at = event_timestamp
+            self.last_confirmed_zone = current_zone
+            targets = live_targets
+        elif presence:
+            held_targets, hold_age = self._build_held_targets(event_timestamp, movement_event)
+            if held_targets:
+                targets = held_targets
+                coordinates_source = "hold"
+                coordinates_hold_age_sec = hold_age
+                current_zone = current_zone or self.last_confirmed_zone
+            else:
+                targets = []
+                coordinates_source = "none"
+        else:
+            targets = []
+            coordinates_source = "none"
+            self.last_confirmed_targets = []
+            self.last_confirmed_targets_at = None
+            self.last_confirmed_zone = None
+        zones = self._parse_zones(
+            resource_map,
+            presence=presence,
+            active_targets=targets,
+            realtime_people_count=advanced_metrics["realtime_people_count"],
+        )
+        zone_metrics = self._parse_zone_metrics(resource_map)
+        resource_values = self._resource_values(resource_map)
+        device_timestamp = self._max_timestamp(resources)
 
         payload = {
             "timestamp": event_timestamp,
@@ -350,17 +494,13 @@ class FP2CloudMonitor:
                 "fall_state": fall_state,
                 "sensor_angle": sensor_angle,
                 "coordinates": targets,
-                "resource_values": {
-                    PRESENCE_RESOURCE_ID: self._resource_value(resource_map, PRESENCE_RESOURCE_ID),
-                    LIGHT_RESOURCE_ID: self._resource_value(resource_map, LIGHT_RESOURCE_ID),
-                    RSSI_RESOURCE_ID: self._resource_value(resource_map, RSSI_RESOURCE_ID),
-                    ONLINE_RESOURCE_ID: self._resource_value(resource_map, ONLINE_RESOURCE_ID),
-                    MOVEMENT_EVENT_RESOURCE_ID: self._resource_value(resource_map, MOVEMENT_EVENT_RESOURCE_ID),
-                    FALL_EVENT_RESOURCE_ID: self._resource_value(resource_map, FALL_EVENT_RESOURCE_ID),
-                    ANGLE_RESOURCE_ID: self._resource_value(resource_map, ANGLE_RESOURCE_ID),
-                    TOTAL_COUNT_RESOURCE_ID: self._resource_value(resource_map, TOTAL_COUNT_RESOURCE_ID),
-                    COORDINATES_RESOURCE_ID: self._resource_value(resource_map, COORDINATES_RESOURCE_ID),
-                },
+                "live_coordinates": live_targets,
+                "coordinates_source": coordinates_source,
+                "coordinates_hold_age_sec": coordinates_hold_age_sec,
+                "advanced_metrics": advanced_metrics,
+                "zone_metrics": zone_metrics,
+                "resource_values": resource_values,
+                "resource_labels": self._resource_labels(resource_values),
             },
             "device": {
                 "name": self.settings.device_name or self.device.name,
@@ -378,6 +518,10 @@ class FP2CloudMonitor:
                 "online": online,
                 "rssi": rssi,
                 "targets": len(targets),
+                "coordinates_source": coordinates_source,
+                "realtime_people_count": advanced_metrics["realtime_people_count"],
+                "people_count_1m": advanced_metrics["people_count_1m"],
+                "walking_distance_m": advanced_metrics["walking_distance_m"],
             },
         }
         return payload
@@ -402,10 +546,14 @@ class FP2CloudMonitor:
         )
 
     def run(self) -> int:
-        self.initialize()
+        init_backoff = max(self.interval, 2.0)
         logger.info("Pushing FP2 cloud snapshots to %s/api/v1/fp2/push every %.1fs", self.backend_url, self.interval)
         while True:
             try:
+                if self.device is None:
+                    self.initialize()
+                    logger.info("Aqara cloud monitor initialized")
+                    init_backoff = max(self.interval, 2.0)
                 resources = self.client.fetch_resource_values(self.device.did)
                 payload = self._build_payload(resources)
                 self.push_snapshot(payload)
@@ -434,6 +582,11 @@ class FP2CloudMonitor:
                 raise
             except Exception as exc:
                 logger.error("Cloud monitor cycle failed: %s", exc)
+                if self.device is None:
+                    logger.info("Retrying Aqara cloud initialization in %.1fs", init_backoff)
+                    time.sleep(init_backoff)
+                    init_backoff = min(init_backoff * 2, 30.0)
+                    continue
             time.sleep(self.interval)
 
 

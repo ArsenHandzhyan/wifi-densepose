@@ -7,6 +7,7 @@ set -e
 echo "🔄 Stopping FP2 stack..."
 
 # Kill existing processes
+pkill -f "uvicorn v1.src.app:app" 2>/dev/null || true
 pkill -f "uvicorn src.app" 2>/dev/null || true
 pkill -f "fp2_aqara_cloud_monitor" 2>/dev/null || true
 pkill -f "http.server.*3000" 2>/dev/null || true

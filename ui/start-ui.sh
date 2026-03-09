@@ -19,4 +19,4 @@ if ! curl -sf http://127.0.0.1:8000/health/live >/dev/null 2>&1; then
 fi
 
 echo "Serving UI on port 3000"
-exec python3 -m http.server 3000
+exec python3 dev_server.py

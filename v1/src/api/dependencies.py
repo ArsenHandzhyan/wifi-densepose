@@ -15,6 +15,7 @@ from src.services.pose_service import PoseService
 from src.services.stream_service import StreamService
 from src.services.hardware_service import HardwareService
 from src.services.fp2_service import FP2Service
+from src.services.aqara_cloud_service import AqaraCloudService
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,13 @@ def get_fp2_service() -> FP2Service:
     """Get FP2 service instance."""
     settings = get_settings()
     return FP2Service(settings=settings)
+
+
+@lru_cache()
+def get_aqara_cloud_service() -> AqaraCloudService:
+    """Get Aqara cloud service instance."""
+    settings = get_settings()
+    return AqaraCloudService(settings=settings)
 
 
 # Authentication dependencies

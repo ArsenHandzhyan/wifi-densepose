@@ -2,6 +2,20 @@
 
 import { healthService } from '../services/health.service.js';
 import { fp2Service } from '../services/fp2.service.js?v=20260307-fp2max1';
+import { t, tp } from '../services/i18n.js?v=20260309-v20';
+import {
+  buildRoomProfiles,
+  getProfileAnimalFilterEnabled,
+  getRoomProfileById,
+  readStoredActiveRoomProfileId,
+  readStoredRoomProfileFilters,
+  readStoredRoomProfiles
+} from '../services/fp2.profiles.js?v=20260309-v10';
+import {
+  applyTargetCountsToZones,
+  classifyTargets,
+  updateTargetTrackState
+} from '../services/fp2.target-filter.js?v=20260308-v2';
 
 export class DashboardTab {
   constructor(containerElement) {
@@ -12,11 +26,18 @@ export class DashboardTab {
     this.fp2Interval = null;
     this.csiPipelineEnabled = true;
     this.fp2OnlyMode = false;
+    this.languageListener = null;
+    this.lastApiInfo = null;
+    this.lastFp2Status = null;
+    this.lastFp2Current = null;
+    this.targetTracks = {};
   }
 
   // Initialize component
   async init() {
     this.cacheElements();
+    this.languageListener = () => this.handleLanguageChange();
+    document.addEventListener('fp2:languagechange', this.languageListener);
     await this.loadInitialData();
     this.startMonitoring();
   }
@@ -59,7 +80,7 @@ export class DashboardTab {
 
     } catch (error) {
       console.error('Failed to load dashboard data:', error);
-      this.showError('Failed to load dashboard data');
+      this.showError(t('dashboard.error.load'));
     }
   }
 
@@ -73,12 +94,14 @@ export class DashboardTab {
     // Start periodic stats updates only when CSI mode is actually enabled.
     if (this.csiPipelineEnabled && !this.fp2OnlyMode) {
       this.statsInterval = setInterval(() => {
+        if (typeof document !== 'undefined' && document.hidden) return;
         this.updateLiveStats();
       }, 5000);
     }
 
     if (this.fp2OnlyMode) {
       this.fp2Interval = setInterval(() => {
+        if (typeof document !== 'undefined' && document.hidden) return;
         this.refreshFp2OnlyState().catch((error) => {
           console.error('Failed to refresh FP2 dashboard state:', error);
         });
@@ -91,6 +114,8 @@ export class DashboardTab {
 
   // Update API info display
   updateApiInfo(info) {
+    this.lastApiInfo = info;
+
     // Update version
     const versionElement = this.container.querySelector('.api-version');
     if (versionElement && info.version) {
@@ -136,7 +161,7 @@ export class DashboardTab {
     const overallStatus = this.container.querySelector('.overall-health');
     if (overallStatus) {
       overallStatus.className = `overall-health status-${health.status}`;
-      overallStatus.textContent = health.status.toUpperCase();
+      overallStatus.textContent = this.formatHealthStatus(health.status);
     }
 
     if (this.fp2OnlyMode) {
@@ -181,11 +206,11 @@ export class DashboardTab {
       const statusMessage = element.querySelector('.status-message');
       
       if (statusText) {
-        statusText.textContent = status.status.toUpperCase();
+        statusText.textContent = this.formatHealthStatus(status.status);
       }
       
       if (statusMessage && status.message) {
-        statusMessage.textContent = status.message;
+        statusMessage.textContent = this.formatHealthMessage(status.message);
       }
     }
     
@@ -198,11 +223,11 @@ export class DashboardTab {
         const apiStatusMessage = apiElement.querySelector('.status-message');
         
         if (apiStatusText) {
-          apiStatusText.textContent = 'HEALTHY';
+          apiStatusText.textContent = this.formatHealthStatus('healthy');
         }
         
         if (apiStatusMessage) {
-          apiStatusMessage.textContent = 'API server is running normally';
+          apiStatusMessage.textContent = t('dashboard.api_running_normally');
         }
       }
     }
@@ -329,7 +354,7 @@ export class DashboardTab {
         zoneElement.className = 'zone-item';
         zoneElement.innerHTML = `
           <span class="zone-name">${zoneId}</span>
-          <span class="zone-count">undefined</span>
+          <span class="zone-count">-</span>
         `;
         zonesContainer.appendChild(zoneElement);
       });
@@ -367,12 +392,12 @@ export class DashboardTab {
   setFp2OnlyState() {
     const heroTitle = this.container.querySelector('.hero-section h2');
     if (heroTitle) {
-      heroTitle.textContent = 'Local FP2 Presence Monitoring';
+      heroTitle.textContent = t('dashboard.fp2_only_title');
     }
 
     const heroDescription = this.container.querySelector('.hero-description');
     if (heroDescription) {
-      heroDescription.textContent = 'This dashboard is running in FP2-only mode. It exposes live FP2 telemetry, including transport health, zone occupancy, event codes, and raw sensor diagnostics from the active transport.';
+      heroDescription.textContent = t('dashboard.fp2_only_description');
     }
 
     const detectionCount = this.container.querySelector('.detection-count');
@@ -387,7 +412,7 @@ export class DashboardTab {
 
     const avgConfidence = this.container.querySelector('.avg-confidence');
     if (avgConfidence) {
-      avgConfidence.textContent = 'UNAVAILABLE';
+      avgConfidence.textContent = t('common.unavailable');
     }
 
     if (this.statsElements.bodyRegions) {
@@ -403,14 +428,14 @@ export class DashboardTab {
     }
 
     if (this.statsElements.hardwareCost) {
-      this.statsElements.hardwareCost.textContent = 'Local';
+      this.statsElements.hardwareCost.textContent = t('common.local');
     }
 
     const zonesContainer = this.container.querySelector('.zones-summary');
     if (zonesContainer) {
       zonesContainer.innerHTML = `
         <div class="zone-item">
-          <span class="zone-name">No live zones</span>
+          <span class="zone-name">${t('dashboard.no_live_zones')}</span>
           <span class="zone-count">-</span>
         </div>
       `;
@@ -421,8 +446,8 @@ export class DashboardTab {
       apiCard.className = 'component-status status-healthy';
       const statusText = apiCard.querySelector('.status-text');
       const statusMessage = apiCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'HEALTHY';
-      if (statusMessage) statusMessage.textContent = 'Local backend is responding';
+      if (statusText) statusText.textContent = t('common.healthy');
+      if (statusMessage) statusMessage.textContent = t('dashboard.local_backend_responding');
     }
 
     const hardwareCard = this.container.querySelector('[data-component="hardware"]');
@@ -431,7 +456,7 @@ export class DashboardTab {
       const statusText = hardwareCard.querySelector('.status-text');
       const statusMessage = hardwareCard.querySelector('.status-message');
       if (statusText) statusText.textContent = 'FP2';
-      if (statusMessage) statusMessage.textContent = 'Waiting for a live FP2 telemetry stream';
+      if (statusMessage) statusMessage.textContent = t('dashboard.waiting_live_stream');
     }
 
     const inferenceCard = this.container.querySelector('[data-component="inference"]');
@@ -439,8 +464,8 @@ export class DashboardTab {
       inferenceCard.className = 'component-status status-disabled';
       const statusText = inferenceCard.querySelector('.status-text');
       const statusMessage = inferenceCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'DISABLED';
-      if (statusMessage) statusMessage.textContent = 'CSI/DensePose pipeline is disabled on this setup';
+      if (statusText) statusText.textContent = t('common.disabled');
+      if (statusMessage) statusMessage.textContent = t('dashboard.csi_disabled_setup');
     }
 
     const streamingCard = this.container.querySelector('[data-component="streaming"]');
@@ -448,8 +473,8 @@ export class DashboardTab {
       streamingCard.className = 'component-status status-warning';
       const statusText = streamingCard.querySelector('.status-text');
       const statusMessage = streamingCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'STALE';
-      if (statusMessage) statusMessage.textContent = 'No live FP2 snapshots are currently reaching the backend';
+      if (statusText) statusText.textContent = t('common.stale');
+      if (statusMessage) statusMessage.textContent = t('dashboard.no_live_snapshots');
     }
   }
 
@@ -472,15 +497,42 @@ export class DashboardTab {
   }
 
   renderFp2OnlyStatus(status, current) {
+    this.lastFp2Status = status;
+    this.lastFp2Current = current;
+
     const metadata = current?.metadata || {};
     const available = metadata.available !== false;
-    const presence = Boolean(metadata.presence);
+    const rawPresence = Boolean(metadata.presence);
+    const presence = metadata.effective_presence !== undefined
+      ? Boolean(metadata.effective_presence)
+      : rawPresence;
+    const derivedPresence = presence && Boolean(metadata.derived_presence) && !rawPresence;
     const connection = status?.connection || {};
     const rawAttributes = current?.metadata?.raw_attributes || {};
-    const coordinateTargets = Array.isArray(rawAttributes.coordinates) ? rawAttributes.coordinates.length : 0;
-    const persons = Number(connection.targets ?? coordinateTargets ?? (Array.isArray(current?.persons) ? current.persons.length : 0)) || 0;
-    const zones = Array.isArray(connection.zones) ? connection.zones : [];
-    const liveZoneCount = zones.length > 0 ? zones.length : Object.keys(current?.zone_summary || {}).length;
+    const roomProfiles = buildRoomProfiles(readStoredRoomProfiles());
+    const activeProfile = getRoomProfileById(roomProfiles, readStoredActiveRoomProfileId());
+    const profileFilters = readStoredRoomProfileFilters();
+    const animalFilterEnabled = getProfileAnimalFilterEnabled(activeProfile, profileFilters);
+    const rawTargets = Array.isArray(rawAttributes.coordinates)
+      ? rawAttributes.coordinates.map((target, index) => ({
+          target_id: target.target_id || `target_${index + 1}`,
+          zone_id: target.zone_id || 'detection_area',
+          x: Number(target.x ?? 0),
+          y: Number(target.y ?? 0),
+          distance: Number(target.distance ?? 0),
+          angle: Number(target.angle ?? 0),
+          activity: target.activity || 'present',
+          confidence: Number(target.confidence ?? 0.95)
+        }))
+      : [];
+    const sampleAtMs = current?.timestamp ? Date.parse(current.timestamp) : Date.now();
+    this.targetTracks = updateTargetTrackState(this.targetTracks, rawTargets, sampleAtMs, activeProfile);
+    const classifiedTargets = classifyTargets(rawTargets, this.targetTracks, activeProfile, animalFilterEnabled, sampleAtMs);
+    const persons = classifiedTargets.visibleTargets.length;
+    const zones = applyTargetCountsToZones(Array.isArray(connection.zones) ? connection.zones : [], classifiedTargets.visibleTargets, classifiedTargets.filteredTargets);
+    const liveZoneCount = zones.length > 0
+      ? zones.length
+      : (Object.keys(current?.zone_summary || {}).length || (presence ? 1 : 0));
     const transportLabel = this.formatTransport(connection.transport || status?.source || 'fp2');
     const hasLiveStream = connection?.state === 'live' && available;
 
@@ -492,8 +544,8 @@ export class DashboardTab {
     const avgConfidence = this.container.querySelector('.avg-confidence');
     if (avgConfidence) {
       avgConfidence.textContent = available
-        ? (presence ? 'PRESENT' : 'ABSENT')
-        : 'UNAVAILABLE';
+        ? (presence ? (derivedPresence ? t('common.present_derived') : t('common.present')) : t('common.absent'))
+        : t('common.unavailable');
     }
 
     const detectionCount = this.container.querySelector('.detection-count');
@@ -507,21 +559,27 @@ export class DashboardTab {
         const zoneMarkup = zones.length > 0
           ? zones.map((zone) => `
               <div class="zone-item">
-                <span class="zone-name">${zone.name || zone.zone_id || 'zone'}</span>
-                <span class="zone-count">${zone.occupied ? 'active' : 'idle'}</span>
+                <span class="zone-name">${zone.name || zone.zone_id || t('dashboard.zone_default')}</span>
+                <span class="zone-count">${zone.target_count > 0 ? tp('dashboard.count.targets', zone.target_count) : (zone.occupied ? t('dashboard.zone.active') : t('dashboard.zone.idle'))}</span>
               </div>
             `).join('')
+          : (presence ? `
+              <div class="zone-item">
+                <span class="zone-name">${t('dashboard.zone_default')}</span>
+                <span class="zone-count">${t('dashboard.zone.active')}</span>
+              </div>
+            `
           : Object.entries(current?.zone_summary || {}).map(([zoneName, count]) => `
               <div class="zone-item">
                 <span class="zone-name">${zoneName}</span>
                 <span class="zone-count">${count}</span>
               </div>
-            `).join('');
+            `).join(''));
         zonesContainer.innerHTML = zoneMarkup;
       } else {
         zonesContainer.innerHTML = `
           <div class="zone-item">
-            <span class="zone-name">No live zones</span>
+            <span class="zone-name">${t('dashboard.no_live_zones')}</span>
             <span class="zone-count">-</span>
           </div>
         `;
@@ -533,11 +591,11 @@ export class DashboardTab {
       hardwareCard.className = `component-status ${hasLiveStream ? 'status-healthy' : 'status-warning'}`;
       const statusText = hardwareCard.querySelector('.status-text');
       const statusMessage = hardwareCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = hasLiveStream ? 'FP2' : 'STALE';
+      if (statusText) statusText.textContent = hasLiveStream ? 'FP2' : t('common.stale');
       if (statusMessage) {
         statusMessage.textContent = hasLiveStream
-          ? `Aqara FP2 telemetry is live over ${transportLabel}`
-          : 'Aqara FP2 is configured, but no live telemetry stream is active';
+          ? t('dashboard.fp2_live_transport', { transport: transportLabel })
+          : t('dashboard.fp2_no_stream');
       }
     }
 
@@ -552,8 +610,12 @@ export class DashboardTab {
       }
       if (statusMessage) {
         statusMessage.textContent = hasLiveStream
-          ? `Live FP2 snapshots are being pushed to the backend over ${transportLabel} (${persons} target${persons === 1 ? '' : 's'}, ${liveZoneCount} zone${liveZoneCount === 1 ? '' : 's'})`
-          : 'No live FP2 snapshots are currently reaching the backend';
+          ? t('dashboard.stream_summary', {
+              transport: transportLabel,
+              targets: tp('dashboard.count.targets', persons),
+              zones: tp('dashboard.count.zones', liveZoneCount),
+            })
+          : t('dashboard.no_live_snapshots');
       }
     }
   }
@@ -564,31 +626,33 @@ export class DashboardTab {
     const avgConfidence = this.container.querySelector('.avg-confidence');
 
     if (avgConfidence) {
-      avgConfidence.textContent = 'UNAVAILABLE';
+      avgConfidence.textContent = t('common.unavailable');
     }
 
     if (hardwareCard) {
       hardwareCard.className = 'component-status status-error';
       const statusText = hardwareCard.querySelector('.status-text');
       const statusMessage = hardwareCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'ERROR';
-      if (statusMessage) statusMessage.textContent = 'Unable to load FP2 sensor state';
+      if (statusText) statusText.textContent = t('common.error');
+      if (statusMessage) statusMessage.textContent = t('dashboard.unable_load_sensor');
     }
 
     if (streamingCard) {
       streamingCard.className = 'component-status status-error';
       const statusText = streamingCard.querySelector('.status-text');
       const statusMessage = streamingCard.querySelector('.status-message');
-      if (statusText) statusText.textContent = 'ERROR';
-      if (statusMessage) statusMessage.textContent = 'Unable to load FP2 stream state';
+      if (statusText) statusText.textContent = t('common.error');
+      if (statusMessage) statusMessage.textContent = t('dashboard.unable_load_stream');
     }
   }
 
   formatTransport(transport) {
-    const normalized = String(transport || '').replace(/_/g, ' ').trim();
+    const normalized = String(transport || '').replace(/_/g, ' ').trim().toLowerCase();
     if (!normalized) {
-      return 'FP2';
+      return t('transport.fp2');
     }
+    if (normalized === 'aqara cloud') return t('transport.aqara_cloud');
+    if (normalized === 'homekit / hap') return t('transport.homekit_hap');
     return normalized
       .split(' ')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -596,16 +660,69 @@ export class DashboardTab {
   }
 
   formatConnectionState(state) {
-    const normalized = String(state || 'offline').trim().toUpperCase();
-    return normalized || 'OFFLINE';
+    const normalized = String(state || 'offline').trim();
+    if (!normalized) return t('fp2.stream.offline');
+    if (normalized === 'live') return t('fp2.stream.live');
+    if (normalized === 'connected') return t('fp2.stream.connected');
+    if (normalized === 'polling') return t('fp2.stream.polling');
+    if (normalized === 'error') return t('fp2.stream.error');
+    if (normalized === 'offline') return t('fp2.stream.offline');
+    if (normalized === 'stale') return t('common.stale');
+    return normalized.toUpperCase();
+  }
+
+  formatHealthStatus(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    const translated = normalized ? t(`dashboard.health.${normalized}`) : '';
+    if (translated && translated !== `dashboard.health.${normalized}`) {
+      return translated;
+    }
+    return normalized ? normalized.toUpperCase() : '-';
+  }
+
+  formatHealthMessage(message) {
+    if (!message) return '';
+
+    if (message === 'CSI pipeline disabled; FP2-only mode') {
+      return t('dashboard.health_msg.csi_disabled_fp2_only');
+    }
+
+    if (message === 'Service not initialized') {
+      return t('dashboard.health_msg.service_not_initialized');
+    }
+
+    if (message.startsWith('Health check failed:')) {
+      const details = message.slice('Health check failed:'.length).trim();
+      const prefix = t('dashboard.health_msg.health_check_failed');
+      return details ? `${prefix}: ${details}` : prefix;
+    }
+
+    return message;
   }
 
   // Format feature name
   formatFeatureName(name) {
+    const translated = t(`feature.${name}`);
+    if (translated !== `feature.${name}`) {
+      return translated;
+    }
     return name.replace(/_/g, ' ')
       .split(' ')
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ');
+  }
+
+  handleLanguageChange() {
+    if (this.lastApiInfo) {
+      this.updateApiInfo(this.lastApiInfo);
+    }
+
+    if (this.fp2OnlyMode) {
+      this.setFp2OnlyState();
+      if (this.lastFp2Status || this.lastFp2Current) {
+        this.renderFp2OnlyStatus(this.lastFp2Status || {}, this.lastFp2Current || {});
+      }
+    }
   }
 
   // Format large numbers
@@ -644,6 +761,11 @@ export class DashboardTab {
 
     if (this.fp2Interval) {
       clearInterval(this.fp2Interval);
+    }
+
+    if (this.languageListener) {
+      document.removeEventListener('fp2:languagechange', this.languageListener);
+      this.languageListener = null;
     }
     
     healthService.stopHealthMonitoring();

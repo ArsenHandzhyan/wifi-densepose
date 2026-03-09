@@ -11,6 +11,8 @@ cd /Users/arsen/Desktop/wifi-densepose
 echo "📡 Остановка существующих процессов..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null || true
 lsof -ti:3000 | xargs kill -9 2>/dev/null || true
+pkill -f "uvicorn v1.src.app:app" 2>/dev/null || true
+pkill -f "uvicorn src.app:app" 2>/dev/null || true
 pkill -f "fp2_aqara_cloud_monitor" 2>/dev/null || true
 pkill -f "http.server" 2>/dev/null || true
 sleep 2

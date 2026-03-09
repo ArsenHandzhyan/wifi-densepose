@@ -5,9 +5,11 @@ import { apiService } from './api.service.js';
 
 export class HealthService {
   constructor() {
-    this.healthCheckInterval = null;
+    this.healthCheckTimer = null;
     this.healthSubscribers = [];
     this.lastHealthStatus = null;
+    this.monitorIntervalMs = 30000;
+    this.checkInFlight = false;
   }
 
   // Get system health
@@ -50,34 +52,56 @@ export class HealthService {
 
   // Start periodic health checks
   startHealthMonitoring(intervalMs = 30000) {
-    if (this.healthCheckInterval) {
-      console.warn('Health monitoring already active');
+    this.monitorIntervalMs = Math.max(30000, intervalMs);
+
+    if (this.healthCheckTimer || this.checkInFlight) {
       return;
     }
 
-    // Initial check
-    this.getSystemHealth().catch(error => {
-      console.error('Initial health check failed:', error);
-    });
-
-    // Set up periodic checks
-    this.healthCheckInterval = setInterval(() => {
-      this.getSystemHealth().catch(error => {
-        console.error('Health check failed:', error);
-        this.notifySubscribers({
-          status: 'error',
-          error: error.message,
-          timestamp: new Date().toISOString()
-        });
-      });
-    }, intervalMs);
+    this.scheduleNextHealthCheck(this.monitorIntervalMs);
   }
 
   // Stop health monitoring
   stopHealthMonitoring() {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-      this.healthCheckInterval = null;
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+
+  scheduleNextHealthCheck(delayMs = this.monitorIntervalMs) {
+    if (this.healthCheckTimer) {
+      clearTimeout(this.healthCheckTimer);
+    }
+
+    this.healthCheckTimer = setTimeout(() => {
+      this.healthCheckTimer = null;
+      this.runHealthCheck();
+    }, delayMs);
+  }
+
+  async runHealthCheck() {
+    if (this.checkInFlight) {
+      return;
+    }
+
+    this.checkInFlight = true;
+    try {
+      await this.getSystemHealth();
+      this.scheduleNextHealthCheck(this.monitorIntervalMs);
+    } catch (error) {
+      console.error('Health check failed:', error);
+      this.notifySubscribers({
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
+
+      const isRateLimited = Number(error?.status) === 429
+        || /429|too many requests/i.test(String(error?.message || ''));
+      this.scheduleNextHealthCheck(isRateLimited ? Math.max(60000, this.monitorIntervalMs) : this.monitorIntervalMs);
+    } finally {
+      this.checkInFlight = false;
     }
   }
 
@@ -131,6 +155,7 @@ export class HealthService {
     this.stopHealthMonitoring();
     this.healthSubscribers = [];
     this.lastHealthStatus = null;
+    this.checkInFlight = false;
   }
 }
 

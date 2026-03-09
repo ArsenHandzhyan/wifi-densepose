@@ -166,6 +166,18 @@ class Settings(BaseSettings):
     fp2_bssid: str = Field(default="", description="FP2 access point BSSID")
     router_ssid: str = Field(default="", description="WiFi router SSID")
     router_ip: str = Field(default="", description="WiFi router IP address")
+
+    # Aqara Open API / FP2 cloud settings
+    aqara_email: str = Field(default="", description="Aqara account email")
+    aqara_password: str = Field(default="", description="Aqara account password")
+    aqara_api_domain: str = Field(default="open-ger.aqara.com", description="Aqara Open API domain")
+    aqara_app_id: str = Field(default="", description="Aqara Open API app id")
+    aqara_app_key: str = Field(default="", description="Aqara Open API app key")
+    aqara_key_id: str = Field(default="", description="Aqara Open API key id")
+    aqara_access_token: str = Field(default="", description="Aqara Open API access token")
+    aqara_refresh_token: str = Field(default="", description="Aqara Open API refresh token")
+    aqara_open_id: str = Field(default="", description="Aqara authorized user open id")
+    aqara_access_token_expires: str = Field(default="", description="Aqara token expiry timestamp")
     
     # Cleanup settings
     csi_data_retention_days: int = Field(default=30, description="CSI data retention in days")

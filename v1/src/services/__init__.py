@@ -9,6 +9,7 @@ from .pose_service import PoseService
 from .stream_service import StreamService
 from .hardware_service import HardwareService
 from .fp2_service import FP2Service
+from .aqara_cloud_service import AqaraCloudService
 
 __all__ = [
     'ServiceOrchestrator',
@@ -17,5 +18,6 @@ __all__ = [
     'PoseService',
     'StreamService',
     'HardwareService',
-    'FP2Service'
+    'FP2Service',
+    'AqaraCloudService',
 ]

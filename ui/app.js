@@ -1,32 +1,19 @@
 // Aqara FP2 Monitor - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js?v=20260308-v2';
-import { FP2Tab } from './components/FP2Tab.js?v=20260308-v2';
+import { DashboardTab } from './components/DashboardTab.js?v=20260309-v21';
+import { FP2Tab } from './components/FP2Tab.js?v=20260309-v30';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
-
-// Internationalization (i18n) translations
-const i18n = {
-  en: {
-    subtitle: 'Complete telemetry from Aqara FP2 sensor in real-time',
-    tab_dashboard: 'Dashboard',
-    tab_fp2: 'FP2 Monitor'
-  },
-  ru: {
-    subtitle: 'Полная телеметрия с сенсора Aqara FP2 в реальном времени',
-    tab_dashboard: 'Панель управления',
-    tab_fp2: 'Монитор FP2'
-  }
-};
+import { i18n, t, setLanguage, translateDocument, getCurrentLang } from './services/i18n.js?v=20260309-v20';
 
 class WiFiDensePoseApp {
   constructor() {
     this.components = {};
     this.isInitialized = false;
     this.lastBackendToastState = null;
-    this.currentLang = localStorage.getItem('fp2_lang') || 'en'; // Default to English
+    this.currentLang = getCurrentLang();
   }
 
   // Initialize application
@@ -57,7 +44,7 @@ class WiFiDensePoseApp {
       
     } catch (error) {
       console.error('Failed to initialize application:', error);
-      this.showGlobalError('Failed to initialize application. Please refresh the page.');
+      this.showGlobalError(t('error.init'));
     }
   }
 
@@ -86,19 +73,19 @@ class WiFiDensePoseApp {
     try {
       const health = await healthService.checkLiveness();
       console.log('✅ Backend is available and responding:', health);
-      this.showBackendStatus('Connected to real backend', 'success');
+      this.showBackendStatus(t('backend.connected'), 'success');
     } catch (error) {
       console.error('❌ Backend check failed:', error);
-      this.showBackendStatus('Backend connection failed', 'error');
+      this.showBackendStatus(t('backend.failed'), 'error');
     }
 
     healthService.subscribeToHealth((health) => {
       if (health?.status === 'alive' || health?.status === 'healthy') {
-        this.showBackendStatus('Connected to real backend', 'success');
+        this.showBackendStatus(t('backend.connected'), 'success');
         return;
       }
 
-      this.showBackendStatus('Backend connection failed', 'error');
+      this.showBackendStatus(t('backend.failed'), 'error');
     });
 
     healthService.startHealthMonitoring(10000);
@@ -199,14 +186,14 @@ class WiFiDensePoseApp {
     window.addEventListener('error', (event) => {
       if (event.error) {
         console.error('Global error:', event.error);
-        this.showGlobalError('An unexpected error occurred');
+        this.showGlobalError(t('error.unexpected'));
       }
     });
 
     window.addEventListener('unhandledrejection', (event) => {
       if (event.reason) {
         console.error('Unhandled promise rejection:', event.reason);
-        this.showGlobalError('An unexpected error occurred');
+        this.showGlobalError(t('error.unexpected'));
       }
     });
   }
@@ -271,22 +258,20 @@ class WiFiDensePoseApp {
 
   // Apply language to UI
   applyLanguage(lang) {
-    this.currentLang = lang;
-    localStorage.setItem('fp2_lang', lang);
+    setLanguage(lang);
+    this.currentLang = getCurrentLang();
     
-    // Update button text
     const langToggle = document.getElementById('lang-toggle');
     if (langToggle) {
-      langToggle.textContent = lang === 'ru' ? '🇷🇺 RU' : '🇬🇧 EN';
+      langToggle.textContent = this.currentLang === 'ru' ? '🇷🇺 RU' : '🇬🇧 EN';
+      langToggle.title = t('app.lang_toggle_title');
     }
-    
-    // Update all elements with data-i18n attribute
-    document.querySelectorAll('[data-i18n]').forEach(el => {
-      const key = el.getAttribute('data-i18n');
-      if (i18n[lang] && i18n[lang][key]) {
-        el.textContent = i18n[lang][key];
-      }
-    });
+
+    document.title = t('app.title');
+    translateDocument(document);
+    document.dispatchEvent(new CustomEvent('fp2:languagechange', {
+      detail: { lang: this.currentLang }
+    }));
   }
 
   // Clean up resources
@@ -325,3 +310,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Export for testing
 export { WiFiDensePoseApp };
+export { i18n };

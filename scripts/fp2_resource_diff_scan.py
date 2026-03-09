@@ -211,9 +211,10 @@ def main() -> int:
     settings = probe.load_settings(args.env_file)
 
     # Leave a gap before the first signed request so repeated scans do not hit
-    # Aqara duplicate-request protection.
+    # Aqara duplicate-request protection. Start with the current access token and
+    # refresh only if Aqara returns code 108, because stale refresh tokens can
+    # fail even when the access token is still valid.
     time.sleep(1.3)
-    refresh_access_token(settings, persist=True)
     did, model = resolve_device(settings)
     resource_info = load_resource_info(settings, model)
     baseline = fetch_resource_values(settings, did)

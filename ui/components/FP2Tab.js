@@ -1,7 +1,7 @@
 // FP2 Monitor Tab Component — Ultra Edition
 
-import { fp2Service } from '../services/fp2.service.js?v=20260309-v2';
-import { t, tp } from '../services/i18n.js?v=20260309-v21';
+import { fp2Service } from '../services/fp2.service.js?v=20260309-v3';
+import { t, tp } from '../services/i18n.js?v=20260309-v22';
 import {
   BUILTIN_ROOM_ITEM_LIBRARY,
   DEFAULT_ROOM_PROFILE_ID,
@@ -100,6 +100,7 @@ const FALL_LABELS = {
 const TARGET_COLORS = ['#4ade80', '#38bdf8', '#f472b6', '#facc15', '#a78bfa', '#fb923c'];
 const LOCAL_HISTORY_KEY = 'fp2_local_history_v1';
 const LOCAL_ENTRY_KEY = 'fp2_local_presence_entries_v1';
+const LOCAL_SCENARIO_KEY = 'fp2_ui_scenario_v1';
 
 export class FP2Tab {
   constructor(containerElement) {
@@ -121,6 +122,8 @@ export class FP2Tab {
       currentZone: null,
       lastPresence: null,
       presenceStartedAt: null,
+      sessionPeakTargets: 0,
+      sessionPeakCoordinateTargets: 0,
       zones: [],
       targets: [],
       device: null,
@@ -170,6 +173,8 @@ export class FP2Tab {
       selectedRoomItemId: null,
       roomItemInteraction: null,
       coordinateEnableBusy: false,
+      selectedScenarioId: null,
+      scenarioBusyId: null,
       lastRoomProjection: null,
       rawTargets: [],
       filteredTargets: [],
@@ -192,6 +197,7 @@ export class FP2Tab {
     this.cacheElements();
     this.loadRoomProfiles();
     this.loadLocalHistory();
+    this.loadScenarioPreference();
     this.bindEvents();
     this.languageListener = () => this.handleLanguageChange();
     document.addEventListener('fp2:languagechange', this.languageListener);
@@ -224,6 +230,9 @@ export class FP2Tab {
       homeRangeDay: this.container.querySelector('#fp2HomeRangeDay'),
       homeRangeWeek: this.container.querySelector('#fp2HomeRangeWeek'),
       homeClearHistory: this.container.querySelector('#fp2HomeClearHistory'),
+      scenarioStatus: this.container.querySelector('#fp2ScenarioStatus'),
+      scenarioTabs: this.container.querySelector('#fp2ScenarioTabs'),
+      scenarioDetail: this.container.querySelector('#fp2ScenarioDetail'),
       homeCurrentPeople: this.container.querySelector('#fp2HomeCurrentPeople'),
       homePresenceDuration: this.container.querySelector('#fp2HomePresenceDuration'),
       homeVisitorsLabel: this.container.querySelector('#fp2HomeVisitorsLabel'),
@@ -267,6 +276,9 @@ export class FP2Tab {
       coordinateCount: this.container.querySelector('#fp2CoordinateCount'),
       apiDomain: this.container.querySelector('#fp2ApiDomain'),
       primaryTargetId: this.container.querySelector('#fp2PrimaryTargetId'),
+      activeTargetCount: this.container.querySelector('#fp2ActiveTargetCount'),
+      coordinateTargetCount: this.container.querySelector('#fp2CoordinateTargetCount'),
+      sessionPeakTargetCount: this.container.querySelector('#fp2SessionPeakTargetCount'),
       primaryTargetType: this.container.querySelector('#fp2PrimaryTargetType'),
       primaryTargetCoords: this.container.querySelector('#fp2PrimaryTargetCoords'),
       primaryTargetDistance: this.container.querySelector('#fp2PrimaryTargetDistance'),
@@ -378,6 +390,22 @@ export class FP2Tab {
     }
     if (this.elements.coordinateEnable) {
       this.elements.coordinateEnable.addEventListener('click', () => this.enableRealtimeCoordinates());
+    }
+
+    if (this.elements.scenarioTabs) {
+      this.elements.scenarioTabs.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scenario-select]');
+        if (!button) return;
+        this.setSelectedScenario(button.dataset.scenarioSelect);
+      });
+    }
+
+    if (this.elements.scenarioDetail) {
+      this.elements.scenarioDetail.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-scenario-apply]');
+        if (!button) return;
+        this.applyScenarioPreset(button.dataset.scenarioApply);
+      });
     }
 
     if (this.elements.roomProfileSelect) {
@@ -666,10 +694,288 @@ export class FP2Tab {
     }
   }
 
+  loadScenarioPreference() {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      this.state.selectedScenarioId = 'room_presence';
+      return;
+    }
+
+    const stored = window.localStorage.getItem(LOCAL_SCENARIO_KEY);
+    this.state.selectedScenarioId = stored || 'room_presence';
+  }
+
+  persistScenarioPreference() {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(LOCAL_SCENARIO_KEY, this.state.selectedScenarioId || 'room_presence');
+  }
+
   persistLocalHistory() {
     if (typeof window === 'undefined' || !window.localStorage) return;
     window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(this.state.localTelemetryHistory || []));
     window.localStorage.setItem(LOCAL_ENTRY_KEY, JSON.stringify(this.state.localPresenceEntries || []));
+  }
+
+  setSelectedScenario(scenarioId, { persist = true } = {}) {
+    const nextId = scenarioId || 'room_presence';
+    if (this.state.selectedScenarioId === nextId && persist) {
+      this.renderScenarioPresets(this.lastCurrentData?.metadata?.raw_attributes?.resource_values || {});
+      return;
+    }
+
+    this.state.selectedScenarioId = nextId;
+    if (persist) {
+      this.persistScenarioPreference();
+    }
+    this.renderScenarioPresets(this.lastCurrentData?.metadata?.raw_attributes?.resource_values || {});
+  }
+
+  getScenarioPresets(resourceValues = {}) {
+    const bedsidePosition = [1, 2, 3].includes(Number(resourceValues?.['14.58.85']))
+      ? Number(resourceValues['14.58.85'])
+      : 3;
+
+    return [
+      {
+        id: 'room_presence',
+        titleKey: 'fp2.scenario.room_presence.title',
+        descriptionKey: 'fp2.scenario.room_presence.description',
+        outcomeKey: 'fp2.scenario.room_presence.outcome',
+        limitationsKey: 'fp2.scenario.room_presence.limitations',
+        channels: ['4.22.700', '3.51.85', '13.27.85', '0.60.85', '0.61.85', '0.63.85'],
+        writes: [
+          { resourceId: '4.22.85', value: 1 },
+          { resourceId: '4.71.85', value: 1 },
+          { resourceId: '4.75.85', value: 1 },
+          { resourceId: '14.55.85', value: 0 },
+          { resourceId: '14.58.85', value: 0 }
+        ]
+      },
+      {
+        id: 'corridor_flow',
+        titleKey: 'fp2.scenario.corridor_flow.title',
+        descriptionKey: 'fp2.scenario.corridor_flow.description',
+        outcomeKey: 'fp2.scenario.corridor_flow.outcome',
+        limitationsKey: 'fp2.scenario.corridor_flow.limitations',
+        channels: ['13.27.85', '13.120.85', '4.22.700', '0.60.85', '0.61.85'],
+        writes: [
+          { resourceId: '4.22.85', value: 1 },
+          { resourceId: '4.71.85', value: 1 },
+          { resourceId: '14.55.85', value: 1 },
+          { resourceId: '14.58.85', value: 0 }
+        ]
+      },
+      {
+        id: 'fall_safety',
+        titleKey: 'fp2.scenario.fall_safety.title',
+        descriptionKey: 'fp2.scenario.fall_safety.description',
+        outcomeKey: 'fp2.scenario.fall_safety.outcome',
+        limitationsKey: 'fp2.scenario.fall_safety.limitations',
+        channels: ['4.31.85', '13.27.85', '4.22.700', '3.51.85'],
+        writes: [
+          { resourceId: '4.22.85', value: 1 },
+          { resourceId: '14.55.85', value: 0 },
+          { resourceId: '14.30.85', value: 1 },
+          { resourceId: '14.59.85', value: 0 },
+          { resourceId: '14.58.85', value: 0 }
+        ]
+      },
+      {
+        id: 'bedside_sleep',
+        titleKey: 'fp2.scenario.bedside_sleep.title',
+        descriptionKey: 'fp2.scenario.bedside_sleep.description',
+        outcomeKey: 'fp2.scenario.bedside_sleep.outcome',
+        limitationsKey: 'fp2.scenario.bedside_sleep.limitations',
+        channels: ['0.9.85', '0.12.85', '0.13.85', '0.14.85', '13.11.85', '14.58.85'],
+        writes: [
+          { resourceId: '4.22.85', value: 1 },
+          { resourceId: '14.55.85', value: 0 },
+          { resourceId: '14.58.85', value: bedsidePosition }
+        ]
+      }
+    ];
+  }
+
+  inferScenarioId(resourceValues = {}) {
+    if ([1, 2, 3].includes(Number(resourceValues?.['14.58.85']))) {
+      return 'bedside_sleep';
+    }
+    if (Number(resourceValues?.['14.55.85']) === 1) {
+      return 'corridor_flow';
+    }
+    return 'room_presence';
+  }
+
+  getSelectedScenarioPreset(resourceValues = {}) {
+    const presets = this.getScenarioPresets(resourceValues);
+    const currentId = this.state.selectedScenarioId || this.inferScenarioId(resourceValues);
+    return presets.find((preset) => preset.id === currentId) || presets[0] || null;
+  }
+
+  resolveActiveScenarioId(resourceValues = {}) {
+    return this.inferScenarioId(resourceValues);
+  }
+
+  doesScenarioMatch(preset, resourceValues = {}) {
+    if (!preset) return false;
+    return (preset.writes || []).every((write) => String(resourceValues?.[write.resourceId] ?? '') === String(write.value));
+  }
+
+  getScenarioStateText(preset, matchesCurrent) {
+    if (this.state.scenarioBusyId === preset?.id) {
+      return t('fp2.scenario.state.applying');
+    }
+    if (matchesCurrent) {
+      return t('fp2.scenario.state.matching');
+    }
+    if (this.state.selectedScenarioId === preset?.id) {
+      return t('fp2.scenario.state.selected');
+    }
+    return t('fp2.scenario.state.preview');
+  }
+
+  formatScenarioResourceLabel(resourceId) {
+    const key = RESOURCE_LABELS[resourceId];
+    return key ? t(key) : resourceId;
+  }
+
+  formatScenarioWriteValue(resourceId, value) {
+    if (['4.22.85', '4.71.85', '4.75.85', '4.23.85', '8.0.2032', '0.9.85', '0.12.85'].includes(resourceId)) {
+      return String(value) === '1' ? t('common.enabled') : t('common.disabled');
+    }
+    return this.formatSettingValue(resourceId, value);
+  }
+
+  renderScenarioPresets(resourceValues = {}) {
+    if (!this.elements.scenarioTabs || !this.elements.scenarioDetail || !this.elements.scenarioStatus) {
+      return;
+    }
+
+    const inferredId = this.inferScenarioId(resourceValues);
+    if (!this.state.selectedScenarioId) {
+      this.state.selectedScenarioId = inferredId;
+    }
+
+    const presets = this.getScenarioPresets(resourceValues);
+    if (!presets.some((preset) => preset.id === this.state.selectedScenarioId)) {
+      this.state.selectedScenarioId = inferredId;
+    }
+
+    const selected = presets.find((preset) => preset.id === this.state.selectedScenarioId) || presets[0] || null;
+    const activeScenarioId = this.resolveActiveScenarioId(resourceValues);
+    const selectedIsActive = selected?.id === activeScenarioId;
+    const activePreset = presets.find((preset) => preset.id === activeScenarioId) || presets[0] || null;
+
+    this.elements.scenarioTabs.innerHTML = presets.map((preset) => {
+      const matchesCurrent = preset.id === activeScenarioId;
+      const isSelected = preset.id === selected?.id;
+      const classes = [
+        'fp2-scenario-tab',
+        isSelected ? 'is-selected' : '',
+        matchesCurrent ? 'is-matching' : ''
+      ].filter(Boolean).join(' ');
+
+      return `
+        <button
+          type="button"
+          class="${classes}"
+          data-scenario-select="${preset.id}"
+          aria-pressed="${isSelected ? 'true' : 'false'}"
+        >
+          <span class="fp2-scenario-tab-title">${t(preset.titleKey)}</span>
+          <span class="fp2-scenario-tab-state">${this.getScenarioStateText(preset, matchesCurrent)}</span>
+        </button>
+      `;
+    }).join('');
+
+    const outcome = selected ? t(selected.outcomeKey) : '-';
+    const limitations = selected ? t(selected.limitationsKey) : '-';
+    const writes = selected?.writes || [];
+    const channels = selected?.channels || [];
+
+    this.elements.scenarioStatus.textContent = selectedIsActive
+      ? t('fp2.scenario.badge.active')
+      : t('fp2.scenario.badge.preview');
+    this.elements.scenarioStatus.className = selectedIsActive ? 'chip ok' : 'chip chip--neutral';
+
+    this.elements.scenarioDetail.innerHTML = selected ? `
+      <div class="fp2-scenario-detail-head">
+        <div>
+          <h4>${t(selected.titleKey)}</h4>
+          <p class="fp2-scenario-description">${t(selected.descriptionKey)}</p>
+          ${selectedIsActive
+            ? `<p class="fp2-scenario-current">${t('fp2.scenario.current_active', { name: t(selected.titleKey) })}</p>`
+            : `<p class="fp2-scenario-current">${t('fp2.scenario.preview_note', { name: t(activePreset?.titleKey || 'fp2.scenario.room_presence.title') })}</p>`
+          }
+        </div>
+        <button
+          type="button"
+          class="btn btn--secondary btn--sm"
+          data-scenario-apply="${selected.id}"
+          ${selectedIsActive || this.state.scenarioBusyId ? 'disabled' : ''}
+        >
+          ${this.state.scenarioBusyId === selected.id
+            ? t('fp2.scenario.applying')
+            : selectedIsActive
+              ? t('fp2.scenario.active')
+              : t('fp2.scenario.apply_to_device')}
+        </button>
+      </div>
+      <div class="fp2-scenario-sections">
+        <section class="fp2-scenario-section">
+          <span class="fp2-scenario-section-label">${t('fp2.scenario.outcome')}</span>
+          <p>${outcome}</p>
+        </section>
+        <section class="fp2-scenario-section">
+          <span class="fp2-scenario-section-label">${t('fp2.scenario.uses')}</span>
+          <ul class="fp2-scenario-list">
+            ${channels.map((resourceId) => `
+              <li><code>${resourceId}</code><span>${this.formatScenarioResourceLabel(resourceId)}</span></li>
+            `).join('')}
+          </ul>
+        </section>
+        <section class="fp2-scenario-section">
+          <span class="fp2-scenario-section-label">${t('fp2.scenario.applies')}</span>
+          <ul class="fp2-scenario-list">
+            ${writes.map((write) => `
+              <li>
+                <code>${write.resourceId}</code>
+                <span>${this.formatScenarioResourceLabel(write.resourceId)} → ${this.formatScenarioWriteValue(write.resourceId, write.value)}</span>
+              </li>
+            `).join('')}
+          </ul>
+        </section>
+        <section class="fp2-scenario-section">
+          <span class="fp2-scenario-section-label">${t('fp2.scenario.limitations')}</span>
+          <p>${limitations}</p>
+        </section>
+      </div>
+    ` : '';
+  }
+
+  async applyScenarioPreset(scenarioId) {
+    if (!scenarioId || this.state.scenarioBusyId) return;
+    const resourceValues = this.lastCurrentData?.metadata?.raw_attributes?.resource_values || {};
+    const preset = this.getScenarioPresets(resourceValues).find((item) => item.id === scenarioId);
+    if (!preset || !preset.writes?.length) return;
+
+    this.state.scenarioBusyId = scenarioId;
+    this.renderScenarioPresets(resourceValues);
+    try {
+      const writeResult = await fp2Service.writeCloudResources(preset.writes, true);
+      this.setSelectedScenario(scenarioId);
+      if (writeResult?.current) {
+        this.renderCurrent(writeResult.current);
+      } else {
+        await this.loadCurrent();
+      }
+      await this.loadStatus();
+    } catch (error) {
+      console.error('Failed to apply FP2 scenario preset:', error);
+      window.alert(t('fp2.scenario.apply_failed', { name: t(preset.titleKey) }));
+    } finally {
+      this.state.scenarioBusyId = null;
+      this.renderScenarioPresets(this.lastCurrentData?.metadata?.raw_attributes?.resource_values || resourceValues);
+    }
   }
 
   setAqaraHomeRange(range) {
@@ -1366,7 +1672,7 @@ export class FP2Tab {
                   <span class="fp2-layout-item-icon">${this.getRoomItemIcon(item)}</span>
                   <span class="fp2-layout-item-title">${this.getRoomItemLabel(item)}</span>
                 </span>
-                ${selectedItem?.id === item.id ? `<span class="chip chip--info fp2-layout-item-state">${t('fp2.layout.mode_view')}</span>` : ''}
+                ${selectedItem?.id === item.id ? `<span class="chip chip--info fp2-layout-item-state">${t('fp2.layout.selected')}</span>` : ''}
               </div>
               <div class="fp2-layout-item-actions">
                 <button class="btn btn--secondary btn--sm fp2-layout-item-btn fp2-layout-item-btn--compact" data-item-rotate-left="${item.id}">-90°</button>
@@ -2126,10 +2432,12 @@ export class FP2Tab {
     const timestampLabel = this.formatTimestamp(data?.timestamp);
     const frozenCoordinates = this.hasFrozenCoordinates(rawAttributes.movement_event);
     const primaryTarget = targets[0] || filteredTargets[0] || null;
+    const allTargets = classifiedTargets.allTargets || [];
+    const coordinateTargets = allTargets.filter((target) => this.hasCoordinates(target));
 
     this.state.zones = zones;
     this.state.targets = targets;
-    this.state.rawTargets = classifiedTargets.allTargets;
+    this.state.rawTargets = allTargets;
     this.state.filteredTargets = filteredTargets;
     this.state.lastUpdate = timestampLabel;
     this.state.currentPresenceActive = available && effectivePresence;
@@ -2138,6 +2446,8 @@ export class FP2Tab {
     this.state.currentSensorAngle = rawAttributes.sensor_angle;
     this.state.zoneMetrics = zoneMetrics;
     this.state.advancedMetrics = advancedMetrics;
+    this.state.sessionPeakTargets = Math.max(this.state.sessionPeakTargets || 0, allTargets.length);
+    this.state.sessionPeakCoordinateTargets = Math.max(this.state.sessionPeakCoordinateTargets || 0, coordinateTargets.length);
     this.updateTargetAnimation(targets, sampleAtMs);
 
     // Store trail snapshot
@@ -2212,8 +2522,9 @@ export class FP2Tab {
     this.renderConfigMetrics(rawAttributes.resource_values || {});
 
     // Targets
+    this.renderTargetSummary(allTargets, coordinateTargets);
     this.renderPrimaryTarget(primaryTarget, { frozen: frozenCoordinates });
-    this.renderTargetList(classifiedTargets.allTargets, { frozen: frozenCoordinates });
+    this.renderTargetList(allTargets, { frozen: frozenCoordinates });
     this.renderResourceGrid(rawAttributes.resource_values || {}, rawAttributes.resource_labels || {});
     this.elements.sensorOutput.textContent = JSON.stringify(rawAttributes, null, 2);
     this.elements.rawOutput.textContent = JSON.stringify(data, null, 2);
@@ -2365,6 +2676,7 @@ export class FP2Tab {
     this.setMetricValue(this.elements.firstNetworkJoin, this.formatSettingValue('4.60.85', values['4.60.85']));
     this.setMetricValue(this.elements.resetAbsenceState, this.formatSettingValue('4.66.85', values['4.66.85']));
     this.renderCoordinateControl(values);
+    this.renderScenarioPresets(values);
   }
 
   renderCoordinateControl(resourceValues) {
@@ -2378,12 +2690,15 @@ export class FP2Tab {
 
     if (this.elements.coordinateEnable) {
       if (this.state.coordinateEnableBusy) {
+        this.elements.coordinateEnable.hidden = false;
         this.elements.coordinateEnable.disabled = true;
         this.elements.coordinateEnable.textContent = t('fp2.coordinate_enabling');
       } else if (enabled) {
+        this.elements.coordinateEnable.hidden = true;
         this.elements.coordinateEnable.disabled = true;
         this.elements.coordinateEnable.textContent = t('fp2.coordinate_enabled');
       } else {
+        this.elements.coordinateEnable.hidden = false;
         this.elements.coordinateEnable.disabled = false;
         this.elements.coordinateEnable.textContent = t('fp2.coordinate_enable');
       }
@@ -2400,7 +2715,7 @@ export class FP2Tab {
       return '-';
     }
 
-    if (['4.23.85', '8.0.2032', '0.9.85', '0.12.85'].includes(rid)) {
+    if (['4.22.85', '4.23.85', '4.71.85', '4.75.85', '8.0.2032', '0.9.85', '0.12.85'].includes(rid)) {
       return String(value) === '1' ? t('common.enabled') : t('common.disabled');
     }
 
@@ -2408,8 +2723,16 @@ export class FP2Tab {
       return `${Math.round(Number(value))}%`;
     }
 
-    if (rid === '4.22.85') {
-      return t('fp2.state.code', { code: Number(value) });
+    if (rid === '14.55.85') {
+      return t(`fp2.value.detection_mode.${Number(value)}`) || t('fp2.state.code', { code: Number(value) });
+    }
+
+    if (rid === '14.57.85') {
+      return t(`fp2.value.installation_position.${Number(value)}`) || t('fp2.state.code', { code: Number(value) });
+    }
+
+    if (rid === '14.58.85') {
+      return t(`fp2.value.bedside_position.${Number(value)}`) || t('fp2.state.code', { code: Number(value) });
     }
 
     if (['1.10.85', '1.11.85'].includes(rid) && Number.isFinite(Number(value))) {
@@ -3071,6 +3394,18 @@ export class FP2Tab {
   }
 
   // ── Render sub-components ──
+
+  renderTargetSummary(allTargets = [], coordinateTargets = []) {
+    if (this.elements.activeTargetCount) {
+      this.elements.activeTargetCount.textContent = String(allTargets.length);
+    }
+    if (this.elements.coordinateTargetCount) {
+      this.elements.coordinateTargetCount.textContent = String(coordinateTargets.length);
+    }
+    if (this.elements.sessionPeakTargetCount) {
+      this.elements.sessionPeakTargetCount.textContent = String(this.state.sessionPeakTargets || allTargets.length || 0);
+    }
+  }
 
   renderPrimaryTarget(target, options = {}) {
     if (!target) {
@@ -4501,13 +4836,14 @@ export class FP2Tab {
   formatMovementEventAqaraStyle(v) {
     if (v === null || v === undefined || v === '') return '-';
     const key = {
-      0: 'fp2.event.aqara.no_one',
-      1: 'fp2.event.aqara.presence',
-      5: 'fp2.event.aqara.approaching',
-      6: 'fp2.event.aqara.departing',
-      7: 'fp2.event.aqara.moving',
-      9: 'fp2.event.aqara.entered',
-      10: 'fp2.event.aqara.left'
+      0: 'fp2.event.aqara.entered',
+      1: 'fp2.event.aqara.left',
+      2: 'fp2.event.aqara.entered_left',
+      3: 'fp2.event.aqara.exited_right',
+      4: 'fp2.event.aqara.entered_right',
+      5: 'fp2.event.aqara.exited_left',
+      6: 'fp2.event.aqara.approaching',
+      7: 'fp2.event.aqara.departing'
     }[Number(v)];
     return key ? t(key) : this.formatMovementEventCode(v);
   }

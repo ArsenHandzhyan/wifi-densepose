@@ -81,6 +81,25 @@ export class FP2Service {
     });
   }
 
+  async writeCloudResources(updates, refreshState = true) {
+    const list = Array.isArray(updates) ? updates.filter(Boolean) : [];
+    if (!list.length) {
+      return null;
+    }
+
+    let lastResult = null;
+    for (let index = 0; index < list.length; index += 1) {
+      const update = list[index];
+      lastResult = await this.writeCloudResource(
+        update.resourceId,
+        update.value,
+        refreshState && index === list.length - 1
+      );
+    }
+
+    return lastResult;
+  }
+
   async enableRealtimeCoordinates() {
     return this.writeCloudResource('4.22.85', 1, true);
   }

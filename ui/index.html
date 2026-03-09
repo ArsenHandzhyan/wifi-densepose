@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260309-v12">
+    <link rel="stylesheet" href="style.css?v=20260309-v14">
 </head>
 <body>
     <div class="container">
@@ -448,6 +448,18 @@
                     <div class="fp2-kv"><span data-i18n="fp2.advanced.distance_mode">Режим дистанции</span><span id="fp2DistanceMode" class="chip chip--neutral">-</span></div>
                 </div>
 
+                <div class="fp2-card fp2-card--scenario">
+                    <div class="fp2-card-header-row">
+                        <div>
+                            <h3 data-i18n="fp2.scenario.title">Сценарии</h3>
+                            <p class="help-text fp2-scenario-help" data-i18n="fp2.scenario.help">Пресеты для типовых сценариев: что они включают, какие каналы используют и зачем это нужно.</p>
+                        </div>
+                        <span id="fp2ScenarioStatus" class="chip chip--neutral">-</span>
+                    </div>
+                    <div id="fp2ScenarioTabs" class="fp2-scenario-tabs"></div>
+                    <div id="fp2ScenarioDetail" class="fp2-scenario-detail"></div>
+                </div>
+
                 <div class="fp2-card">
                     <h3 data-i18n="fp2.config.modes_title">Режимы устройства</h3>
                     <div class="fp2-kv"><span data-i18n="fp2.resource.realtime_position_switch">Переключатель отправки координат</span><strong id="fp2RealtimePositionSwitch">-</strong></div>
@@ -503,6 +515,9 @@
                     <h3 data-i18n="fp2.target_telemetry">Телеметрия целей</h3>
                     <div class="fp2-target-summary">
                         <span><span data-i18n="fp2.target.primary">Основная</span>: <strong id="fp2PrimaryTargetId">-</strong></span>
+                        <span><span data-i18n="fp2.target.active">Активных</span>: <strong id="fp2ActiveTargetCount">-</strong></span>
+                        <span><span data-i18n="fp2.target.with_coords">С координатами</span>: <strong id="fp2CoordinateTargetCount">-</strong></span>
+                        <span><span data-i18n="fp2.target.session_peak">Пик сессии</span>: <strong id="fp2SessionPeakTargetCount">-</strong></span>
                         <span><span data-i18n="fp2.target.type">Тип</span>: <strong id="fp2PrimaryTargetType">-</strong></span>
                         <span><span data-i18n="fp2.target.coords">Коорд.</span>: <strong id="fp2PrimaryTargetCoords">-</strong></span>
                         <span><span data-i18n="fp2.target.dist">Дист.</span>: <strong id="fp2PrimaryTargetDistance">-</strong></span>
@@ -577,6 +592,6 @@
     <div id="globalErrorToast" class="error-toast"></div>
 
     <!-- Load application -->
-    <script type="module" src="app.js?v=20260309-v31"></script>
+    <script type="module" src="app.js?v=20260309-v36"></script>
 </body>
 </html>

@@ -5,12 +5,13 @@ FastAPI application factory and configuration
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -24,6 +25,19 @@ from .api.routers import pose, stream, health, fp2
 from .api.websocket.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_ui_directory() -> Optional[Path]:
+    """Return the bundled UI directory when present."""
+    candidates = [
+        Path(__file__).resolve().parents[2] / "ui",
+        Path("/app/ui"),
+    ]
+    for candidate in candidates:
+        index_path = candidate / "index.html"
+        if index_path.exists():
+            return candidate
+    return None
 
 
 @asynccontextmanager
@@ -215,10 +229,28 @@ def setup_routers(app: FastAPI, settings: Settings):
 
 def setup_root_endpoints(app: FastAPI, settings: Settings):
     """Setup root application endpoints."""
+
+    ui_dir = _resolve_ui_directory()
+    ui_index = ui_dir / "index.html" if ui_dir else None
+
+    def should_serve_ui() -> bool:
+        return ui_index is not None and ui_index.exists()
+
+    def resolve_ui_asset(full_path: str) -> Optional[Path]:
+        if not ui_dir or not full_path:
+            return None
+        candidate = (ui_dir / full_path.lstrip("/")).resolve()
+        try:
+            candidate.relative_to(ui_dir.resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() else None
     
     @app.get("/")
     async def root():
-        """Root endpoint with API information."""
+        """Root endpoint with embedded UI when available."""
+        if should_serve_ui():
+            return FileResponse(ui_index)
         return {
             "name": settings.app_name,
             "version": settings.version,
@@ -257,6 +289,21 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
             import traceback
             logger.error(f"/api/v1/ready error: {e}\n{traceback.format_exc()}")
             return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """Serve bundled UI assets and fall back to index.html for client routes."""
+        if not should_serve_ui():
+            raise StarletteHTTPException(status_code=404, detail="Not found")
+
+        normalized = full_path.lstrip("/")
+        if normalized.startswith(("api/", "health", "docs", "redoc", "openapi.json")):
+            raise StarletteHTTPException(status_code=404, detail="Not found")
+
+        asset = resolve_ui_asset(normalized)
+        if asset is not None:
+            return FileResponse(asset)
+        return FileResponse(ui_index)
     
     @app.get(f"{settings.api_prefix}/info")
     async def api_info(request: Request):

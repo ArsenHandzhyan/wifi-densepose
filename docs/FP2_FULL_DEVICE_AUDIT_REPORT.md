@@ -1,6 +1,6 @@
 # FP2 Full Device Audit
 
-- Generated: `2026-03-09 00:23:44`
+- Generated: `2026-03-09 03:41:37`
 - Device IP: `192.168.1.52`
 - Backend: `http://127.0.0.1:8000`
 
@@ -14,19 +14,19 @@
 - `raw_target_count`: `1`
 - `zone_count`: `1`
 - `current_zone`: `detection_area`
-- `movement_event`: `7`
+- `movement_event`: `6`
 - `fall_state`: `0`
-- `light_level`: `16.0`
-- `rssi`: `-21`
-- `sensor_angle`: `83.0`
+- `light_level`: `20.0`
+- `rssi`: `-24`
+- `sensor_angle`: `85.0`
 - `coordinates_source`: `live`
 
 ### Advanced Metrics
 
-- `realtime_people_count`: `0`
-- `people_count_1m`: `2`
-- `area_entries_10s`: `6`
-- `walking_distance_m`: `23.76`
+- `realtime_people_count`: `1`
+- `people_count_1m`: `1`
+- `area_entries_10s`: `2`
+- `walking_distance_m`: `47.25`
 - `people_statistics_enabled`: `True`
 - `walking_distance_enabled`: `True`
 
@@ -124,14 +124,28 @@
 ## 4. Recent Backend History
 
 - Captures analyzed: `25`
-- Movement events seen: `[6, 7]`
+- Movement events seen: `[6]`
 - Max active targets seen: `1`
-- Coordinate payload variants: `1`
+- Coordinate payload variants: `9`
 
 ### Recently Changing Resources
 
-- `0.4.85` changed `24` time(s)
-- `13.27.85` changed `1` time(s)
+- `0.4.85` changed `17` time(s)
+- `4.22.700` changed `9` time(s)
+
+## 5. Live Sampling Window
+
+- Duration: `12.0s`
+- Samples: `12`
+- Presence modes seen: `['raw']`
+- Movement events seen: `[6]`
+- Max targets seen: `1`
+- Coordinate sources seen: `['live']`
+
+### Live Resource Changes
+
+- `4.22.700` changed `4` time(s)
+- `0.4.85` changed `1` time(s)
 
 ## 6. Conclusions
 

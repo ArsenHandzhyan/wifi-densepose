@@ -2,46 +2,54 @@ services:
   - type: web
     name: wifi-densepose-backend
     runtime: docker
+    plan: free
     dockerfilePath: ./Dockerfile.render
+    dockerContext: .
+    healthCheckPath: /health/live
     envVars:
       - key: SECRET_KEY
-        value: ${SECRET_KEY}
+        generateValue: true
+      - key: ENVIRONMENT
+        value: production
       - key: FP2_ENABLED
         value: "true"
       - key: ENABLE_REAL_TIME_PROCESSING
         value: "false"
-    healthCheckPath: /health/live
-    startCommand: uvicorn src.app:app --host 0.0.0.0 --port $PORT
 
   - type: worker
     name: wifi-densepose-fp2-monitor
     runtime: docker
+    plan: free
     dockerfilePath: ./Dockerfile.render
+    dockerContext: .
     envVars:
       - key: AQARA_EMAIL
-        value: ${AQARA_EMAIL}
+        sync: false
       - key: AQARA_PASSWORD
-        value: ${AQARA_PASSWORD}
+        sync: false
       - key: AQARA_API_DOMAIN
-        value: ${AQARA_API_DOMAIN}
+        value: open-ger.aqara.com
       - key: AQARA_APP_ID
-        value: ${AQARA_APP_ID}
+        sync: false
       - key: AQARA_APP_KEY
-        value: ${AQARA_APP_KEY}
+        sync: false
       - key: AQARA_KEY_ID
-        value: ${AQARA_KEY_ID}
+        sync: false
       - key: AQARA_ACCESS_TOKEN
-        value: ${AQARA_ACCESS_TOKEN}
+        sync: false
       - key: AQARA_REFRESH_TOKEN
-        value: ${AQARA_REFRESH_TOKEN}
+        sync: false
       - key: AQARA_OPEN_ID
-        value: ${AQARA_OPEN_ID}
+        sync: false
       - key: FP2_DEVICE_ID
-        value: ${FP2_DEVICE_ID}
+        sync: false
       - key: FP2_NAME
-        value: ${FP2_NAME}
+        value: Aqara FP2
       - key: FP2_MODEL
-        value: ${FP2_MODEL}
+        value: PS-SO2RU
       - key: BACKEND_URL
-        value: ${BACKEND_URL}
+        fromService:
+          name: wifi-densepose-backend
+          type: web
+          property: host
     startCommand: python scripts/fp2_aqara_cloud_monitor.py --backend $BACKEND_URL --interval 2 --log-level INFO

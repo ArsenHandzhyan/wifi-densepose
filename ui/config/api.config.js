@@ -26,6 +26,11 @@ function resolveBaseUrl() {
     return LOCAL_BACKEND_URL;
   }
 
+  const origin = window.location.origin;
+  if (origin && /^https?:\/\//.test(origin)) {
+    return origin;
+  }
+
   return RENDER_BACKEND_URL;
 }
 

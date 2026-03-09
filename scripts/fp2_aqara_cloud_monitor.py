@@ -63,6 +63,15 @@ ZONE_STATISTICS_PREFIX = "13."
 ZONE_STAT_BASE = 120
 
 
+def normalize_backend_url(value: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return "http://127.0.0.1:8000"
+    if "://" not in normalized:
+        normalized = f"https://{normalized}"
+    return normalized.rstrip("/")
+
+
 @dataclass
 class CloudFP2Device:
     did: str
@@ -246,7 +255,7 @@ class FP2CloudMonitor:
         coordinate_keepalive_cooldown: float = 15.0,
     ):
         self.settings = settings
-        self.backend_url = backend_url.rstrip("/")
+        self.backend_url = normalize_backend_url(backend_url)
         self.interval = interval
         self.coordinate_keepalive = coordinate_keepalive
         self.coordinate_keepalive_cooldown = coordinate_keepalive_cooldown

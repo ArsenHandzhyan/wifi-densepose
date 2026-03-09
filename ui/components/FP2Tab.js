@@ -1,7 +1,7 @@
 // FP2 Monitor Tab Component — Ultra Edition
 
-import { fp2Service } from '../services/fp2.service.js?v=20260307-fp2max1';
-import { t, tp } from '../services/i18n.js?v=20260309-v20';
+import { fp2Service } from '../services/fp2.service.js?v=20260309-v2';
+import { t, tp } from '../services/i18n.js?v=20260309-v21';
 import {
   BUILTIN_ROOM_ITEM_LIBRARY,
   DEFAULT_ROOM_PROFILE_ID,
@@ -169,6 +169,7 @@ export class FP2Tab {
       selectedRoomTemplateId: 'living_room',
       selectedRoomItemId: null,
       roomItemInteraction: null,
+      coordinateEnableBusy: false,
       lastRoomProjection: null,
       rawTargets: [],
       filteredTargets: [],
@@ -261,6 +262,8 @@ export class FP2Tab {
       coordinateConfidence: this.container.querySelector('#fp2CoordinateConfidence'),
       coordinateUpdateRate: this.container.querySelector('#fp2CoordinateUpdateRate'),
       coordinateHealthBadge: this.container.querySelector('#fp2CoordinateHealthBadge'),
+      coordinateSwitchState: this.container.querySelector('#fp2CoordinateSwitchState'),
+      coordinateEnable: this.container.querySelector('#fp2CoordinateEnable'),
       coordinateCount: this.container.querySelector('#fp2CoordinateCount'),
       apiDomain: this.container.querySelector('#fp2ApiDomain'),
       primaryTargetId: this.container.querySelector('#fp2PrimaryTargetId'),
@@ -372,6 +375,9 @@ export class FP2Tab {
 
     if (this.elements.homeClearHistory) {
       this.elements.homeClearHistory.addEventListener('click', () => this.clearLocalHistory());
+    }
+    if (this.elements.coordinateEnable) {
+      this.elements.coordinateEnable.addEventListener('click', () => this.enableRealtimeCoordinates());
     }
 
     if (this.elements.roomProfileSelect) {
@@ -2026,6 +2032,23 @@ export class FP2Tab {
     }
   }
 
+  async enableRealtimeCoordinates() {
+    if (this.state.coordinateEnableBusy) return;
+    this.state.coordinateEnableBusy = true;
+    this.renderCoordinateControl(this.lastCurrentData?.metadata?.raw_attributes?.resource_values || null);
+    try {
+      await fp2Service.enableRealtimeCoordinates();
+      await this.loadCurrent();
+      await this.loadStatus();
+    } catch (error) {
+      console.error('Failed to enable realtime coordinates:', error);
+      window.alert(t('fp2.coordinate_enable_failed'));
+    } finally {
+      this.state.coordinateEnableBusy = false;
+      this.renderCoordinateControl(this.lastCurrentData?.metadata?.raw_attributes?.resource_values || null);
+    }
+  }
+
   handleMessage(message) {
     if (message.type === 'connection_state') {
       this.updateStreamState(message.state);
@@ -2341,6 +2364,30 @@ export class FP2Tab {
     this.setMetricValue(this.elements.bedsideInstallationPosition, this.formatSettingValue('14.58.85', values['14.58.85']));
     this.setMetricValue(this.elements.firstNetworkJoin, this.formatSettingValue('4.60.85', values['4.60.85']));
     this.setMetricValue(this.elements.resetAbsenceState, this.formatSettingValue('4.66.85', values['4.66.85']));
+    this.renderCoordinateControl(values);
+  }
+
+  renderCoordinateControl(resourceValues) {
+    const switchValue = resourceValues ? String(resourceValues['4.22.85'] ?? '') : '';
+    const enabled = switchValue === '1';
+
+    if (this.elements.coordinateSwitchState) {
+      this.elements.coordinateSwitchState.textContent = enabled ? t('common.enabled') : t('common.disabled');
+      this.elements.coordinateSwitchState.className = enabled ? 'chip ok' : 'chip chip--neutral';
+    }
+
+    if (this.elements.coordinateEnable) {
+      if (this.state.coordinateEnableBusy) {
+        this.elements.coordinateEnable.disabled = true;
+        this.elements.coordinateEnable.textContent = t('fp2.coordinate_enabling');
+      } else if (enabled) {
+        this.elements.coordinateEnable.disabled = true;
+        this.elements.coordinateEnable.textContent = t('fp2.coordinate_enabled');
+      } else {
+        this.elements.coordinateEnable.disabled = false;
+        this.elements.coordinateEnable.textContent = t('fp2.coordinate_enable');
+      }
+    }
   }
 
   setMetricValue(element, value) {

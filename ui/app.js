@@ -2,11 +2,11 @@
 
 import { TabManager } from './components/TabManager.js';
 import { DashboardTab } from './components/DashboardTab.js?v=20260309-v21';
-import { FP2Tab } from './components/FP2Tab.js?v=20260309-v30';
+import { FP2Tab } from './components/FP2Tab.js?v=20260309-v31';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
-import { i18n, t, setLanguage, translateDocument, getCurrentLang } from './services/i18n.js?v=20260309-v20';
+import { i18n, t, setLanguage, translateDocument, getCurrentLang } from './services/i18n.js?v=20260309-v21';
 
 class WiFiDensePoseApp {
   constructor() {

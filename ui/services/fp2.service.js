@@ -26,15 +26,17 @@ export class FP2Service {
     }
   }
 
-  async requestWithFallback(path) {
+  async requestWithFallback(path, options = {}) {
     let lastError = null;
     for (const baseUrl of this.baseUrls) {
       try {
         const response = await fetch(`${baseUrl}${path}`, {
-          method: 'GET',
+          method: options.method || 'GET',
           headers: {
-            'Accept': 'application/json'
-          }
+            'Accept': 'application/json',
+            ...(options.headers || {})
+          },
+          body: options.body
         });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -63,6 +65,24 @@ export class FP2Service {
 
   async getRecommendedEntity() {
     return this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.RECOMMENDED);
+  }
+
+  async writeCloudResource(resourceId, value, refreshState = true) {
+    return this.requestWithFallback(API_CONFIG.ENDPOINTS.FP2.CLOUD_RESOURCE_WRITE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        resource_id: resourceId,
+        value,
+        refresh_state: refreshState
+      })
+    });
+  }
+
+  async enableRealtimeCoordinates() {
+    return this.writeCloudResource('4.22.85', 1, true);
   }
 
   setSelectedEntity(entityId) {

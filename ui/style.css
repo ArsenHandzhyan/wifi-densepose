@@ -1358,6 +1358,15 @@ body::before {
 .fp2-kv > span:first-child { color: var(--text-dim); }
 .fp2-kv > *:last-child { color: var(--text); font-weight: 500; }
 .fp2-kv code { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); background: rgba(var(--accent-rgb), 0.08); padding: 1px 6px; border-radius: 4px; }
+.fp2-kv--actions { align-items: flex-start; gap: 12px; }
+.fp2-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  text-align: right;
+}
 .fp2-coordinate-monitor {
   margin: 10px 0 8px;
   padding: 8px;

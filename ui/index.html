@@ -425,6 +425,13 @@
                     <div class="fp2-kv"><span data-i18n="fp2.coordinate_confidence">Надежность координат</span><span id="fp2CoordinateConfidence" class="chip chip--neutral">-</span></div>
                     <div class="fp2-kv"><span data-i18n="fp2.coordinate_updates_rate">Апдейты координат</span><strong id="fp2CoordinateUpdateRate">-</strong></div>
                     <div class="fp2-kv"><span data-i18n="fp2.coordinate_health">Качество потока</span><span id="fp2CoordinateHealthBadge" class="chip chip--neutral">-</span></div>
+                    <div class="fp2-kv fp2-kv--actions">
+                        <span data-i18n="fp2.coordinate_control">Отправка координат</span>
+                        <span class="fp2-inline-actions">
+                            <span id="fp2CoordinateSwitchState" class="chip chip--neutral">-</span>
+                            <button id="fp2CoordinateEnable" class="btn btn--secondary btn--sm" data-i18n="fp2.coordinate_enable">Включить координаты</button>
+                        </span>
+                    </div>
                     <div class="fp2-coordinate-monitor">
                         <canvas id="fp2CoordinateQualityCanvas" width="320" height="72"></canvas>
                     </div>
@@ -570,6 +577,6 @@
     <div id="globalErrorToast" class="error-toast"></div>
 
     <!-- Load application -->
-    <script type="module" src="app.js?v=20260309-v30"></script>
+    <script type="module" src="app.js?v=20260309-v31"></script>
 </body>
 </html>

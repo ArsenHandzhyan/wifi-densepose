@@ -47,6 +47,7 @@ RSSI_RESOURCE_ID = "8.0.2026"
 ONLINE_RESOURCE_ID = "8.0.2045"
 ANGLE_RESOURCE_ID = "8.0.2116"
 COORDINATES_RESOURCE_ID = "4.22.700"
+REALTIME_POSITION_SWITCH_RESOURCE_ID = "4.22.85"
 MOVEMENT_EVENT_RESOURCE_ID = "13.27.85"
 FALL_EVENT_RESOURCE_ID = "4.31.85"
 AREA_ENTRY_COUNT_RESOURCE_ID = "13.120.85"
@@ -225,18 +226,37 @@ class AqaraCloudClient:
             raise RuntimeError("query.resource.value returned unexpected payload")
         return result
 
+    def write_resource(self, did: str, resource_id: str, value: Any) -> None:
+        body = self.api_query(
+            "write.resource.device",
+            [{"subjectId": did, "resources": [{"resourceId": resource_id, "value": str(value)}]}],
+        )
+        logger.info("Wrote Aqara resource %s=%s via cloud API", resource_id, value)
+        return body
+
 
 class FP2CloudMonitor:
-    def __init__(self, settings, backend_url: str, interval: float = 2.0):
+    def __init__(
+        self,
+        settings,
+        backend_url: str,
+        interval: float = 2.0,
+        *,
+        coordinate_keepalive: bool = True,
+        coordinate_keepalive_cooldown: float = 15.0,
+    ):
         self.settings = settings
         self.backend_url = backend_url.rstrip("/")
         self.interval = interval
+        self.coordinate_keepalive = coordinate_keepalive
+        self.coordinate_keepalive_cooldown = coordinate_keepalive_cooldown
         self.client = AqaraCloudClient(settings)
         self.device: CloudFP2Device | None = None
         self.last_presence: bool | None = None
         self.last_confirmed_targets: list[dict[str, Any]] = []
         self.last_confirmed_zone: str | None = None
         self.last_confirmed_targets_at: float | None = None
+        self.last_coordinate_keepalive_at: float | None = None
         self.base_target_hold_seconds = max(4.0, interval * 4)
         self.active_motion_hold_seconds = max(8.0, interval * 8)
 
@@ -245,6 +265,38 @@ class FP2CloudMonitor:
 
     def _resource_value(self, resource_map: dict[str, dict[str, Any]], resource_id: str) -> Any:
         return (resource_map.get(resource_id) or {}).get("value")
+
+    def _ensure_coordinate_upload_enabled(self, resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not self.coordinate_keepalive or self.device is None:
+            return resources
+
+        resource_map = self._resource_map(resources)
+        switch_value = parse_int(self._resource_value(resource_map, REALTIME_POSITION_SWITCH_RESOURCE_ID))
+        if switch_value == 1:
+            return resources
+
+        now = time.time()
+        if (
+            self.last_coordinate_keepalive_at is not None
+            and (now - self.last_coordinate_keepalive_at) < self.coordinate_keepalive_cooldown
+        ):
+            return resources
+
+        logger.warning(
+            "Realtime coordinate upload switch %s is OFF; enabling it via Aqara Cloud API",
+            REALTIME_POSITION_SWITCH_RESOURCE_ID,
+        )
+        self.client.write_resource(self.device.did, REALTIME_POSITION_SWITCH_RESOURCE_ID, 1)
+        self.last_coordinate_keepalive_at = now
+        refreshed = self.client.fetch_resource_values(self.device.did)
+        refreshed_map = self._resource_map(refreshed)
+        refreshed_value = parse_int(self._resource_value(refreshed_map, REALTIME_POSITION_SWITCH_RESOURCE_ID))
+        logger.info(
+            "Realtime coordinate upload switch %s after write: %s",
+            REALTIME_POSITION_SWITCH_RESOURCE_ID,
+            refreshed_value if refreshed_value is not None else "unknown",
+        )
+        return refreshed
 
     def _max_timestamp(self, resources: list[dict[str, Any]]) -> float:
         timestamps = [parse_int(item.get("timeStamp")) for item in resources]
@@ -535,9 +587,15 @@ class FP2CloudMonitor:
         response.raise_for_status()
 
     def initialize(self) -> None:
-        self.client.refresh_access_token(persist=True)
-        self.device = self.client.resolve_device()
-        self.client.load_resource_info(self.device.model)
+        try:
+            self.device = self.client.resolve_device()
+            self.client.load_resource_info(self.device.model)
+            logger.info("Aqara cloud monitor initialized using current access token")
+        except Exception as exc:
+            logger.warning("Current Aqara access token bootstrap failed: %s; trying refresh", exc)
+            self.client.refresh_access_token(persist=True)
+            self.device = self.client.resolve_device()
+            self.client.load_resource_info(self.device.model)
         logger.info(
             "Aqara cloud FP2 monitor bound to did=%s model=%s firmware=%s",
             self.device.did,
@@ -555,6 +613,7 @@ class FP2CloudMonitor:
                     logger.info("Aqara cloud monitor initialized")
                     init_backoff = max(self.interval, 2.0)
                 resources = self.client.fetch_resource_values(self.device.did)
+                resources = self._ensure_coordinate_upload_enabled(resources)
                 payload = self._build_payload(resources)
                 self.push_snapshot(payload)
                 presence = payload["presence"]
@@ -614,6 +673,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         help="Logging level",
     )
+    parser.add_argument(
+        "--no-coordinate-keepalive",
+        action="store_true",
+        help="Do not auto-enable the realtime coordinate upload switch (4.22.85)",
+    )
     return parser
 
 
@@ -625,7 +689,12 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     settings = probe.load_settings(args.env_file)
-    monitor = FP2CloudMonitor(settings, backend_url=args.backend, interval=args.interval)
+    monitor = FP2CloudMonitor(
+        settings,
+        backend_url=args.backend,
+        interval=args.interval,
+        coordinate_keepalive=not args.no_coordinate_keepalive,
+    )
     try:
         return monitor.run()
     except KeyboardInterrupt:

@@ -1,8 +1,8 @@
 // Dashboard Tab Component
 
 import { healthService } from '../services/health.service.js';
-import { fp2Service } from '../services/fp2.service.js?v=20260307-fp2max1';
-import { t, tp } from '../services/i18n.js?v=20260309-v20';
+import { fp2Service } from '../services/fp2.service.js?v=20260309-v2';
+import { t, tp } from '../services/i18n.js?v=20260309-v21';
 import {
   buildRoomProfiles,
   getProfileAnimalFilterEnabled,

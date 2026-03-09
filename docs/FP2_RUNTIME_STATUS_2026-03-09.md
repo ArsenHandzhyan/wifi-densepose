@@ -35,6 +35,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 - Deployment model: single Render `web service`
 - UI is served by the backend from `v1/src/app.py`
 - The container starts both `uvicorn` and `scripts/fp2_aqara_cloud_monitor.py`
+- Render startup materializes a runtime env file for the monitor, so Aqara token refresh and coordinate keepalive work without a committed `.env`
 - Public API shares the same origin as the UI
 - Free-tier cold starts remain possible after idle periods
 
@@ -60,6 +61,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 - Render now runs as a single-service deployment instead of requiring a separate worker
 - Render now starts the cloud monitor inside the same web service, instead of relying only on on-demand refresh
 - Backend refreshes Aqara Cloud snapshots before stale fallback in cloud mode
+- `/api/v1/fp2/current` now falls back to the last cached Aqara snapshot if a direct cloud refresh fails, instead of breaking the UI with `502`
 - UI in cloud mode now polls `/api/v1/fp2/current`, which fixed stale target coordinates on Render
 - Layout export/import was added so existing browser-local room configuration can be moved into backend-backed storage
 - Scenario application now handles bedside reset more explicitly when switching away from sleep mode
@@ -152,6 +154,7 @@ Current behavior:
 - the backend falls back to SQLite or file storage if the primary database is unavailable
 - local and Render can still exchange layouts explicitly through `Export Layout` and `Import Layout`
 - the UI shows which storage backend is currently active for the room editor
+- saving a room template or editing room items triggers immediate server-side persistence, not only browser-local state
 
 This is now a real server-side persistence layer, with file export/import still available as backup or migration tooling.
 

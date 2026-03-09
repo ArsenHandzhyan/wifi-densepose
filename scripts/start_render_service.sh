@@ -6,10 +6,37 @@ PORT="${PORT:-8000}"
 BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:${PORT}}"
 FP2_POLL_INTERVAL="${FP2_POLL_INTERVAL:-1}"
 FP2_MONITOR_LOG_LEVEL="${FP2_MONITOR_LOG_LEVEL:-INFO}"
+RUNTIME_ENV_FILE="${FP2_RUNTIME_ENV_FILE:-/tmp/fp2_runtime.env}"
 
 BACKEND_PID=""
 MONITOR_PID=""
 MONITOR_RESTART_DELAY="${FP2_MONITOR_RESTART_DELAY:-5}"
+
+write_runtime_env_file() {
+  : > "${RUNTIME_ENV_FILE}"
+  chmod 600 "${RUNTIME_ENV_FILE}" >/dev/null 2>&1 || true
+  for key in \
+    AQARA_EMAIL \
+    AQARA_PASSWORD \
+    AQARA_API_DOMAIN \
+    AQARA_APP_ID \
+    AQARA_APP_KEY \
+    AQARA_KEY_ID \
+    AQARA_ACCESS_TOKEN \
+    AQARA_REFRESH_TOKEN \
+    AQARA_OPEN_ID \
+    AQARA_ACCESS_TOKEN_EXPIRES \
+    FP2_DEVICE_ID \
+    FP2_NAME \
+    FP2_MODEL \
+    FP2_FIRMWARE
+  do
+    eval "value=\${${key}:-}"
+    if [ -n "${value}" ]; then
+      printf '%s=%s\n' "${key}" "${value}" >> "${RUNTIME_ENV_FILE}"
+    fi
+  done
+}
 
 cleanup() {
   if [ -n "${MONITOR_PID:-}" ]; then
@@ -38,11 +65,13 @@ if ! curl -sf "${BACKEND_URL}/health/live" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Starting Aqara Cloud monitor against ${BACKEND_URL}"
+write_runtime_env_file
+echo "Starting Aqara Cloud monitor against ${BACKEND_URL} using ${RUNTIME_ENV_FILE}"
 (
   while true; do
     echo "Launching Aqara Cloud monitor loop"
     python3 /app/scripts/fp2_aqara_cloud_monitor.py \
+      --env-file "${RUNTIME_ENV_FILE}" \
       --backend "${BACKEND_URL}" \
       --interval "${FP2_POLL_INTERVAL}" \
       --log-level "${FP2_MONITOR_LOG_LEVEL}"

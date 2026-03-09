@@ -53,6 +53,7 @@ The current production deployment is a single Render `web service`.
 
 - The backend serves the UI directly from `v1/src/app.py`
 - The same container now starts the Aqara Cloud monitor alongside the backend
+- Render startup writes a runtime env file for the monitor, so token refresh and coordinate keepalive do not depend on a committed `.env`
 - The public site and the API share the same origin
 - No separate paid worker is required for the deployed runtime
 - On Render free tier, cold starts after idle time are still possible
@@ -79,6 +80,7 @@ Runtime behavior:
 - On Render, when `DATABASE_URL` is set, layout state is stored in PostgreSQL
 - If PostgreSQL is unavailable, the backend falls back to SQLite or file fallback depending on runtime
 - The UI shows the active storage backend in the room-layout section
+- Room templates and room items are saved server-side immediately after changes or template save actions
 
 `Export Layout` / `Import Layout` are still available as an explicit backup and transfer path between browsers or environments.
 
@@ -95,6 +97,7 @@ Recommended migration flow from an older local browser state:
 
 - Current live transport is `aqara_cloud`
 - The backend now refreshes cloud snapshots before stale fallback in cloud mode
+- If direct cloud refresh fails on Render, `/api/v1/fp2/current` now falls back to the latest cached Aqara snapshot instead of returning `502`
 - The UI now polls `/api/v1/fp2/current` in cloud mode so Render shows fresh target coordinates
 - Render is intended to run the same cloud monitor loop as local startup so `4.22.85` stays enabled
 - Direct `HomeKit/HAP` pairing was investigated, but it is not the active runtime path

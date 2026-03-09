@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
 import sys
@@ -61,7 +62,9 @@ class Settings:
 
 def load_dotenv(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    for raw_line in path.read_text().splitlines():
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -72,6 +75,25 @@ def load_dotenv(path: Path) -> dict[str, str]:
 
 def load_settings(env_path: Path) -> Settings:
     env = load_dotenv(env_path)
+    for key in (
+        "AQARA_EMAIL",
+        "AQARA_PASSWORD",
+        "AQARA_API_DOMAIN",
+        "AQARA_APP_ID",
+        "AQARA_APP_KEY",
+        "AQARA_KEY_ID",
+        "AQARA_ACCESS_TOKEN",
+        "AQARA_REFRESH_TOKEN",
+        "AQARA_OPEN_ID",
+        "AQARA_ACCESS_TOKEN_EXPIRES",
+        "FP2_DEVICE_ID",
+        "FP2_NAME",
+        "FP2_MODEL",
+        "FP2_FIRMWARE",
+    ):
+        value = os.environ.get(key)
+        if value not in (None, ""):
+            env[key] = value
     return Settings(
         env_path=env_path,
         aqara_email=env.get("AQARA_EMAIL", ""),
@@ -170,7 +192,8 @@ def print_block(title: str, payload: dict[str, Any]) -> None:
 
 
 def write_env_updates(env_path: Path, updates: dict[str, str]) -> None:
-    lines = env_path.read_text().splitlines()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     pending = dict(updates)
     new_lines: list[str] = []
     for line in lines:
@@ -185,7 +208,7 @@ def write_env_updates(env_path: Path, updates: dict[str, str]) -> None:
             new_lines.append(line)
     for key, value in pending.items():
         new_lines.append(f"{key}={value}")
-    env_path.write_text("\n".join(new_lines) + "\n")
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 def save_probe_output(output_path: Path, payload: dict[str, Any]) -> None:

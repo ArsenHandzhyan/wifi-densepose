@@ -698,10 +698,10 @@ export class FP2Tab {
       bounds = null,
       offsetX = 14,
       offsetY = -18,
-      paddingX = 8,
-      paddingY = 6,
-      titleFont = '600 11px monospace',
-      bodyFont = '10px monospace',
+      paddingX = 10,
+      paddingY = 7,
+      titleFont = '600 12px "SFMono-Regular", "JetBrains Mono", monospace',
+      bodyFont = '11px "SFMono-Regular", "JetBrains Mono", monospace',
       background = 'rgba(8, 15, 28, 0.82)',
       border = 'rgba(148, 163, 184, 0.18)',
       titleColor = '#e2e8f0',
@@ -715,7 +715,7 @@ export class FP2Tab {
       ctx.font = fonts[index];
       return ctx.measureText(line).width;
     });
-    const lineHeights = visibleLines.map((_, index) => (index === 0 ? 13 : 12));
+    const lineHeights = visibleLines.map((_, index) => (index === 0 ? 14 : 13));
     const contentWidth = Math.max(...lineMetrics);
     const boxWidth = Math.ceil(contentWidth + paddingX * 2);
     const boxHeight = Math.ceil(lineHeights.reduce((sum, value) => sum + value, 0) + paddingY * 2 + Math.max(0, visibleLines.length - 1) * 2);
@@ -4489,10 +4489,10 @@ export class FP2Tab {
       }
 
       const minBox = Math.min(width, depth);
-      const iconFontPx = Math.max(12, Math.min(18, Math.round(minBox / 3.4)));
-      const labelFontPx = Math.max(10, Math.min(13, Math.round(minBox / 4.8)));
+      const iconFontPx = Math.max(13, Math.min(20, Math.round(minBox / 3.1)));
+      const labelFontPx = Math.max(11, Math.min(15, Math.round(minBox / 4.2)));
       const showInlineLabel = !['door', 'curtain', 'tv'].includes(item.type)
-        && (isSelected || (width >= 150 && depth >= 72));
+        && (isSelected || (width >= 120 && depth >= 58));
 
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `600 ${iconFontPx}px sans-serif`;
@@ -4519,6 +4519,9 @@ export class FP2Tab {
           8
         );
         ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
         ctx.fillStyle = '#e2e8f0';
         ctx.fillText(label, 0, labelY + 1);
       }

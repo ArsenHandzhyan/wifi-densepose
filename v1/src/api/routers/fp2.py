@@ -81,7 +81,7 @@ def _should_refresh_from_cloud(
     if not aqara_cloud_service.is_configured:
         return False
     if snapshot is None:
-        return True
+        return not _has_direct_hap_pairing()
     source = _snapshot_source(snapshot)
     if source == "aqara_cloud":
         return False
@@ -572,6 +572,11 @@ async def get_fp2_current_pose_like_data(
         try:
             return await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
         except Exception as exc:
+            if latest_hap_snapshot is not None and _snapshot_source(latest_hap_snapshot) == "aqara_cloud":
+                return _build_stale_hap_payload(
+                    latest_hap_snapshot,
+                    reason=f"Cloud refresh failed; serving cached Aqara snapshot: {exc}",
+                )
             _raise_cloud_http_error(exc)
     elif latest_hap_snapshot is not None:
         return _build_stale_hap_payload(

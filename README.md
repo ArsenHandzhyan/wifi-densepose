@@ -51,6 +51,7 @@ cd ui
 The current production deployment is a single Render `web service`.
 
 - The backend serves the UI directly from `v1/src/app.py`
+- The same container now starts the Aqara Cloud monitor alongside the backend
 - The public site and the API share the same origin
 - No separate paid worker is required for the deployed runtime
 - On Render free tier, cold starts after idle time are still possible
@@ -88,6 +89,7 @@ Recommended transfer flow:
 - Current live transport is `aqara_cloud`
 - The backend now refreshes cloud snapshots before stale fallback in cloud mode
 - The UI now polls `/api/v1/fp2/current` in cloud mode so Render shows fresh target coordinates
+- Render is intended to run the same cloud monitor loop as local startup so `4.22.85` stays enabled
 - Direct `HomeKit/HAP` pairing was investigated, but it is not the active runtime path
 
 ## Secrets And Local Files

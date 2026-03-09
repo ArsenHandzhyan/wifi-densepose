@@ -34,6 +34,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 - Public URL: [https://wifi-densepose-qtgc.onrender.com](https://wifi-densepose-qtgc.onrender.com)
 - Deployment model: single Render `web service`
 - UI is served by the backend from `v1/src/app.py`
+- The container starts both `uvicorn` and `scripts/fp2_aqara_cloud_monitor.py`
 - Public API shares the same origin as the UI
 - Free-tier cold starts remain possible after idle periods
 
@@ -56,6 +57,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 ## Important Runtime Improvements Since 2026-03-07
 
 - Render now runs as a single-service deployment instead of requiring a separate worker
+- Render now starts the cloud monitor inside the same web service, instead of relying only on on-demand refresh
 - Backend refreshes Aqara Cloud snapshots before stale fallback in cloud mode
 - UI in cloud mode now polls `/api/v1/fp2/current`, which fixed stale target coordinates on Render
 - Layout export/import was added so browser-local room configuration can be moved from local UI to Render

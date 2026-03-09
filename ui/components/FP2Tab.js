@@ -4453,7 +4453,7 @@ export class FP2Tab {
   }
 
   drawRoomProfileShell(ctx, projection, profile, sensorAngle, available, presence) {
-    const { roomRect, originX, originY, toCanvasY, widthCm, depthCm, calibrated } = projection;
+    const { roomRect, originX, originY, widthCm, depthCm, calibrated } = projection;
     const accent = profile?.accent || '#38bdf8';
     const calibration = this.getCalibrationDraft(profile);
 
@@ -4463,16 +4463,6 @@ export class FP2Tab {
     ctx.lineWidth = 2;
     ctx.strokeStyle = `${accent}aa`;
     ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(148,163,184,0.10)';
-    ctx.lineWidth = 1;
-    for (let depth = 100; depth < depthCm; depth += 100) {
-      const y = toCanvasY(depth);
-      ctx.beginPath();
-      ctx.moveTo(roomRect.x + 10, y);
-      ctx.lineTo(roomRect.x + roomRect.width - 10, y);
-      ctx.stroke();
-    }
 
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 13px Inter, system-ui, sans-serif';
@@ -4528,29 +4518,6 @@ export class FP2Tab {
     ctx.fillStyle = 'rgba(248,250,252,0.6)';
     ctx.font = '600 11px Inter, system-ui, sans-serif';
     ctx.fillText(t('fp2.sensor_label'), originX - 18, originY + 22);
-
-    if (Number.isFinite(sensorAngle)) {
-      const rayLen = Math.min(roomRect.width * 0.42, roomRect.height * 0.92);
-      const rad = sensorAngle * (Math.PI / 180);
-      const rx = originX + Math.cos(rad) * rayLen;
-      const ry = originY - Math.sin(rad) * rayLen;
-      const fovHalf = 30 * (Math.PI / 180);
-
-      this.drawFovCone(ctx, originX, originY, rayLen, rad, fovHalf, {
-        fill: 'rgba(250,204,21,0.045)',
-        edge: 'rgba(250,204,21,0.12)',
-        edgeWidth: 1
-      });
-
-      ctx.strokeStyle = 'rgba(250,204,21,0.45)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(originX, originY);
-      ctx.lineTo(rx, ry);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
   }
 
   drawRoomLayoutItems(ctx, projection, items = []) {
@@ -4704,6 +4671,11 @@ export class FP2Tab {
       this.drawRoomProfileShell(ctx, projection, roomProfile, sensorAngle, available, presence);
       this.drawRoomLayoutItems(ctx, projection, roomItems);
 
+      ctx.save();
+      ctx.beginPath();
+      this.drawRoundedRect(ctx, roomRect.x, roomRect.y, roomRect.width, roomRect.height, 18);
+      ctx.clip();
+
       const trail = this.state.trailHistory;
       if (trail.length > 1 && (!this.hasFrozenCoordinates() || recentTrace)) {
         const getTrailKey = (target) => String(target?.target_id ?? target?.id ?? '');
@@ -4815,6 +4787,7 @@ export class FP2Tab {
         ctx.font = '10px monospace';
         ctx.fillText(t('fp2.target.class.animal_like'), px + 10, py - 8);
       });
+      ctx.restore();
 
       ctx.fillStyle = available
         ? (targets.length > 0 ? 'rgba(74,222,128,0.9)' : 'rgba(251,191,36,0.9)')
@@ -4834,11 +4807,6 @@ export class FP2Tab {
       );
       ctx.textAlign = 'left';
 
-      ctx.fillStyle = 'rgba(148,163,184,0.45)';
-      ctx.font = '600 10px Inter, system-ui, sans-serif';
-      ctx.fillText('+Y', originX + 4, roomRect.y + 10);
-      ctx.fillText('+X', roomRect.x + roomRect.width - 18, originY - 6);
-      ctx.fillText('-X', roomRect.x + 6, originY - 6);
       return;
     }
 

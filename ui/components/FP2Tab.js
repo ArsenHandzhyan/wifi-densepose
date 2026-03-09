@@ -4526,6 +4526,8 @@ export class FP2Tab {
     const { roomRect, widthCm, depthCm, toCanvasX, toCanvasY } = projection;
     const scaleX = roomRect.width / Math.max(1, widthCm);
     const scaleY = roomRect.height / Math.max(1, depthCm);
+    const inEditMode = Boolean(this.state.editLayoutMode);
+    const compactMap = roomRect.width < 420;
 
     items.forEach((item) => {
       const def = getRoomItemDefinition(item.type);
@@ -4623,7 +4625,7 @@ export class FP2Tab {
       ctx.shadowBlur = 0;
       ctx.shadowColor = 'transparent';
 
-      if (isSelected) {
+      if (isSelected && inEditMode) {
         ctx.strokeStyle = 'rgba(248,250,252,0.85)';
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 4]);
@@ -4636,15 +4638,15 @@ export class FP2Tab {
       }
       ctx.restore();
 
-      const shouldDrawExternalLabel = isSelected;
+      const shouldDrawExternalLabel = isSelected && inEditMode;
       if (shouldDrawExternalLabel) {
         const tagY = centerY - (depth / 2) - 34 < labelBounds.top
           ? centerY + (depth / 2) + 10
           : centerY - (depth / 2) - 30;
         this.drawCanvasTag(ctx, centerX, tagY, labelText, {
           bounds: labelBounds,
-          maxWidth: Math.min(260, Math.max(136, roomRect.width * 0.34)),
-          font: `700 ${Math.max(11, Math.min(13, labelFontPx))}px Inter, system-ui, sans-serif`,
+          maxWidth: Math.min(compactMap ? 180 : 260, Math.max(120, roomRect.width * (compactMap ? 0.26 : 0.34))),
+          font: `700 ${Math.max(10, Math.min(compactMap ? 12 : 13, labelFontPx))}px Inter, system-ui, sans-serif`,
           background: isSelected ? 'rgba(8, 15, 28, 0.94)' : 'rgba(8, 15, 28, 0.86)',
           border: isSelected ? 'rgba(248,250,252,0.38)' : 'rgba(148, 163, 184, 0.22)'
         });
@@ -4660,6 +4662,8 @@ export class FP2Tab {
       const projection = this.getFixedRoomProjection(width, height, roomProfile);
       this.state.lastRoomProjection = projection;
       const { roomRect, originX, originY, toCanvasX, toCanvasY } = projection;
+      const frozen = this.hasFrozenCoordinates();
+      const compactMap = roomRect.width < 420 || width < 860;
       const suppressedTargets = (allTargets || []).filter((target) => target.filtered_out && this.hasCoordinates(target));
       const roomItems = this.getActiveRoomLayoutItems(roomProfile);
       const recentTrace =
@@ -4723,27 +4727,29 @@ export class FP2Tab {
         const py = toCanvasY(target.y);
         const color = TARGET_COLORS[i % TARGET_COLORS.length];
 
-        ctx.strokeStyle = `${color}55`;
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = frozen ? `${color}33` : `${color}55`;
+        ctx.lineWidth = frozen ? 1.1 : 1.5;
         ctx.beginPath();
         ctx.moveTo(originX, originY);
         ctx.lineTo(px, py);
         ctx.stroke();
 
-        const gradient = ctx.createRadialGradient(px, py, 0, px, py, 20);
-        gradient.addColorStop(0, `${color}40`);
-        gradient.addColorStop(1, `${color}00`);
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(px, py, 20, 0, Math.PI * 2);
-        ctx.fill();
+        if (!frozen) {
+          const gradient = ctx.createRadialGradient(px, py, 0, px, py, compactMap ? 16 : 20);
+          gradient.addColorStop(0, `${color}36`);
+          gradient.addColorStop(1, `${color}00`);
+          ctx.fillStyle = gradient;
+          ctx.beginPath();
+          ctx.arc(px, py, compactMap ? 16 : 20, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         ctx.fillStyle = color;
         ctx.beginPath();
         ctx.arc(px, py, i === 0 ? 8 : 6, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = frozen ? 'rgba(255,255,255,0.82)' : '#fff';
+        ctx.lineWidth = frozen ? 1.2 : 1.5;
         ctx.stroke();
         this.drawCanvasTextBubble(
           ctx,
@@ -4759,7 +4765,12 @@ export class FP2Tab {
               right: roomRect.x + roomRect.width - 8,
               top: roomRect.y + 8,
               bottom: roomRect.y + roomRect.height - 8
-            }
+            },
+            maxWidth: compactMap ? 128 : 164,
+            offsetX: frozen ? 10 : 14,
+            offsetY: frozen ? -14 : -18,
+            background: frozen ? 'rgba(8, 15, 28, 0.9)' : 'rgba(8, 15, 28, 0.82)',
+            border: frozen ? 'rgba(148, 163, 184, 0.22)' : 'rgba(148, 163, 184, 0.18)'
           }
         );
       });

@@ -4941,7 +4941,7 @@ export class FP2Tab {
     this.pollTimer = setInterval(async () => {
       if (!this.isPageVisible()) return;
       await this.loadStatus();
-      if (this.state.streamState !== 'live' && this.state.streamState !== 'connected') {
+      if (this.state.streamState !== 'live') {
         await this.loadCurrent();
       }
     }, 3000);

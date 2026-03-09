@@ -15,14 +15,6 @@ services:
         value: "true"
       - key: ENABLE_REAL_TIME_PROCESSING
         value: "false"
-
-  - type: worker
-    name: wifi-densepose-fp2-monitor
-    runtime: docker
-    plan: free
-    dockerfilePath: ./Dockerfile.render
-    dockerContext: .
-    envVars:
       - key: AQARA_EMAIL
         sync: false
       - key: AQARA_PASSWORD
@@ -47,9 +39,3 @@ services:
         value: Aqara FP2
       - key: FP2_MODEL
         value: PS-SO2RU
-      - key: BACKEND_URL
-        fromService:
-          name: wifi-densepose-backend
-          type: web
-          property: host
-    startCommand: python scripts/fp2_aqara_cloud_monitor.py --backend $BACKEND_URL --interval 2 --log-level INFO

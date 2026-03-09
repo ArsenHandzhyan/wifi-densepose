@@ -511,6 +511,7 @@ async def get_fp2_status(
 async def get_fp2_current_pose_like_data(
     entity_id: str | None = Query(default=None, description="Optional HA entity_id override"),
     fp2_service: FP2Service = Depends(get_fp2_service),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
 ):
     """Get latest FP2 snapshot converted to pose-like output."""
     if not fp2_service.settings.fp2_enabled:
@@ -533,6 +534,16 @@ async def get_fp2_current_pose_like_data(
             None,
             reason="Direct HAP stream is stale or the FP2 device is offline",
         )
+    elif aqara_cloud_service.is_configured:
+        try:
+            payload = await aqara_cloud_service.fetch_current_pose_payload()
+            payload.setdefault("metadata", {})
+            payload["metadata"]["source"] = "aqara_cloud"
+            payload["metadata"]["cloud_refresh"] = True
+            await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
+            return payload
+        except Exception as exc:
+            _raise_cloud_http_error(exc)
     else:
         resolved_entity_id = await fp2_service.resolve_entity_id(entity_id)
         snapshot = await fp2_service.fetch_snapshot(entity_id=resolved_entity_id)

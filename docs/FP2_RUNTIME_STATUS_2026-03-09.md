@@ -53,6 +53,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
   - fall safety
   - bedside / sleep telemetry
 - Room profile and room-item transfer through `Export Layout` / `Import Layout`
+- Backend layout persistence through `/api/v1/fp2/layout-state`
 
 ## Important Runtime Improvements Since 2026-03-07
 
@@ -60,7 +61,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 - Render now starts the cloud monitor inside the same web service, instead of relying only on on-demand refresh
 - Backend refreshes Aqara Cloud snapshots before stale fallback in cloud mode
 - UI in cloud mode now polls `/api/v1/fp2/current`, which fixed stale target coordinates on Render
-- Layout export/import was added so browser-local room configuration can be moved from local UI to Render
+- Layout export/import was added so existing browser-local room configuration can be moved into backend-backed storage
 - Scenario application now handles bedside reset more explicitly when switching away from sleep mode
 
 ## Current UI Scope
@@ -140,15 +141,19 @@ python3 scripts/aqara_api_probe.py exchange-auth-code 123456 --write-env
 
 ## Room Layout Storage
 
-Room profiles, calibration, templates, and items are not stored in the backend yet.
+Room profiles, calibration, templates, and items are stored through the backend endpoint:
+
+- `GET /api/v1/fp2/layout-state`
+- `PUT /api/v1/fp2/layout-state`
 
 Current behavior:
 
-- layout state is browser-local
-- local and Render do not automatically share room configuration
-- transfer is currently file-based through `Export Layout` and `Import Layout`
+- Render can persist layout state in PostgreSQL when `DATABASE_URL` is configured
+- the backend falls back to SQLite or file storage if the primary database is unavailable
+- local and Render can still exchange layouts explicitly through `Export Layout` and `Import Layout`
+- the UI shows which storage backend is currently active for the room editor
 
-This is good enough for moving layouts between `localhost` and Render, but it is not a real multi-device sync layer.
+This is now a real server-side persistence layer, with file export/import still available as backup or migration tooling.
 
 ## Current Constraints
 
@@ -193,4 +198,4 @@ The repository is now operating as a cloud-backed `Aqara FP2` telemetry console 
 - scenario presets
 - file-based room-layout transfer between local and public UI
 
-The next major gap is not telemetry transport. It is server-side persistence for room layouts and items.
+The next major gap is no longer basic room persistence. It is deeper multi-user synchronization and richer backend model/versioning for room layouts and items.

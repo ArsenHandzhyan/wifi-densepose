@@ -79,6 +79,7 @@ body::before {
   padding: var(--gap-lg);
   position: relative;
   z-index: 1;
+  overflow-x: clip;
 }
 
 /* ── Header ────────────────────────────────────────────────── */
@@ -181,6 +182,8 @@ body::before {
   padding: var(--gap);
   backdrop-filter: var(--blur);
   transition: border-color 0.2s;
+  min-width: 0;
+  overflow: hidden;
 }
 .card:hover { border-color: var(--glass-border); }
 .card h3 {
@@ -195,10 +198,10 @@ body::before {
 .card--accent h3 { color: var(--accent); }
 
 /* ── KV rows ───────────────────────────────────────────────── */
-.kv { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 0.82rem; }
+.kv { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 0.82rem; }
 .kv:last-child { border-bottom: none; }
-.kv > span:first-child { color: var(--text-dim); }
-.kv > *:last-child { color: var(--text); font-weight: 500; }
+.kv > span:first-child { color: var(--text-dim); min-width: 0; }
+.kv > *:last-child { color: var(--text); font-weight: 500; min-width: 0; text-align: right; overflow-wrap: anywhere; }
 .kv code { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); background: rgba(var(--accent-rgb), 0.08); padding: 1px 6px; border-radius: 4px; }
 
 /* ── Chips / Pills ─────────────────────────────────────────── */
@@ -682,6 +685,9 @@ body::before {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
 }
 .fp2-map-layout-actions {
   display: flex;
@@ -815,7 +821,7 @@ body::before {
 }
 .fp2-layout-items {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
 }
 .fp2-layout-item {
@@ -876,8 +882,8 @@ body::before {
   font-family: var(--mono);
 }
 .fp2-layout-item-actions {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
@@ -891,7 +897,7 @@ body::before {
   padding-right: 8px;
 }
 .fp2-layout-item-actions .fp2-layout-item-btn:last-child {
-  justify-self: end;
+  margin-left: auto;
 }
 .fp2-map-editor-note {
   margin-top: 8px;
@@ -915,6 +921,7 @@ body::before {
   margin-bottom: var(--gap);
 }
 .fp2-grid--info > * { min-width: 0; }
+.fp2-card-header-row--map > * { min-width: 0; }
 
 /* ── Target cards ──────────────────────────────────────────── */
 .fp2-target-summary {
@@ -1272,6 +1279,11 @@ body::before {
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 /* ═══ RESPONSIVE ═══════════════════════════════════════════════ */
+@media (max-width: 1520px) {
+  .fp2-card-header-row--map { flex-direction: column; align-items: flex-start; }
+  .fp2-map-toolbar { width: 100%; justify-content: flex-start; }
+  .fp2-grid--info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 1360px) {
   .fp2-card-header-row--map { flex-direction: column; }
   .fp2-map-toolbar { width: 100%; justify-content: flex-start; }
@@ -1296,9 +1308,9 @@ body::before {
   .fp2-map-calibration-buttons { flex-direction: column; }
   .fp2-layout-inspector-grid { grid-template-columns: 1fr; }
   .fp2-layout-items { grid-template-columns: 1fr; }
-  .fp2-layout-item-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .fp2-layout-item-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .fp2-layout-item-btn--compact { min-width: 0; }
-  .fp2-layout-item-actions .fp2-layout-item-btn:last-child { justify-self: stretch; }
+  .fp2-layout-item-actions .fp2-layout-item-btn:last-child { justify-self: stretch; margin-left: 0; }
   .fp2-scenario-tab { min-width: 100%; }
   .fp2-scenario-sections { grid-template-columns: 1fr; }
   .fp2-movement-canvas { height: 360px; }

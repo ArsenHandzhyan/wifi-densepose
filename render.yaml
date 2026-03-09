@@ -33,6 +33,8 @@ services:
         sync: false
       - key: AQARA_OPEN_ID
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: FP2_DEVICE_ID
         sync: false
       - key: FP2_NAME

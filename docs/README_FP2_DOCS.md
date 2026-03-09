@@ -9,7 +9,7 @@ The authoritative runtime path on this machine is:
 ## Read This First
 
 1. [`FP2_RUNTIME_STATUS_2026-03-09.md`](FP2_RUNTIME_STATUS_2026-03-09.md)
-   The current verified runtime status, local runbook, Render deployment, room-layout transfer, and known limits.
+   The current verified runtime status, local runbook, Render deployment, backend room-layout persistence, and known limits.
 
 2. [`FP2_INTEGRATION_FINAL_STATUS.md`](FP2_INTEGRATION_FINAL_STATUS.md)
    Historical investigation summary explaining why the project was narrowed from multiple experimental paths to the current FP2 monitor.
@@ -26,9 +26,14 @@ The authoritative runtime path on this machine is:
 - The UI is now `FP2-only` and exposes only `Dashboard` and `FP2 Monitor`.
 - Public Render deployment is live at [https://wifi-densepose-qtgc.onrender.com](https://wifi-densepose-qtgc.onrender.com).
 - Render uses a single backend-served UI instead of a separate frontend service.
-- Room profiles and room items can be moved from local UI to Render via `Export Layout` and `Import Layout`.
+- Room profiles, templates, and items are persisted through backend `layout-state`, with `Export Layout` and `Import Layout` kept as backup/migration tools.
 - Legacy CSI/DensePose materials were removed from the tracked runtime tree and moved into the local archive.
 - `Home Assistant` can still exist locally, but the live UI no longer depends on HA polling for the working sensor path.
+
+## Local R&D References
+
+- [`ESP32_ROOM_SETUP_PLAN_2026-03-09.md`](ESP32_ROOM_SETUP_PLAN_2026-03-09.md)
+  Local room deployment plan for the experimental `ESP32-S3 + FP2 + Keenetic` sensing stand. This is an exploratory document and not part of the active FP2 production runtime.
 
 ## What Is Intentionally Out Of Scope
 

@@ -177,6 +177,7 @@ export class FP2Tab {
       scenarioBusyId: null,
       roomConfigBackendReady: false,
       roomConfigHydrating: false,
+      roomConfigStorageBackend: 'unknown',
       lastRoomProjection: null,
       rawTargets: [],
       filteredTargets: [],
@@ -313,6 +314,7 @@ export class FP2Tab {
       roomTemplateApply: this.container.querySelector('#fp2RoomTemplateApply'),
       roomTemplateSave: this.container.querySelector('#fp2RoomTemplateSave'),
       roomTemplateStatus: this.container.querySelector('#fp2RoomTemplateStatus'),
+      roomStorageStatus: this.container.querySelector('#fp2RoomStorageStatus'),
       roomItemLibrary: this.container.querySelector('#fp2RoomItemLibrary'),
       roomItemAdd: this.container.querySelector('#fp2RoomItemAdd'),
       roomItemsClear: this.container.querySelector('#fp2RoomItemsClear'),
@@ -848,6 +850,56 @@ export class FP2Tab {
       || payload.selectedRoomTemplateId !== 'living_room';
   }
 
+  normalizeRoomConfigStorageBackend(value) {
+    if (typeof value !== 'string') return 'unknown';
+    const normalized = value.trim().toLowerCase();
+    if (['postgresql', 'sqlite_fallback', 'file_fallback', 'unavailable'].includes(normalized)) {
+      return normalized;
+    }
+    return 'unknown';
+  }
+
+  setRoomConfigStorageBackend(value) {
+    this.state.roomConfigStorageBackend = this.normalizeRoomConfigStorageBackend(value);
+  }
+
+  getRoomConfigStorageBadgeState() {
+    if (this.state.roomConfigHydrating) {
+      return {
+        text: t('fp2.layout.storage.syncing'),
+        className: 'chip chip--warn'
+      };
+    }
+
+    switch (this.state.roomConfigStorageBackend) {
+      case 'postgresql':
+        return {
+          text: t('fp2.layout.storage.cloud_db'),
+          className: 'chip chip--ok'
+        };
+      case 'sqlite_fallback':
+        return {
+          text: t('fp2.layout.storage.sqlite_fallback'),
+          className: 'chip chip--info'
+        };
+      case 'file_fallback':
+        return {
+          text: t('fp2.layout.storage.file_fallback'),
+          className: 'chip chip--warn'
+        };
+      case 'unavailable':
+        return {
+          text: t('fp2.layout.storage.unavailable'),
+          className: 'chip chip--err'
+        };
+      default:
+        return {
+          text: t('fp2.layout.storage.unknown'),
+          className: 'chip chip--neutral'
+        };
+    }
+  }
+
   applyRoomConfigPayload(payload, { persistLocal = true } = {}) {
     if (!payload || typeof payload !== 'object') {
       return;
@@ -893,19 +945,23 @@ export class FP2Tab {
     this.state.roomConfigHydrating = true;
     try {
       const remoteState = await fp2Service.getLayoutState();
+      this.setRoomConfigStorageBackend(remoteState?.storage_backend || 'unknown');
       if (remoteState?.found && remoteState.payload && typeof remoteState.payload === 'object') {
         this.applyRoomConfigPayload(remoteState.payload, { persistLocal: true });
       } else {
         const localPayload = this.buildRoomConfigExportPayload();
         if (this.hasMeaningfulRoomConfig(localPayload)) {
-          await fp2Service.saveLayoutState(localPayload);
+          const savedState = await fp2Service.saveLayoutState(localPayload);
+          this.setRoomConfigStorageBackend(savedState?.storage_backend || remoteState?.storage_backend || 'unknown');
         }
       }
     } catch (error) {
       console.warn('Failed to sync FP2 room config with backend:', error);
+      this.setRoomConfigStorageBackend('unavailable');
     } finally {
       this.state.roomConfigHydrating = false;
       this.state.roomConfigBackendReady = true;
+      this.renderRoomProfileControls();
     }
   }
 
@@ -931,9 +987,13 @@ export class FP2Tab {
   async flushRoomConfigSave() {
     if (!this.state.roomConfigBackendReady || this.state.roomConfigHydrating) return;
     try {
-      await fp2Service.saveLayoutState(this.buildRoomConfigExportPayload());
+      const savedState = await fp2Service.saveLayoutState(this.buildRoomConfigExportPayload());
+      this.setRoomConfigStorageBackend(savedState?.storage_backend || 'unknown');
+      this.renderRoomProfileControls();
     } catch (error) {
       console.warn('Failed to persist FP2 room config to backend:', error);
+      this.setRoomConfigStorageBackend('unavailable');
+      this.renderRoomProfileControls();
     }
   }
 
@@ -1839,6 +1899,7 @@ export class FP2Tab {
       roomTemplateApply,
       roomTemplateSave,
       roomTemplateStatus,
+      roomStorageStatus,
       roomItemLibrary,
       roomItemAdd,
       roomItemsClear,
@@ -1922,6 +1983,12 @@ export class FP2Tab {
 
     if (roomItemsSummary) {
       roomItemsSummary.textContent = t('fp2.layout.items_summary', { count: roomItems.length });
+    }
+
+    if (roomStorageStatus) {
+      const storageState = this.getRoomConfigStorageBadgeState();
+      roomStorageStatus.textContent = storageState.text;
+      roomStorageStatus.className = storageState.className;
     }
 
     if (roomItemLibrary) {
@@ -4422,9 +4489,10 @@ export class FP2Tab {
       }
 
       const minBox = Math.min(width, depth);
-      const iconFontPx = Math.max(10, Math.min(14, Math.round(minBox / 4)));
-      const labelFontPx = Math.max(9, Math.min(12, Math.round(minBox / 5.5)));
-      const showInlineLabel = width >= 110 && depth >= 52 && !['door', 'curtain', 'tv'].includes(item.type);
+      const iconFontPx = Math.max(12, Math.min(18, Math.round(minBox / 3.4)));
+      const labelFontPx = Math.max(10, Math.min(13, Math.round(minBox / 4.8)));
+      const showInlineLabel = !['door', 'curtain', 'tv'].includes(item.type)
+        && (isSelected || (width >= 150 && depth >= 72));
 
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `600 ${iconFontPx}px sans-serif`;
@@ -4432,12 +4500,27 @@ export class FP2Tab {
       ctx.textBaseline = 'middle';
       ctx.shadowColor = 'rgba(8, 15, 28, 0.85)';
       ctx.shadowBlur = 6;
-      ctx.fillText(icon, 0, showInlineLabel ? -4 : 0);
+      ctx.fillText(icon, 0, showInlineLabel ? -8 : 0);
 
       if (showInlineLabel) {
         ctx.font = `600 ${labelFontPx}px sans-serif`;
         const label = this.fitCanvasText(ctx, this.getRoomItemLabel(item), Math.max(40, width - 18));
-        ctx.fillText(label, 0, Math.min(depth / 2 - 10, 14));
+        const labelY = Math.min(depth / 2 - 12, 18);
+        const textMetrics = ctx.measureText(label);
+        const backgroundWidth = Math.max(30, textMetrics.width + 14);
+        const backgroundHeight = labelFontPx + 8;
+        ctx.fillStyle = 'rgba(8, 15, 28, 0.72)';
+        this.drawRoundedRect(
+          ctx,
+          -backgroundWidth / 2,
+          labelY - backgroundHeight / 2,
+          backgroundWidth,
+          backgroundHeight,
+          8
+        );
+        ctx.fill();
+        ctx.fillStyle = '#e2e8f0';
+        ctx.fillText(label, 0, labelY + 1);
       }
       ctx.shadowBlur = 0;
 

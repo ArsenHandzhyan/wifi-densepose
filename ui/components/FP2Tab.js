@@ -2886,7 +2886,9 @@ export class FP2Tab {
     const currentZone = this.detectCurrentZone(data, zones, targets, effectivePresence);
     const packetAge = this.getPacketAge(rawAttributes.push_time);
     const timestampLabel = this.formatTimestamp(data?.timestamp);
-    const frozenCoordinates = this.hasFrozenCoordinates(rawAttributes.movement_event);
+    const coordinateSnapshotState = this.getCoordinateSnapshotState(rawAttributes.movement_event);
+    const frozenCoordinates = coordinateSnapshotState === 'frozen';
+    const lastKnownCoordinates = coordinateSnapshotState === 'last_known';
     const primaryTarget = targets[0] || filteredTargets[0] || null;
     const allTargets = classifiedTargets.allTargets || [];
     const coordinateTargets = allTargets.filter((target) => this.hasCoordinates(target));
@@ -2979,8 +2981,8 @@ export class FP2Tab {
 
     // Targets
     this.renderTargetSummary(allTargets, coordinateTargets);
-    this.renderPrimaryTarget(primaryTarget, { frozen: frozenCoordinates });
-    this.renderTargetList(allTargets, { frozen: frozenCoordinates });
+    this.renderPrimaryTarget(primaryTarget, { frozen: frozenCoordinates, lastKnown: lastKnownCoordinates });
+    this.renderTargetList(allTargets, { frozen: frozenCoordinates, lastKnown: lastKnownCoordinates });
     this.renderResourceGrid(rawAttributes.resource_values || {}, rawAttributes.resource_labels || {});
     this.elements.sensorOutput.textContent = JSON.stringify(rawAttributes, null, 2);
     this.elements.rawOutput.textContent = JSON.stringify(data, null, 2);
@@ -3513,7 +3515,7 @@ export class FP2Tab {
   renderCoordinateFreshness(targets, sampleAtMs, presence) {
     if (!this.elements.coordinateStream || !this.elements.coordinateChangeAge) return;
 
-    const now = sampleAtMs || Date.now();
+    const now = Date.now();
     const signature = this.buildCoordinateSignature(targets);
     if (!signature) {
       this.state.coordinateSignature = null;
@@ -3559,14 +3561,32 @@ export class FP2Tab {
     this.elements.coordinateChangeAge.textContent = ageSec === null ? '-' : this.formatAgeSeconds(ageSec, true);
   }
 
+  hasRecentCoordinateSample(maxAgeMs = 4000) {
+    return Boolean(
+      this.state.lastCoordinateSeenAtMs &&
+      (Date.now() - this.state.lastCoordinateSeenAtMs) <= maxAgeMs
+    );
+  }
+
   isActiveMovementEvent(movementEvent) {
     return [2, 3, 4, 6, 7, 8, 9, 10].includes(Number(movementEvent));
   }
 
-  hasFrozenCoordinates(movementEvent = this.state.currentMovementEvent) {
-    if (!this.state.lastCoordinateChangeAtMs) return false;
+  getCoordinateSnapshotState(movementEvent = this.state.currentMovementEvent) {
+    if (!this.state.lastCoordinateChangeAtMs) return 'live';
     const ageSec = Math.max(0, Date.now() - this.state.lastCoordinateChangeAtMs) / 1000;
-    return ageSec > (this.isActiveMovementEvent(movementEvent) ? 8 : 15);
+    const thresholdSec = this.isActiveMovementEvent(movementEvent) ? 8 : 15;
+    if (ageSec <= thresholdSec) return 'live';
+    if (this.hasRecentCoordinateSample()) return 'last_known';
+    return 'frozen';
+  }
+
+  hasLastKnownCoordinates(movementEvent = this.state.currentMovementEvent) {
+    return this.getCoordinateSnapshotState(movementEvent) === 'last_known';
+  }
+
+  hasFrozenCoordinates(movementEvent = this.state.currentMovementEvent) {
+    return this.getCoordinateSnapshotState(movementEvent) === 'frozen';
   }
 
   getCoordinateConfidence(targets, presence, movementEvent) {
@@ -3584,6 +3604,9 @@ export class FP2Tab {
       (now - this.state.lastCoordinateRevivedAtMs) <= 15000 &&
       (this.state.lastCoordinateRevivedGapMs || 0) >= 5000;
 
+    if (this.hasLastKnownCoordinates(movementEvent)) {
+      return { label: t('fp2.coordinate.confidence.last_known'), className: 'chip warn' };
+    }
     if (this.hasFrozenCoordinates(movementEvent)) {
       return { label: t('fp2.coordinate.confidence.frozen'), className: 'chip err' };
     }
@@ -3623,6 +3646,9 @@ export class FP2Tab {
       (now - this.state.lastCoordinateRevivedAtMs) <= 15000 &&
       (this.state.lastCoordinateRevivedGapMs || 0) >= 5000;
 
+    if (this.hasLastKnownCoordinates(movementEvent)) {
+      return { label: t('fp2.coordinate.health.last_known'), className: 'chip warn', score: 1.4 };
+    }
     if (this.hasFrozenCoordinates(movementEvent)) {
       return { label: t('fp2.coordinate.health.frozen'), className: 'chip err', score: 0.2 };
     }
@@ -3656,6 +3682,7 @@ export class FP2Tab {
     const hasDeltaMovement = this.hasTargetDeltas(targets);
     const hasMovementEvent = this.isActiveMovementEvent(movementEvent);
     const isActivelyMoving = hasDeltaMovement || hasMovementEvent;
+    const recentCoordinateSample = this.hasRecentCoordinateSample();
     const hasRecentTrace =
       coordTargets.length === 0 &&
       lastSeenAgeMs !== null &&
@@ -3665,7 +3692,8 @@ export class FP2Tab {
       coordTargets.length > 0 &&
       isActivelyMoving &&
       ageSec !== null &&
-      ageSec > 3;
+      ageSec > 3 &&
+      !recentCoordinateSample;
     const cloudSleepWithoutCoords =
       !coordinatesPayload &&
       coordTargets.length === 0 &&
@@ -3678,9 +3706,13 @@ export class FP2Tab {
       this.state.lastCoordinateRevivedAtMs !== null &&
       (Date.now() - this.state.lastCoordinateRevivedAtMs) <= 15000 &&
       (this.state.lastCoordinateRevivedGapMs || 0) >= 5000;
+    const coordinateSnapshotState = this.getCoordinateSnapshotState(movementEvent);
+    const lastKnownWithCoords =
+      coordTargets.length > 0 &&
+      coordinateSnapshotState === 'last_known';
     const frozenWithCoords =
       coordTargets.length > 0 &&
-      this.hasFrozenCoordinates(movementEvent);
+      coordinateSnapshotState === 'frozen';
 
     if (coordinatesSource === 'hold' || coordTargets.some((target) => target.held)) {
       this.elements.coordinateStream.textContent = t('fp2.coordinate.status.hold');
@@ -3689,6 +3721,19 @@ export class FP2Tab {
         this.elements.mapMode.textContent = t('fp2.map.mode.coord_status', {
           mode: t('fp2.map.mode.coord'),
           status: t('fp2.coordinate.status.hold')
+        });
+        this.elements.mapMode.className = 'chip warn';
+      }
+      return;
+    }
+
+    if (lastKnownWithCoords) {
+      this.elements.coordinateStream.textContent = t('fp2.coordinate.status.last_known');
+      this.elements.coordinateStream.className = 'chip warn';
+      if (this.elements.mapMode) {
+        this.elements.mapMode.textContent = t('fp2.map.mode.coord_status', {
+          mode: t('fp2.map.mode.coord'),
+          status: t('fp2.coordinate.status.last_known')
         });
         this.elements.mapMode.className = 'chip warn';
       }
@@ -3873,8 +3918,11 @@ export class FP2Tab {
       return;
     }
     this.elements.primaryTargetId.textContent = target.target_id || '-';
+    const coordStatusLabel = options.lastKnown
+      ? t('fp2.coordinate.status.last_known')
+      : (options.frozen ? t('fp2.coordinate.status.frozen') : '');
     this.elements.primaryTargetType.textContent = target.target_classification
-      ? `${this.formatTargetClassification(target.target_classification)}${target.held ? ` · ${t('fp2.target.class.held')}` : ''}${options.frozen ? ` · ${t('fp2.coordinate.status.frozen')}` : ''} · ${target.target_type ?? (target.range_id ?? '-')}`
+      ? `${this.formatTargetClassification(target.target_classification)}${target.held ? ` · ${t('fp2.target.class.held')}` : ''}${coordStatusLabel ? ` · ${coordStatusLabel}` : ''} · ${target.target_type ?? (target.range_id ?? '-')}`
       : (target.target_type ?? (target.range_id ?? '-'));
     this.elements.primaryTargetCoords.textContent = this.hasCoordinates(target) ? `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}` : '-';
     this.elements.primaryTargetDistance.textContent = this.formatDistance(target.distance);
@@ -3907,9 +3955,14 @@ export class FP2Tab {
       const holdNote = target.held
         ? `<div class="fp2-target-note">${t('fp2.target.held', { age: this.formatAgeSeconds(target.hold_age_sec || 0) })}</div>`
         : '';
-      const frozenNote = options.frozen && hasXY
-        ? `<div class="fp2-target-note">${t('fp2.target.frozen')}</div>`
-        : '';
+      const frozenNote = options.lastKnown && hasXY
+        ? `<div class="fp2-target-note">${t('fp2.target.last_known')}</div>`
+        : (options.frozen && hasXY
+          ? `<div class="fp2-target-note">${t('fp2.target.frozen')}</div>`
+          : '');
+      const coordStatusLabel = options.lastKnown
+        ? t('fp2.coordinate.status.last_known')
+        : (options.frozen && hasXY ? t('fp2.coordinate.status.frozen') : '');
 
       return `
         <article class="fp2-target-card ${hasXY ? 'has-coords' : ''} ${target.filtered_out ? 'is-filtered' : ''}">
@@ -3917,7 +3970,7 @@ export class FP2Tab {
             <span class="fp2-target-dot" style="background:${color}"></span>
             <strong>${target.target_id}</strong>
             <span class="fp2-target-zone">${this.displayZoneName(target.zone_id, this.state.zones)}</span>
-            <span class="fp2-target-class ${target.target_classification || 'uncertain'}">${targetClass}${target.held ? ` · ${t('fp2.target.class.held')}` : ''}${options.frozen && hasXY ? ` · ${t('fp2.coordinate.status.frozen')}` : ''}</span>
+            <span class="fp2-target-class ${target.target_classification || 'uncertain'}">${targetClass}${target.held ? ` · ${t('fp2.target.class.held')}` : ''}${coordStatusLabel ? ` · ${coordStatusLabel}` : ''}</span>
           </div>
           <div class="fp2-target-card-body">
             <div class="fp2-target-metric"><span class="fp2-target-metric-label">${t('fp2.target.metric.xy')}</span><span>${hasXY ? `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}` : '-'}</span></div>
@@ -4288,7 +4341,9 @@ export class FP2Tab {
       zoneSig,
       layoutSig,
       trailSig,
-      this.hasFrozenCoordinates() ? 1 : 0
+      this.getCoordinateSnapshotState() === 'frozen'
+        ? 1
+        : (this.getCoordinateSnapshotState() === 'last_known' ? 2 : 0)
     ].join('~');
   }
 
@@ -4297,7 +4352,7 @@ export class FP2Tab {
       this.state.pendingVisualRefresh = true;
       return;
     }
-    const displayTargets = this.hasFrozenCoordinates()
+    const displayTargets = this.getCoordinateSnapshotState() !== 'live'
       ? (this.state.rawTargets || []).filter((target) => this.hasCoordinates(target))
       : this.getInterpolatedTargets();
     const signature = this.buildMapRenderSignature(displayTargets, this.state.rawTargets);
@@ -4662,7 +4717,8 @@ export class FP2Tab {
       const projection = this.getFixedRoomProjection(width, height, roomProfile);
       this.state.lastRoomProjection = projection;
       const { roomRect, originX, originY, toCanvasX, toCanvasY } = projection;
-      const frozen = this.hasFrozenCoordinates();
+      const snapshotState = this.getCoordinateSnapshotState();
+      const staleSnapshot = snapshotState !== 'live';
       const compactMap = roomRect.width < 420 || width < 860;
       const suppressedTargets = (allTargets || []).filter((target) => target.filtered_out && this.hasCoordinates(target));
       const roomItems = this.getActiveRoomLayoutItems(roomProfile);
@@ -4681,7 +4737,7 @@ export class FP2Tab {
       ctx.clip();
 
       const trail = this.state.trailHistory;
-      if (trail.length > 1 && (!this.hasFrozenCoordinates() || recentTrace)) {
+      if (trail.length > 1 && (!staleSnapshot || recentTrace)) {
         const getTrailKey = (target) => String(target?.target_id ?? target?.id ?? '');
         const activeKeys = new Set(
           (targets.length ? targets : (trail.at(-1)?.targets || []))
@@ -4727,14 +4783,14 @@ export class FP2Tab {
         const py = toCanvasY(target.y);
         const color = TARGET_COLORS[i % TARGET_COLORS.length];
 
-        ctx.strokeStyle = frozen ? `${color}33` : `${color}55`;
-        ctx.lineWidth = frozen ? 1.1 : 1.5;
+        ctx.strokeStyle = staleSnapshot ? `${color}33` : `${color}55`;
+        ctx.lineWidth = staleSnapshot ? 1.1 : 1.5;
         ctx.beginPath();
         ctx.moveTo(originX, originY);
         ctx.lineTo(px, py);
         ctx.stroke();
 
-        if (!frozen) {
+        if (!staleSnapshot) {
           const gradient = ctx.createRadialGradient(px, py, 0, px, py, compactMap ? 16 : 20);
           gradient.addColorStop(0, `${color}36`);
           gradient.addColorStop(1, `${color}00`);
@@ -4748,8 +4804,8 @@ export class FP2Tab {
         ctx.beginPath();
         ctx.arc(px, py, i === 0 ? 8 : 6, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = frozen ? 'rgba(255,255,255,0.82)' : '#fff';
-        ctx.lineWidth = frozen ? 1.2 : 1.5;
+        ctx.strokeStyle = staleSnapshot ? 'rgba(255,255,255,0.82)' : '#fff';
+        ctx.lineWidth = staleSnapshot ? 1.2 : 1.5;
         ctx.stroke();
         this.drawCanvasTextBubble(
           ctx,
@@ -4767,10 +4823,10 @@ export class FP2Tab {
               bottom: roomRect.y + roomRect.height - 8
             },
             maxWidth: compactMap ? 128 : 164,
-            offsetX: frozen ? 10 : 14,
-            offsetY: frozen ? -14 : -18,
-            background: frozen ? 'rgba(8, 15, 28, 0.9)' : 'rgba(8, 15, 28, 0.82)',
-            border: frozen ? 'rgba(148, 163, 184, 0.22)' : 'rgba(148, 163, 184, 0.18)'
+            offsetX: staleSnapshot ? 10 : 14,
+            offsetY: staleSnapshot ? -14 : -18,
+            background: staleSnapshot ? 'rgba(8, 15, 28, 0.9)' : 'rgba(8, 15, 28, 0.82)',
+            border: staleSnapshot ? 'rgba(148, 163, 184, 0.22)' : 'rgba(148, 163, 184, 0.18)'
           }
         );
       });

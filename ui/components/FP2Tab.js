@@ -4423,8 +4423,8 @@ export class FP2Tab {
 
       const minBox = Math.min(width, depth);
       const iconFontPx = Math.max(10, Math.min(14, Math.round(minBox / 4)));
-      const labelFontPx = Math.max(8, Math.min(11, Math.round(minBox / 6)));
-      const showInlineLabel = width >= 64 && depth >= 34 && !['door', 'curtain', 'tv'].includes(item.type);
+      const labelFontPx = Math.max(9, Math.min(12, Math.round(minBox / 5.5)));
+      const showInlineLabel = width >= 110 && depth >= 52 && !['door', 'curtain', 'tv'].includes(item.type);
 
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `600 ${iconFontPx}px sans-serif`;
@@ -4436,7 +4436,7 @@ export class FP2Tab {
 
       if (showInlineLabel) {
         ctx.font = `600 ${labelFontPx}px sans-serif`;
-        const label = this.fitCanvasText(ctx, this.getRoomItemLabel(item), Math.max(24, width - 16));
+        const label = this.fitCanvasText(ctx, this.getRoomItemLabel(item), Math.max(40, width - 18));
         ctx.fillText(label, 0, Math.min(depth / 2 - 10, 14));
       }
       ctx.shadowBlur = 0;
@@ -4541,7 +4541,7 @@ export class FP2Tab {
           py,
           [
             String(target.target_id || `target_${i}`),
-            `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`
+            `${Math.round(target.distance || 0)} cm · ${Math.round(target.angle || 0)}°`
           ],
           {
             bounds: {
@@ -4785,7 +4785,7 @@ export class FP2Tab {
         py,
         [
           String(target.target_id || `target_${i}`),
-          `${this.fmtCoord(target.x)}, ${this.fmtCoord(target.y)}`
+          `${Math.round(target.distance || 0)} cm · ${Math.round(target.angle || 0)}°`
         ],
         {
           bounds: {

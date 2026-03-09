@@ -656,6 +656,7 @@ body::before {
   justify-content: flex-start;
   min-width: 0;
   width: 100%;
+  overflow-x: clip;
 }
 .fp2-map-toolbar { max-width: 100%; }
 .fp2-map-toolbar > * { min-width: 0; }
@@ -740,6 +741,7 @@ body::before {
   gap: 6px;
   flex-wrap: wrap;
   min-width: 0;
+  overflow-x: clip;
 }
 .fp2-map-layout-actions { max-width: 100%; }
 .fp2-map-layout-actions > * { max-width: 100%; }
@@ -756,6 +758,7 @@ body::before {
   border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.22);
   contain: layout paint size;
+  overflow: hidden;
 }
 .btn-reset {
   appearance: none;
@@ -774,10 +777,11 @@ body::before {
 }
 .fp2-layout-library {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(110px, 100%), 1fr));
   gap: 10px;
   margin-bottom: 12px;
   overflow: hidden;
+  width: 100%;
 }
 .fp2-layout-library-item {
   display: flex;
@@ -814,6 +818,8 @@ body::before {
   font-size: 0.76rem;
   font-weight: 600;
   color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .fp2-layout-edit-btn.is-active {
   background: rgba(var(--accent-rgb), 0.16);

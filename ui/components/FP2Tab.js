@@ -4608,10 +4608,9 @@ export class FP2Tab {
       }
 
       const minBox = Math.min(width, depth);
-      const iconFontPx = Math.max(14, Math.min(22, Math.round(minBox / 2.8)));
-      const labelFontPx = Math.max(12, Math.min(15, Math.round(minBox / 3.5)));
-      const showInlineLabel = !['door', 'curtain', 'tv'].includes(item.type)
-        && (isSelected || (width >= 118 && depth >= 58));
+      const iconFontPx = Math.max(14, Math.min(24, Math.round(minBox / 2.5)));
+      const labelFontPx = Math.max(12, Math.min(14, Math.round(minBox / 3.8)));
+      const shouldDrawInlineLabel = false;
 
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `700 ${iconFontPx}px Inter, system-ui, sans-serif`;
@@ -4621,7 +4620,7 @@ export class FP2Tab {
       ctx.shadowBlur = 8;
 
       let inlineLabelLines = [];
-      if (showInlineLabel) {
+      if (shouldDrawInlineLabel) {
         ctx.font = `700 ${labelFontPx}px Inter, system-ui, sans-serif`;
         inlineLabelLines = this.fitCanvasTextLines(ctx, labelText, Math.max(52, width - 22), 2);
       }
@@ -4671,17 +4670,17 @@ export class FP2Tab {
       }
       ctx.restore();
 
-      const shouldDrawExternalLabel = !inlineLabelLines.length || depth < 70;
+      const shouldDrawExternalLabel = true;
       if (shouldDrawExternalLabel) {
         const tagY = centerY - (depth / 2) - 34 < labelBounds.top
           ? centerY + (depth / 2) + 10
           : centerY - (depth / 2) - 30;
         this.drawCanvasTag(ctx, centerX, tagY, labelText, {
           bounds: labelBounds,
-          maxWidth: Math.min(190, Math.max(90, roomRect.width * 0.22)),
+          maxWidth: Math.min(220, Math.max(112, roomRect.width * 0.25)),
           font: `700 ${Math.max(11, Math.min(13, labelFontPx))}px Inter, system-ui, sans-serif`,
-          background: isSelected ? 'rgba(8, 15, 28, 0.9)' : 'rgba(8, 15, 28, 0.78)',
-          border: isSelected ? 'rgba(248,250,252,0.34)' : 'rgba(148, 163, 184, 0.18)'
+          background: isSelected ? 'rgba(8, 15, 28, 0.94)' : 'rgba(8, 15, 28, 0.86)',
+          border: isSelected ? 'rgba(248,250,252,0.38)' : 'rgba(148, 163, 184, 0.22)'
         });
       }
     });
@@ -4707,32 +4706,41 @@ export class FP2Tab {
       this.drawRoomLayoutItems(ctx, projection, roomItems);
 
       const trail = this.state.trailHistory;
-      if (trail.length > 1) {
+      if (trail.length > 1 && (!this.hasFrozenCoordinates() || recentTrace)) {
+        const getTrailKey = (target) => String(target?.target_id ?? target?.id ?? '');
+        const activeKeys = new Set(
+          (targets.length ? targets : (trail.at(-1)?.targets || []))
+            .map(getTrailKey)
+            .filter(Boolean)
+        );
         const byId = new Map();
         trail.forEach(snapshot => {
           snapshot.targets.forEach(target => {
-            if (!byId.has(target.id)) byId.set(target.id, []);
-            byId.get(target.id).push(target);
+            const key = getTrailKey(target);
+            if (activeKeys.size && key && !activeKeys.has(key)) return;
+            if (!byId.has(key || `trail_${byId.size}`)) byId.set(key || `trail_${byId.size}`, []);
+            byId.get(key || `trail_${byId.size}`).push(target);
           });
         });
 
         let colorIndex = 0;
         byId.forEach(points => {
-          if (points.length < 2) {
+          const visiblePoints = points.slice(-10);
+          if (visiblePoints.length < 2) {
             colorIndex++;
             return;
           }
 
           const color = TARGET_COLORS[colorIndex % TARGET_COLORS.length];
           colorIndex++;
-          for (let i = 1; i < points.length; i++) {
-            const opacity = 0.06 + (i / points.length) * 0.2;
+          for (let i = 1; i < visiblePoints.length; i++) {
+            const opacity = 0.035 + (i / visiblePoints.length) * 0.085;
             ctx.globalAlpha = opacity;
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1.4;
+            ctx.lineWidth = 1.05;
             ctx.beginPath();
-            ctx.moveTo(toCanvasX(points[i - 1].x), toCanvasY(points[i - 1].y));
-            ctx.lineTo(toCanvasX(points[i].x), toCanvasY(points[i].y));
+            ctx.moveTo(toCanvasX(visiblePoints[i - 1].x), toCanvasY(visiblePoints[i - 1].y));
+            ctx.lineTo(toCanvasX(visiblePoints[i].x), toCanvasY(visiblePoints[i].y));
             ctx.stroke();
           }
           ctx.globalAlpha = 1;

@@ -232,6 +232,11 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
 
     ui_dir = _resolve_ui_directory()
     ui_index = ui_dir / "index.html" if ui_dir else None
+    no_cache_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
 
     def should_serve_ui() -> bool:
         return ui_index is not None and ui_index.exists()
@@ -250,7 +255,7 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
     async def root():
         """Root endpoint with embedded UI when available."""
         if should_serve_ui():
-            return FileResponse(ui_index)
+            return FileResponse(ui_index, headers=no_cache_headers)
         return {
             "name": settings.app_name,
             "version": settings.version,
@@ -302,8 +307,8 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
 
         asset = resolve_ui_asset(normalized)
         if asset is not None:
-            return FileResponse(asset)
-        return FileResponse(ui_index)
+            return FileResponse(asset, headers=no_cache_headers)
+        return FileResponse(ui_index, headers=no_cache_headers)
     
     @app.get(f"{settings.api_prefix}/info")
     async def api_info(request: Request):

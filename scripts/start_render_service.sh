@@ -9,6 +9,7 @@ FP2_MONITOR_LOG_LEVEL="${FP2_MONITOR_LOG_LEVEL:-INFO}"
 
 BACKEND_PID=""
 MONITOR_PID=""
+MONITOR_RESTART_DELAY="${FP2_MONITOR_RESTART_DELAY:-5}"
 
 cleanup() {
   if [ -n "${MONITOR_PID:-}" ]; then
@@ -38,10 +39,18 @@ if ! curl -sf "${BACKEND_URL}/health/live" >/dev/null 2>&1; then
 fi
 
 echo "Starting Aqara Cloud monitor against ${BACKEND_URL}"
-python3 /app/scripts/fp2_aqara_cloud_monitor.py \
-  --backend "${BACKEND_URL}" \
-  --interval "${FP2_POLL_INTERVAL}" \
-  --log-level "${FP2_MONITOR_LOG_LEVEL}" &
+(
+  while true; do
+    echo "Launching Aqara Cloud monitor loop"
+    python3 /app/scripts/fp2_aqara_cloud_monitor.py \
+      --backend "${BACKEND_URL}" \
+      --interval "${FP2_POLL_INTERVAL}" \
+      --log-level "${FP2_MONITOR_LOG_LEVEL}"
+    EXIT_CODE=$?
+    echo "Aqara Cloud monitor exited with code ${EXIT_CODE}; restarting in ${MONITOR_RESTART_DELAY}s"
+    sleep "${MONITOR_RESTART_DELAY}"
+  done
+) &
 MONITOR_PID=$!
 
 wait "${BACKEND_PID}"

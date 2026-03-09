@@ -80,9 +80,11 @@ def _should_refresh_from_cloud(
 ) -> bool:
     if not aqara_cloud_service.is_configured:
         return False
+    if snapshot is None:
+        return True
     source = _snapshot_source(snapshot)
     if source == "aqara_cloud":
-        return True
+        return False
     return not _has_direct_hap_pairing()
 
 
@@ -225,12 +227,13 @@ def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) ->
         source = str(snapshot.raw_attributes.get("source") or "hap_direct")
     payload["metadata"]["source"] = source
     payload["metadata"]["entity_id"] = source
-    payload["metadata"]["available"] = False
-    payload["metadata"]["presence"] = False
+    payload["metadata"]["available"] = snapshot is not None
+    payload["metadata"]["presence"] = bool(snapshot.presence) if snapshot is not None else False
     payload["metadata"]["stale"] = True
     payload["metadata"]["error"] = reason
-    payload["persons"] = []
-    payload["zone_summary"] = {}
+    if snapshot is None:
+        payload["persons"] = []
+        payload["zone_summary"] = {}
     return payload
 
 

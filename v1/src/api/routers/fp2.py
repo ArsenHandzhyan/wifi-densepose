@@ -63,6 +63,33 @@ def _get_recent_hap_snapshot(max_age_sec: float = 15.0) -> Optional[FP2Snapshot]
     return snapshot
 
 
+def _snapshot_source(snapshot: Optional[FP2Snapshot]) -> str:
+    if snapshot is None:
+        return ""
+    return str(snapshot.raw_attributes.get("source") or "hap_direct")
+
+
+def _should_refresh_from_cloud(
+    snapshot: Optional[FP2Snapshot],
+    aqara_cloud_service: AqaraCloudService,
+) -> bool:
+    if not aqara_cloud_service.is_configured:
+        return False
+    source = _snapshot_source(snapshot)
+    if source == "aqara_cloud":
+        return True
+    return not _has_direct_hap_pairing()
+
+
+async def _fetch_and_ingest_cloud_payload(aqara_cloud_service: AqaraCloudService) -> dict[str, Any]:
+    payload = await aqara_cloud_service.fetch_current_pose_payload()
+    payload.setdefault("metadata", {})
+    payload["metadata"]["source"] = "aqara_cloud"
+    payload["metadata"]["cloud_refresh"] = True
+    await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
+    return payload
+
+
 def _load_pairing_metadata() -> Dict[str, Any]:
     """Read saved HAP pairing metadata if present."""
     if not _PAIRING_DATA_PATH.exists():
@@ -401,11 +428,19 @@ def _update_cloud_event_state(message: Dict[str, Any]) -> None:
 @router.get("/status")
 async def get_fp2_status(
     fp2_service: FP2Service = Depends(get_fp2_service),
+    aqara_cloud_service: AqaraCloudService = Depends(get_aqara_cloud_service),
 ):
     """Get FP2 integration status."""
     status = await fp2_service.get_status()
     latest_hap_snapshot = _get_latest_hap_snapshot()
     hap_snapshot = _get_recent_hap_snapshot()
+    if hap_snapshot is None and _should_refresh_from_cloud(latest_hap_snapshot, aqara_cloud_service):
+        try:
+            await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
+            latest_hap_snapshot = _get_latest_hap_snapshot()
+            hap_snapshot = _get_recent_hap_snapshot()
+        except Exception as exc:
+            logger.warning("Failed to refresh Aqara Cloud status snapshot: %s", exc)
     status["device"] = _build_device_metadata(fp2_service)
     if hap_snapshot is not None:
         source = str(hap_snapshot.raw_attributes.get("source") or "hap_direct")
@@ -520,13 +555,19 @@ async def get_fp2_current_pose_like_data(
         return data
 
     hap_snapshot = _get_recent_hap_snapshot()
+    latest_hap_snapshot = _get_latest_hap_snapshot()
     if hap_snapshot is not None:
         snapshot = hap_snapshot
         source = str(snapshot.raw_attributes.get("source") or "hap_direct")
         resolved_entity_id = source
-    elif _get_latest_hap_snapshot() is not None:
+    elif _should_refresh_from_cloud(latest_hap_snapshot, aqara_cloud_service):
+        try:
+            return await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
+        except Exception as exc:
+            _raise_cloud_http_error(exc)
+    elif latest_hap_snapshot is not None:
         return _build_stale_hap_payload(
-            _get_latest_hap_snapshot(),
+            latest_hap_snapshot,
             reason="FP2 direct stream is stale or the device is offline",
         )
     elif _has_direct_hap_pairing():
@@ -534,16 +575,6 @@ async def get_fp2_current_pose_like_data(
             None,
             reason="Direct HAP stream is stale or the FP2 device is offline",
         )
-    elif aqara_cloud_service.is_configured:
-        try:
-            payload = await aqara_cloud_service.fetch_current_pose_payload()
-            payload.setdefault("metadata", {})
-            payload["metadata"]["source"] = "aqara_cloud"
-            payload["metadata"]["cloud_refresh"] = True
-            await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
-            return payload
-        except Exception as exc:
-            _raise_cloud_http_error(exc)
     else:
         resolved_entity_id = await fp2_service.resolve_entity_id(entity_id)
         snapshot = await fp2_service.fetch_snapshot(entity_id=resolved_entity_id)

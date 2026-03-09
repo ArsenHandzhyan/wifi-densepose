@@ -45,6 +45,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _PAIRING_DATA_PATH = _PROJECT_ROOT / ".fp2_pairing.json"
 _MAC_RE = re.compile(r"([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}", re.IGNORECASE)
 _PRESENCE_MOVEMENT_EVENTS = {1, 2, 3, 4, 8, 9}
+_CLOUD_REFRESH_LOCK = asyncio.Lock()
+_CLOUD_REFRESH_BLOCKED_UNTIL = 0.0
+_CLOUD_REFRESH_LAST_ERROR = ""
 
 
 def _get_latest_hap_snapshot() -> Optional[FP2Snapshot]:
@@ -95,6 +98,56 @@ async def _fetch_and_ingest_cloud_payload(aqara_cloud_service: AqaraCloudService
     payload["metadata"]["cloud_refresh"] = True
     await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
     return payload
+
+
+def _cloud_refresh_delay(exc: Exception) -> float:
+    if isinstance(exc, AqaraCloudAPIError):
+        code = str(exc.code or exc.http_status or "")
+        if code == "429" or exc.http_status == 429:
+            return 45.0
+        if code == "2006":
+            return 30.0
+
+    message = str(exc).lower()
+    if "429" in message:
+        return 45.0
+    if "2006" in message:
+        return 30.0
+    return 15.0
+
+
+def _cloud_refresh_block_reason() -> str | None:
+    remaining = max(0.0, _CLOUD_REFRESH_BLOCKED_UNTIL - time.time())
+    if remaining <= 0:
+        return None
+    base = _CLOUD_REFRESH_LAST_ERROR or "Aqara cloud refresh is temporarily paused"
+    return f"{base} ({int(round(remaining))}s)"
+
+
+async def _refresh_cloud_snapshot_with_backoff(
+    aqara_cloud_service: AqaraCloudService,
+) -> dict[str, Any]:
+    global _CLOUD_REFRESH_BLOCKED_UNTIL, _CLOUD_REFRESH_LAST_ERROR
+
+    block_reason = _cloud_refresh_block_reason()
+    if block_reason:
+        raise RuntimeError(block_reason)
+
+    async with _CLOUD_REFRESH_LOCK:
+        block_reason = _cloud_refresh_block_reason()
+        if block_reason:
+            raise RuntimeError(block_reason)
+        try:
+            payload = await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
+        except Exception as exc:
+            delay = _cloud_refresh_delay(exc)
+            _CLOUD_REFRESH_BLOCKED_UNTIL = time.time() + delay
+            _CLOUD_REFRESH_LAST_ERROR = f"Aqara cloud refresh failed: {exc}"
+            raise RuntimeError(_cloud_refresh_block_reason() or str(exc)) from exc
+
+        _CLOUD_REFRESH_BLOCKED_UNTIL = 0.0
+        _CLOUD_REFRESH_LAST_ERROR = ""
+        return payload
 
 
 def _load_pairing_metadata() -> Dict[str, Any]:
@@ -217,14 +270,19 @@ def _record_raw_capture(snapshot: FP2Snapshot) -> None:
     )
 
 
-def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) -> Dict[str, Any]:
+def _build_stale_hap_payload(
+    snapshot: Optional[FP2Snapshot],
+    *,
+    reason: str,
+    default_source: str = "hap_direct",
+) -> Dict[str, Any]:
     """Convert the last known pushed FP2 snapshot into an explicit offline payload."""
     fp2_service = get_fp2_service()
     payload = fp2_service.snapshot_to_pose_data(snapshot)
     payload.setdefault("metadata", {})
-    source = "hap_direct"
+    source = default_source
     if snapshot is not None:
-        source = str(snapshot.raw_attributes.get("source") or "hap_direct")
+        source = str(snapshot.raw_attributes.get("source") or default_source)
     payload["metadata"]["source"] = source
     payload["metadata"]["entity_id"] = source
     payload["metadata"]["available"] = snapshot is not None
@@ -235,6 +293,42 @@ def _build_stale_hap_payload(snapshot: Optional[FP2Snapshot], *, reason: str) ->
         payload["persons"] = []
         payload["zone_summary"] = {}
     return payload
+
+
+def _apply_cloud_waiting_status(
+    status: Dict[str, Any],
+    aqara_cloud_service: AqaraCloudService,
+    *,
+    reason: str,
+) -> None:
+    device = aqara_cloud_service.get_device_summary()
+    status["source"] = "aqara_cloud"
+    status["hap_connected"] = False
+    status["stream_connected"] = False
+    status["running"] = True
+    status["status"] = "degraded"
+    status["entity_id"] = "aqara_cloud"
+    status["last_snapshot"] = None
+    status["presence"] = False
+    status["presence_raw"] = False
+    status["presence_mode"] = "waiting"
+    status["presence_reason"] = reason
+    status.setdefault("stats", {})
+    status["stats"]["mode"] = "aqara_cloud"
+    status["stats"]["last_error"] = reason
+    status["stats"]["last_entity_state"] = "aqara_cloud_waiting"
+    status["connection"] = {
+        "transport": "aqara_cloud",
+        "state": "waiting",
+        "last_update_age_sec": None,
+        "light_level": None,
+        "targets": 0,
+        "zones": [],
+        "rssi": None,
+        "online": None,
+        "position_id": device.get("position_id"),
+        "api_domain": device.get("api_domain"),
+    }
 
 
 def _evaluate_presence_signals(snapshot: Optional[FP2Snapshot]) -> Dict[str, Any]:
@@ -444,7 +538,7 @@ async def get_fp2_status(
     hap_snapshot = _get_recent_hap_snapshot()
     if hap_snapshot is None and _should_refresh_from_cloud(latest_hap_snapshot, aqara_cloud_service):
         try:
-            await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
+            await _refresh_cloud_snapshot_with_backoff(aqara_cloud_service)
             latest_hap_snapshot = _get_latest_hap_snapshot()
             hap_snapshot = _get_recent_hap_snapshot()
         except Exception as exc:
@@ -532,6 +626,9 @@ async def get_fp2_status(
             "position_id": connection.get("position_id"),
             "api_domain": connection.get("api_domain"),
         }
+    elif aqara_cloud_service.is_configured and not _has_direct_hap_pairing():
+        reason = _cloud_refresh_block_reason() or "Waiting for Aqara cloud snapshot"
+        _apply_cloud_waiting_status(status, aqara_cloud_service, reason=reason)
     else:
         status["source"] = "home_assistant"
         status["hap_connected"] = False
@@ -570,14 +667,18 @@ async def get_fp2_current_pose_like_data(
         resolved_entity_id = source
     elif _should_refresh_from_cloud(latest_hap_snapshot, aqara_cloud_service):
         try:
-            return await _fetch_and_ingest_cloud_payload(aqara_cloud_service)
+            return await _refresh_cloud_snapshot_with_backoff(aqara_cloud_service)
         except Exception as exc:
             if latest_hap_snapshot is not None and _snapshot_source(latest_hap_snapshot) == "aqara_cloud":
                 return _build_stale_hap_payload(
                     latest_hap_snapshot,
                     reason=f"Cloud refresh failed; serving cached Aqara snapshot: {exc}",
                 )
-            _raise_cloud_http_error(exc)
+            return _build_stale_hap_payload(
+                None,
+                reason=f"Waiting for Aqara cloud snapshot: {exc}",
+                default_source="aqara_cloud",
+            )
     elif latest_hap_snapshot is not None:
         return _build_stale_hap_payload(
             latest_hap_snapshot,

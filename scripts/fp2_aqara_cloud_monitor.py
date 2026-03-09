@@ -601,6 +601,8 @@ class FP2CloudMonitor:
             self.client.load_resource_info(self.device.model)
             logger.info("Aqara cloud monitor initialized using current access token")
         except Exception as exc:
+            if "429" in str(exc):
+                raise
             logger.warning("Current Aqara access token bootstrap failed: %s; trying refresh", exc)
             self.client.refresh_access_token(persist=True)
             self.device = self.client.resolve_device()
@@ -653,7 +655,7 @@ class FP2CloudMonitor:
                 if self.device is None:
                     logger.info("Retrying Aqara cloud initialization in %.1fs", init_backoff)
                     time.sleep(init_backoff)
-                    init_backoff = min(init_backoff * 2, 30.0)
+                    init_backoff = min(init_backoff * 2, 60.0)
                     continue
             time.sleep(self.interval)
 

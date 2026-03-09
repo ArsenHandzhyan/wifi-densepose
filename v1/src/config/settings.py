@@ -178,6 +178,20 @@ class Settings(BaseSettings):
     aqara_refresh_token: str = Field(default="", description="Aqara Open API refresh token")
     aqara_open_id: str = Field(default="", description="Aqara authorized user open id")
     aqara_access_token_expires: str = Field(default="", description="Aqara token expiry timestamp")
+
+    # FP2 layout persistence settings
+    fp2_layout_storage_backend: str = Field(
+        default="auto",
+        description="Layout storage backend: auto, db, r2, file",
+    )
+    fp2_layout_r2_prefix: str = Field(
+        default="fp2-layout-state",
+        description="Cloudflare R2 prefix for persisted FP2 layouts",
+    )
+    cloudflare_r2_account_id: str = Field(default="", description="Cloudflare R2 account id")
+    cloudflare_r2_access_key_id: str = Field(default="", description="Cloudflare R2 access key id")
+    cloudflare_r2_secret_access_key: str = Field(default="", description="Cloudflare R2 secret access key")
+    cloudflare_r2_bucket: str = Field(default="", description="Cloudflare R2 bucket name")
     
     # Cleanup settings
     csi_data_retention_days: int = Field(default=30, description="CSI data retention in days")

@@ -24,6 +24,7 @@ The old CSI / DensePose / WiFi sensing experiments are not part of the active ru
 - Public Render deployment with backend-served UI
 - Room/layout export from local UI and import into Render UI
 - Backend-backed room/template/item persistence through `/api/v1/fp2/layout-state`
+- Optional external room/template/item persistence through Cloudflare R2 when `CLOUDFLARE_R2_*` is configured
 
 ## Local Start
 
@@ -77,6 +78,7 @@ Room profiles, calibration, templates, and room items are now written to backend
 
 Runtime behavior:
 
+- If `CLOUDFLARE_R2_*` and `FP2_LAYOUT_STORAGE_BACKEND=auto|r2` are configured, layout state is stored in Cloudflare R2
 - On Render, when `DATABASE_URL` is set, layout state is stored in PostgreSQL
 - If PostgreSQL is unavailable, the backend falls back to SQLite or file fallback depending on runtime
 - The UI shows the active storage backend in the room-layout section
@@ -98,6 +100,7 @@ Recommended migration flow from an older local browser state:
 - Current live transport is `aqara_cloud`
 - The backend now refreshes cloud snapshots before stale fallback in cloud mode
 - If direct cloud refresh fails on Render, `/api/v1/fp2/current` now falls back to the latest cached Aqara snapshot instead of returning `502`
+- The backend now persists the last successful Aqara cloud snapshot so `current` can still serve a stale-but-usable target map during short auth or rate-limit failures
 - The UI now polls `/api/v1/fp2/current` in cloud mode so Render shows fresh target coordinates
 - Render is intended to run the same cloud monitor loop as local startup so `4.22.85` stays enabled
 - Direct `HomeKit/HAP` pairing was investigated, but it is not the active runtime path

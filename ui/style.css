@@ -74,7 +74,7 @@ body::before {
 
 /* ── Container ─────────────────────────────────────────────── */
 .container {
-  width: min(100%, 1480px);
+  width: min(calc(100vw - 24px), 1480px);
   max-width: 1480px;
   margin: 0 auto;
   padding: clamp(14px, 2vw, var(--gap-lg));
@@ -639,10 +639,17 @@ body::before {
 }
 .fp2-map-toolbar { max-width: 100%; }
 .fp2-map-toolbar > * { min-width: 0; }
+.fp2-map-toolbar > .btn,
+.fp2-map-toolbar > .chip,
+.fp2-map-toolbar > .fp2-map-toggle,
+.fp2-map-toolbar > .fp2-map-calibration,
+.fp2-map-toolbar > .fp2-map-profile-picker { max-width: 100%; }
 .fp2-map-profile-picker {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: min(220px, 100%);
+  flex: 1 1 180px;
 }
 .fp2-map-calibration {
   display: flex;
@@ -652,6 +659,9 @@ body::before {
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   background: var(--bg-inset);
+  min-width: min(280px, 100%);
+  max-width: 100%;
+  flex: 1 1 260px;
 }
 .fp2-map-calibration-buttons {
   display: flex;
@@ -712,6 +722,7 @@ body::before {
   min-width: 0;
 }
 .fp2-map-layout-actions { max-width: 100%; }
+.fp2-map-layout-actions > * { max-width: 100%; }
 .fp2-map-badge-count {
   font-size: 0.72rem;
   color: var(--text-dim);
@@ -838,7 +849,7 @@ body::before {
 }
 .fp2-layout-items {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
   gap: 10px;
   max-width: 100%;
 }
@@ -898,6 +909,7 @@ body::before {
   font-size: 0.72rem;
   color: var(--text-dim);
   font-family: var(--mono);
+  overflow-wrap: anywhere;
 }
 .fp2-layout-item-actions {
   display: grid;
@@ -1331,6 +1343,8 @@ body::before {
   .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .fp2-map-toolbar { flex-direction: column; align-items: stretch; }
   .fp2-map-select { min-width: 0; width: 100%; }
+  .fp2-map-profile-picker,
+  .fp2-map-calibration { min-width: 0; width: 100%; }
   .fp2-map-calibration-buttons { flex-direction: column; }
   .fp2-layout-inspector-grid { grid-template-columns: 1fr; }
   .fp2-layout-items { grid-template-columns: 1fr; }

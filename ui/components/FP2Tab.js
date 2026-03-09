@@ -700,8 +700,8 @@ export class FP2Tab {
       offsetY = -18,
       paddingX = 10,
       paddingY = 7,
-      titleFont = '600 12px "SFMono-Regular", "JetBrains Mono", monospace',
-      bodyFont = '11px "SFMono-Regular", "JetBrains Mono", monospace',
+      titleFont = '600 13px "SFMono-Regular", "JetBrains Mono", monospace',
+      bodyFont = '12px "SFMono-Regular", "JetBrains Mono", monospace',
       background = 'rgba(8, 15, 28, 0.82)',
       border = 'rgba(148, 163, 184, 0.18)',
       titleColor = '#e2e8f0',
@@ -853,7 +853,7 @@ export class FP2Tab {
   normalizeRoomConfigStorageBackend(value) {
     if (typeof value !== 'string') return 'unknown';
     const normalized = value.trim().toLowerCase();
-    if (['postgresql', 'sqlite_fallback', 'file_fallback', 'unavailable'].includes(normalized)) {
+    if (['postgresql', 'sqlite_fallback', 'file_fallback', 'r2', 'unavailable'].includes(normalized)) {
       return normalized;
     }
     return 'unknown';
@@ -872,6 +872,11 @@ export class FP2Tab {
     }
 
     switch (this.state.roomConfigStorageBackend) {
+      case 'r2':
+        return {
+          text: t('fp2.layout.storage.r2'),
+          className: 'chip chip--ok'
+        };
       case 'postgresql':
         return {
           text: t('fp2.layout.storage.cloud_db'),
@@ -4292,8 +4297,8 @@ export class FP2Tab {
 
   getFixedRoomProjection(width, height, profile) {
     const marginX = 42;
-    const marginTop = 28;
-    const marginBottom = 44;
+    const marginTop = 40;
+    const marginBottom = 56;
     const availableWidth = width - marginX * 2;
     const availableHeight = height - marginTop - marginBottom - 18;
     const geometry = this.getActiveRoomGeometry(profile) || {
@@ -4363,14 +4368,14 @@ export class FP2Tab {
     }
 
     ctx.fillStyle = '#f8fafc';
-    ctx.font = '600 12px sans-serif';
-    ctx.fillText(this.getRoomProfileLabel(profile), roomRect.x + 16, roomRect.y + 24);
+    ctx.font = '600 13px sans-serif';
+    ctx.fillText(this.getRoomProfileLabel(profile), roomRect.x + 16, roomRect.y + 28);
     ctx.fillStyle = 'rgba(148,163,184,0.75)';
-    ctx.font = '10px monospace';
+    ctx.font = '11px monospace';
     ctx.fillText(
       `${Math.round(widthCm)} × ${Math.round(depthCm)} cm${calibrated ? ` · ${t('fp2.layout.calibrated_short')}` : ''}`,
       roomRect.x + 16,
-      roomRect.y + 40
+      roomRect.y + 46
     );
 
     if (Number.isFinite(calibration?.leftX)) {
@@ -4489,10 +4494,10 @@ export class FP2Tab {
       }
 
       const minBox = Math.min(width, depth);
-      const iconFontPx = Math.max(13, Math.min(20, Math.round(minBox / 3.1)));
-      const labelFontPx = Math.max(11, Math.min(15, Math.round(minBox / 4.2)));
+      const iconFontPx = Math.max(14, Math.min(22, Math.round(minBox / 2.9)));
+      const labelFontPx = Math.max(11, Math.min(16, Math.round(minBox / 3.8)));
       const showInlineLabel = !['door', 'curtain', 'tv'].includes(item.type)
-        && (isSelected || (width >= 120 && depth >= 58));
+        && (isSelected || (width >= 110 && depth >= 54));
 
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `600 ${iconFontPx}px sans-serif`;

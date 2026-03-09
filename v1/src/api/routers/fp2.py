@@ -43,6 +43,7 @@ _raw_capture_history = deque(maxlen=400)
 _raw_capture_sequence = 0
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _PAIRING_DATA_PATH = _PROJECT_ROOT / ".fp2_pairing.json"
+_PERSISTED_CLOUD_SNAPSHOT_PATH = Path("/tmp/fp2_last_cloud_snapshot.json")
 _MAC_RE = re.compile(r"([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}", re.IGNORECASE)
 _PRESENCE_MOVEMENT_EVENTS = {1, 2, 3, 4, 8, 9}
 _CLOUD_REFRESH_LOCK = asyncio.Lock()
@@ -97,7 +98,44 @@ async def _fetch_and_ingest_cloud_payload(aqara_cloud_service: AqaraCloudService
     payload["metadata"]["source"] = "aqara_cloud"
     payload["metadata"]["cloud_refresh"] = True
     await _ingest_fp2_payload(HAPPushPayload.model_validate(payload))
+    _persist_cloud_pose_payload(payload)
     return payload
+
+
+def _persist_cloud_pose_payload(payload: dict[str, Any]) -> None:
+    try:
+        _PERSISTED_CLOUD_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PERSISTED_CLOUD_SNAPSHOT_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist last Aqara cloud snapshot: %s", exc)
+
+
+def _load_persisted_cloud_pose_payload() -> dict[str, Any] | None:
+    if not _PERSISTED_CLOUD_SNAPSHOT_PATH.exists():
+        return None
+    try:
+        payload = json.loads(_PERSISTED_CLOUD_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.warning("Failed to load persisted Aqara cloud snapshot: %s", exc)
+        return None
+
+
+def _build_stale_cloud_payload_from_cache(payload: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    cached = json.loads(json.dumps(payload, ensure_ascii=False))
+    metadata = cached.setdefault("metadata", {})
+    metadata["source"] = "aqara_cloud"
+    metadata["entity_id"] = "aqara_cloud"
+    metadata["available"] = True
+    metadata["stale"] = True
+    metadata["error"] = reason
+    connection = cached.setdefault("connection", {})
+    connection.setdefault("transport", "aqara_cloud")
+    connection["state"] = "stale_cached"
+    return cached
 
 
 def _cloud_refresh_delay(exc: Exception) -> float:
@@ -674,6 +712,12 @@ async def get_fp2_current_pose_like_data(
                     latest_hap_snapshot,
                     reason=f"Cloud refresh failed; serving cached Aqara snapshot: {exc}",
                 )
+            persisted_cloud_payload = _load_persisted_cloud_pose_payload()
+            if persisted_cloud_payload is not None:
+                return _build_stale_cloud_payload_from_cache(
+                    persisted_cloud_payload,
+                    reason=f"Cloud refresh failed; serving persisted Aqara snapshot: {exc}",
+                )
             return _build_stale_hap_payload(
                 None,
                 reason=f"Waiting for Aqara cloud snapshot: {exc}",
@@ -1168,10 +1212,18 @@ async def _ingest_fp2_payload(payload: HAPPushPayload) -> Dict[str, Any]:
     _hap_latest["device"] = payload.device
     _hap_latest["connection"] = payload.connection
     _record_raw_capture(snapshot)
+    if payload.source == "aqara_cloud":
+        fp2_service = get_fp2_service()
+        cached_payload = fp2_service.snapshot_to_pose_data(snapshot)
+        cached_payload.setdefault("metadata", {})
+        cached_payload["metadata"]["source"] = "aqara_cloud"
+        cached_payload["metadata"]["available"] = True
+        cached_payload["metadata"]["entity_id"] = "aqara_cloud"
+        cached_payload["connection"] = dict(payload.connection or {})
+        _persist_cloud_pose_payload(cached_payload)
 
     # Also update fp2_service's last snapshot if available
     try:
-        fp2_service = get_fp2_service()
         fp2_service._last_snapshot = snapshot
         await fp2_service._notify_listeners(snapshot)
     except Exception:

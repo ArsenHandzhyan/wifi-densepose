@@ -55,6 +55,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
   - bedside / sleep telemetry
 - Room profile and room-item transfer through `Export Layout` / `Import Layout`
 - Backend layout persistence through `/api/v1/fp2/layout-state`
+- Optional Cloudflare R2 persistence for room layouts when `CLOUDFLARE_R2_*` is configured
 
 ## Important Runtime Improvements Since 2026-03-07
 
@@ -62,6 +63,7 @@ This is the only actively maintained telemetry path in the tracked runtime.
 - Render now starts the cloud monitor inside the same web service, instead of relying only on on-demand refresh
 - Backend refreshes Aqara Cloud snapshots before stale fallback in cloud mode
 - `/api/v1/fp2/current` now falls back to the last cached Aqara snapshot if a direct cloud refresh fails, instead of breaking the UI with `502`
+- The backend persists the last successful Aqara cloud snapshot, so Render can still draw a stale target map after short auth or rate-limit failures
 - UI in cloud mode now polls `/api/v1/fp2/current`, which fixed stale target coordinates on Render
 - Layout export/import was added so existing browser-local room configuration can be moved into backend-backed storage
 - Scenario application now handles bedside reset more explicitly when switching away from sleep mode

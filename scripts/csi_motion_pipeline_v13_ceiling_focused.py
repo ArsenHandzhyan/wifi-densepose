@@ -296,7 +296,7 @@ X_normed = X_all.copy()
 for epoch in df["__epoch"].unique():
     mask = epochs == epoch
     scaler = StandardScaler()
-    X_normed.loc[mask] = scaler.fit_transform(X_normed.loc[mask])
+    X_normed.loc[mask] = scaler.fit_transform(X_normed.loc[mask]).astype(np.float32)
 
 # Use top MI features from global
 for n_feat in [50, 100, 200]:

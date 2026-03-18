@@ -25,7 +25,7 @@ UDP_PORT = 5005
 NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137"])
 WINDOW_SEC = 5.0
 CSI_HEADER = 20
-BUFFER_WINDOWS = 3  # keep last N windows for smoothing
+BUFFER_WINDOWS = 3  # keep recent history; binary smoothing is not applied here yet
 MAX_BUFFER_SEC = 30  # max seconds of packets to keep in memory
 
 # Garage geometry (meters). Origin = center of room.
@@ -78,7 +78,7 @@ class CsiPredictionService:
                        "door": {"x": DOOR_POSITION[0], "y": DOOR_POSITION[1]}},
             "history": [],
         }
-        self._prev_target = (0.0, 0.0)  # for smoothing
+        self._prev_target = (0.0, 0.0)  # for position smoothing only
         self._node_baselines = {}  # running mean per node for relative positioning
 
     def load_model(self, path: str | Path | None = None):
@@ -354,7 +354,12 @@ class CsiPredictionService:
         if bin_pred == 1 and self.coarse_model is not None:
             coarse_pred = self.coarse_model.predict(X)[0]
             coarse_proba = self.coarse_model.predict_proba(X)[0]
-            coarse_label = self.coarse_labels.get(coarse_pred, "unknown")
+            # coarse_pred may be int (old models) or string (frozen_twostage_v1)
+            if isinstance(coarse_pred, str):
+                coarse_label = coarse_pred.lower()
+            else:
+                coarse_label = self.coarse_labels.get(coarse_pred, "unknown")
+            coarse_conf = float(max(coarse_proba))
         elif bin_pred == 1:
             # No coarse model — estimate from features
             tvar_sum = sum(feat.get(f"n{i}_tvar", 0) for i in range(4))

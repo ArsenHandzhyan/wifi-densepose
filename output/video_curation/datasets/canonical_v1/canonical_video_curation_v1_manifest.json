@@ -1,0 +1,13 @@
+{
+  "type": "canonical_video_curation_v1_dataset",
+  "canonical_contract": "thresholds_candidate_v1 + empty_boundary_guard_v1",
+  "source_labels_manifest": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/labels_manifest.json",
+  "source_pipeline_stats": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/pipeline_stats.json",
+  "generated_at": "2026-03-18T22:15:51.607430",
+  "summary_file": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_summary.json",
+  "training_ready_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_training_ready.csv",
+  "training_ready_ndjson": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_training_ready.ndjson",
+  "weak_optional_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_weak_optional.csv",
+  "ambiguous_review_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_ambiguous_review.csv",
+  "reference_only_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_reference_only.csv"
+}

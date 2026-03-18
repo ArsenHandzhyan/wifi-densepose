@@ -1,0 +1,52 @@
+{
+  "total_videos": 138,
+  "quality": {
+    "good": 135,
+    "dark": 0,
+    "corrupt": 2,
+    "too_short": 1
+  },
+  "segments": {
+    "CLEAR_EMPTY": 166,
+    "CLEAR_STATIC": 698,
+    "CLEAR_MOTION": 565,
+    "AMBIGUOUS": 103,
+    "REJECT": 2
+  },
+  "labels": {
+    "EMPTY": 180,
+    "STATIC": 735,
+    "MOTION": 468,
+    "ENTRY_EXIT": 60,
+    "UNKNOWN": 91
+  },
+  "tiers": {
+    "human_verified": 349,
+    "strong_teacher": 496,
+    "weak_auto": 687,
+    "synthetic": 0,
+    "reject": 2
+  },
+  "total_windows": 1534,
+  "total_duration_sec": 8140.109461999996,
+  "thresholds_candidate_v1": {
+    "frame_diff": {
+      "empty_lt": 0.003,
+      "static_gte": 0.003,
+      "static_lt": 0.007,
+      "motion_gt": 0.007
+    },
+    "flow": {
+      "empty_lt": 0.03,
+      "static_gte": 0.03,
+      "static_lt": 0.08,
+      "motion_gt": 0.08
+    }
+  },
+  "post_label_guards": [
+    "empty_boundary_guard_v1"
+  ],
+  "canonical_contract": "thresholds_candidate_v1 + empty_boundary_guard_v1",
+  "generated_at": "2026-03-19T00:45:21.369104",
+  "elapsed_sec": 158.9
+}

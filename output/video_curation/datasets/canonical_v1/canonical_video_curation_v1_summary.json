@@ -1,0 +1,100 @@
+{
+  "generated_at": "2026-03-18T22:15:51.607025",
+  "canonical_contract": "thresholds_candidate_v1 + empty_boundary_guard_v1",
+  "source_labels_manifest": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/labels_manifest.json",
+  "source_pipeline_stats": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/pipeline_stats.json",
+  "layers": {
+    "training_ready": {
+      "row_count": 751,
+      "clip_count": 109,
+      "label_counts": {
+        "EMPTY": 50,
+        "MOTION": 311,
+        "STATIC": 390
+      },
+      "tier_counts": {
+        "human_verified": 80,
+        "strong_teacher": 671
+      },
+      "split_counts": {
+        "test": 30,
+        "train": 654,
+        "val": 67
+      }
+    },
+    "weak_optional": {
+      "row_count": 621,
+      "clip_count": 42,
+      "label_counts": {
+        "EMPTY": 117,
+        "MOTION": 214,
+        "STATIC": 290
+      },
+      "tier_counts": {
+        "weak_auto": 621
+      },
+      "split_counts": {
+        "holdout": 621
+      }
+    },
+    "ambiguous_review": {
+      "row_count": 100,
+      "clip_count": 32,
+      "label_counts": {
+        "UNKNOWN": 100
+      },
+      "tier_counts": {
+        "reject": 1,
+        "weak_auto": 99
+      },
+      "split_counts": {
+        "review": 100
+      }
+    },
+    "reference_only": {
+      "row_count": 62,
+      "clip_count": 45,
+      "label_counts": {
+        "EMPTY": 1,
+        "ENTRY_EXIT": 61
+      },
+      "tier_counts": {
+        "reject": 1,
+        "strong_teacher": 37,
+        "weak_auto": 24
+      },
+      "split_counts": {
+        "holdout": 62
+      }
+    }
+  },
+  "selection_policy": {
+    "training_ready": "label in {EMPTY, STATIC, MOTION} and label_tier in {human_verified, strong_teacher}",
+    "weak_optional": "label in {EMPTY, STATIC, MOTION} and label_tier == weak_auto",
+    "ambiguous_review": "label == UNKNOWN or segment_class == AMBIGUOUS or notes contains boundary_guard",
+    "reference_only": "everything else, including ENTRY_EXIT and reject/reference windows"
+  },
+  "downstream_overlays": {
+    "empty_strengthening_overlay_v1": {
+      "clip_count": 5,
+      "clips": [
+        "pixel8pro_complex_poses_20260317_165915_clip01_empty_baseline_post",
+        "pixel8pro_garage_baseline_20260317_162107_clip01_empty_baseline",
+        "structured_static_20260318_clip01_empty_baseline",
+        "structured_static_20260318_clip02_empty_settled",
+        "structured_static_20260318_clip03_empty_long"
+      ],
+      "applied_row_count": 17,
+      "policy": "explicit empty-semantics clips that were visually audited empty are upgraded downstream-only from STATIC to human_verified EMPTY"
+    }
+  },
+  "artifacts": {
+    "master_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_master.csv",
+    "master_ndjson": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_master.ndjson",
+    "training_ready_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_training_ready.csv",
+    "training_ready_ndjson": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_training_ready.ndjson",
+    "weak_optional_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_weak_optional.csv",
+    "ambiguous_review_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_ambiguous_review.csv",
+    "reference_only_csv": "/Users/arsen/Desktop/wifi-densepose/output/video_curation/datasets/canonical_v1/canonical_video_curation_v1_reference_only.csv"
+  }
+}

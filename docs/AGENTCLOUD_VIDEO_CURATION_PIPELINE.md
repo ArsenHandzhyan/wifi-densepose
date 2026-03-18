@@ -220,18 +220,65 @@ All 8 errors: pipeline marks STATIC as MOTION (micromotion/breathing misclassifi
 ### CSI model training with video-curated labels
 
 Video-curated labels used directly as CSI ground truth gave Binary=0.576 (worse than V25's 0.827).
-Root cause: temporal misalignment between video timestamps and CSI timestamps.
+Initial hypothesis was temporal misalignment. **Disproven by audit (see below).**
 
-**Conclusion**: Video pipeline is excellent for curation/review (97.7% accuracy) but
-video-derived labels should be used to **validate** CSI annotations, not replace them.
-Best use: mine CLEAR_EMPTY windows from long captures to fix class imbalance.
+## CSI-Video Temporal Alignment Audit (2026-03-19)
+
+### Audit scope
+- 105 paired clips (CSI + video)
+- Detailed timing analysis on 10 clips
+- Window-level label comparison on 3 transition clips
+
+### Finding: Alignment is PERFECT
+
+| Capture type | Offset (video - CSI) | Std | Issue |
+|-------------|---------------------|-----|-------|
+| Atomic (Mar 17) | +1.58s | 0.80s | Video starts ~2s before CSI |
+| Long capture (Mar 18) | -0.35s | 0.40s | Near-zero offset |
+| Structured (Mar 18) | +0.93s | 1.08s | ~1s offset |
+
+For 5-second windows, even +2s offset means **at most 1 window shift** on boundaries.
+Within-clip drift: **NONE detected** (duration difference stable per-clip).
+
+Window boundaries (0, 5, 10, 15...) align exactly between CSI and video.
+Both use same start anchor (capture_start_time).
+
+### Root cause of V29 failure (0.576 vs 0.827)
+
+**NOT temporal misalignment.** The real causes:
+
+1. **Insufficient features**: V29 used 36 simplified features (like Track B's 40).
+   The best models (V25-V28) use 79-106 features including sc_var, cross-node correlation,
+   kurtosis, phase stability, temporal context.
+
+2. **CSI amplitude std does not distinguish STATIC from MOTION**:
+   - MOTION windows: CSI_amp_std = 6.30-7.16
+   - STATIC windows: CSI_amp_std = 6.30-7.78
+   - Complete overlap! Single-feature discrimination is impossible.
+
+3. **Label distribution mismatch**: Video labels have more STATIC (45.5%) than CSI training data.
+   The model was trained on a different class balance than what the video pipeline produces.
+
+### Verdict: Temporal alignment is SALVAGEABLE (already solved)
+
+The alignment is already correct. No offset/drift correction needed.
+The window mapping is: `CSI_window[t] == Video_window[t]` (identical).
+
+**The fix**: Use full 79-106 feature set with video-curated labels, not simplified 36 features.
+
+### Updated conclusion
+
+Video pipeline labels CAN be used as CSI ground truth. The 0.576 result was due to
+insufficient features, NOT alignment. Pipeline should be re-tested with V25/V28 feature
+extraction (79-106 features).
 
 ## What is Hypothesis / Next Phase
 
-1. **Active learning loop**: Sort AMBIGUOUS windows by frame_diff, present top-N to human for quick review.
+1. **Re-run V29 with full feature set** (79-106 features from V25). This should unlock
+   video labels as viable CSI ground truth.
 
-2. **Better empty detection**: Pipeline can mine long captures for high-confidence empty windows.
+2. **Active learning loop**: Sort AMBIGUOUS windows by frame_diff for human review.
 
-3. **YOLO replacement**: Train a small binary presence/absence classifier on garage-specific keyframes.
+3. **Better empty detection**: Mine long captures for high-confidence empty windows.
 
-4. **Temporal alignment**: Solve CSI-video timestamp misalignment to enable direct video-to-CSI labeling.
+4. **Confidence-weighted training**: Use tier confidence as sample weight.

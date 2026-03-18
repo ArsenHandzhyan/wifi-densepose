@@ -1,8 +1,8 @@
 # AGENT CLOUD — FROZEN TWOSTAGE RUNTIME TELEMETRY PASS
 
-## Verdict: `RUNTIME_USABLE_WITH_KNOWN_LIMITS`
+## Verdict: `RUNTIME_TOO_NOISY_FOR_PRACTICAL_USE`
 
-Runtime correctly detects occupied garage with person present. Stage 2 (STATIC/MOTION) works after coarse_labels fix. Empty-room false positive rate needs separate validation pass.
+Runtime shows 100% false positive on empty garage — even offline model predicts P(OCCUPIED)=0.91 on known empty capture. The model does not generalize to unseen empty conditions. Occupied detection works (100% correct when person present).
 
 ## What happened
 

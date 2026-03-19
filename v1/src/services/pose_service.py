@@ -120,15 +120,16 @@ class PoseService:
         """Initialize neural network models."""
         try:
             # Initialize DensePose model
-            if self.settings.pose_model_path:
-                self.densepose_model = DensePoseHead()
-                # Load model weights if path is provided
-                # model_state = torch.load(self.settings.pose_model_path)
-                # self.densepose_model.load_state_dict(model_state)
-                self.logger.info("DensePose model loaded")
+            if DensePoseHead is not None and self.settings.pose_model_path:
+                try:
+                    self.densepose_model = DensePoseHead(config={})
+                    self.logger.info("DensePose model loaded")
+                except Exception as e:
+                    self.logger.warning(f"DensePose model init failed: {e}")
+                    self.densepose_model = None
             else:
-                self.logger.warning("No pose model path provided, using default model")
-                self.densepose_model = DensePoseHead()
+                self.logger.warning("DensePose model not available")
+                self.densepose_model = None
             
             # Initialize modality translation
             config = {
@@ -140,12 +141,15 @@ class PoseService:
             self.modality_translator = ModalityTranslationNetwork(config)
             
             # Set models to evaluation mode
-            self.densepose_model.eval()
-            self.modality_translator.eval()
-            
+            if self.densepose_model is not None:
+                self.densepose_model.eval()
+            if self.modality_translator is not None:
+                self.modality_translator.eval()
+
         except Exception as e:
-            self.logger.error(f"Failed to initialize models: {e}")
-            raise
+            self.logger.warning(f"Model initialization skipped: {e}")
+            self.densepose_model = None
+            self.modality_translator = None
     
     async def start(self):
         """Start the pose service."""

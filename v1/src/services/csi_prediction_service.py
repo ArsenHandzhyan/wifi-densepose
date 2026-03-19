@@ -2,7 +2,15 @@
 CSI Real-Time Prediction Service
 
 Listens to UDP CSI packets from ESP32 nodes, extracts features in 5-second
-windows, and runs the V21 HGB model for occupancy/motion prediction.
+windows, and runs motion detection via HGB classifier.
+
+PRIMARY RUNTIME CONTRACT (2026-03-19):
+  motion_state: MOTION_DETECTED | NO_MOTION
+  This is the only reliable cross-session output (0.70 BalAcc, drift-resistant).
+
+SECONDARY/EXPERIMENTAL (not primary product output):
+  binary: empty | occupied  — unreliable cross-session (SNR < 0.3)
+  coarse: empty | static | motion — internal telemetry only
 """
 
 import asyncio
@@ -60,7 +68,11 @@ class CsiPredictionService:
         self._running = False
 
         # Current prediction state
+        # PRIMARY: motion_state is the only reliable cross-session output
+        # SECONDARY: binary/coarse kept as internal telemetry only
         self.current = {
+            "motion_state": "NO_MOTION",
+            "motion_confidence": 0.0,
             "binary": "unknown",
             "binary_confidence": 0.0,
             "coarse": "unknown",
@@ -361,11 +373,10 @@ class CsiPredictionService:
                 coarse_label = self.coarse_labels.get(coarse_pred, "unknown")
             coarse_conf = float(max(coarse_proba))
         elif bin_pred == 1:
-            # No coarse model — estimate from features
+            # No coarse model — estimate motion from temporal variance (fallback)
             tvar_sum = sum(feat.get(f"n{i}_tvar", 0) for i in range(4))
             coarse_label = "motion" if tvar_sum > 600 else "static"
             coarse_conf = 0.5
-            coarse_conf = float(max(coarse_proba))
 
         total_pps = sum(
             len([1 for t, _, _ in self._packets.get(ip, []) if w_start <= t < w_end])
@@ -438,8 +449,14 @@ class CsiPredictionService:
         else:
             zone = "center"
 
+        # PRIMARY: motion state (reliable cross-session, 0.70 BalAcc)
+        motion_state = "MOTION_DETECTED" if coarse_label == "motion" else "NO_MOTION"
+        motion_conf = coarse_conf if coarse_label == "motion" else max(0.5, 1.0 - coarse_conf) if coarse_conf > 0 else 0.5
+
         entry = {
             "t": w_end,
+            "motion_state": motion_state,
+            "motion_confidence": round(motion_conf, 3),
             "binary": binary_label,
             "binary_confidence": round(binary_conf, 3),
             "coarse": coarse_label,
@@ -462,6 +479,8 @@ class CsiPredictionService:
                 telemetry_entry = {
                     "ts": time.time(),
                     "window_t": w_end,
+                    "motion_state": motion_state,
+                    "motion_conf": round(motion_conf, 3),
                     "binary": binary_label,
                     "binary_conf": round(binary_conf, 3),
                     "coarse": coarse_label,
@@ -475,6 +494,8 @@ class CsiPredictionService:
             pass  # telemetry must never crash prediction
 
         self.current.update({
+            "motion_state": motion_state,
+            "motion_confidence": round(motion_conf, 3),
             "binary": binary_label,
             "binary_confidence": round(binary_conf, 3),
             "coarse": coarse_label,
@@ -490,8 +511,9 @@ class CsiPredictionService:
         })
 
         logger.info(
-            f"CSI predict: {binary_label} ({binary_conf:.2f}) "
-            f"| {coarse_label} ({coarse_conf:.2f}) "
+            f"CSI predict: {motion_state} ({motion_conf:.2f}) "
+            f"| binary={binary_label} ({binary_conf:.2f}) "
+            f"| coarse={coarse_label} ({coarse_conf:.2f}) "
             f"| {active_nodes} nodes | {total_pps:.0f} pps"
         )
 

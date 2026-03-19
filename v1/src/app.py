@@ -20,7 +20,7 @@ from src.middleware.auth import AuthenticationMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from src.middleware.rate_limit import RateLimitMiddleware
 from src.middleware.error_handler import ErrorHandlingMiddleware
-from src.api.routers import pose, stream, health, fp2
+from src.api.routers import pose, stream, health, fp2, csi
 from src.api.websocket.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,13 @@ async def lifespan(app: FastAPI):
         app.state.pose_service = orchestrator.pose_service
         app.state.stream_service = orchestrator.stream_service
         app.state.fp2_service = orchestrator.fp2_service
+
+        # CSI prediction service (standalone, not part of orchestrator)
+        try:
+            from src.services.csi_prediction_service import csi_prediction_service
+            app.state.csi_prediction_service = csi_prediction_service
+        except Exception as e:
+            logger.warning(f"CSI prediction service not available: {e}")
         
         logger.info("WiFi-DensePose API started successfully")
         
@@ -207,6 +214,12 @@ def setup_routers(app: FastAPI, settings: Settings):
         fp2.router,
         prefix=f"{settings.api_prefix}/fp2",
         tags=["FP2"]
+    )
+
+    app.include_router(
+        csi.router,
+        prefix=f"{settings.api_prefix}/csi",
+        tags=["CSI Motion Detection"]
     )
 
 

@@ -8,6 +8,25 @@
 
 The Video Curation Pipeline automates offline video teacher annotation for the WiFi DensePose project. It processes `.teacher.mp4` files captured alongside CSI data, extracts per-5-second-window visual features, classifies segments by confidence, and exports a structured label manifest for CSI model training.
 
+## Critical Addendum (2026-03-21)
+
+The per-5-second feature extraction in this document is a pipeline convenience, not a human-review standard.
+
+For freeform video-backed relabel / audit work:
+
+- minimum review density is **1 fps across the full session**
+- doorway / occlusion / posture / transition regions must be reviewed denser than 1 fps when needed
+- 5-second sampling is **not** acceptable as the primary basis for dense manual relabel
+
+Why this was added:
+
+- coarse 5-second review introduced displacement bias
+- slow drift and posture change were over-called as MOTION
+- boundary noise corrupted rebuild conclusions
+
+Canonical guardrail reference:
+- `docs/AGENTCLOUD_VIDEO_REVIEW_GUARDRAILS_20260321.md`
+
 ### Problem Statement
 
 - YOLO is unreliable in the dark garage (18% miss rate, 8% phantom detections)

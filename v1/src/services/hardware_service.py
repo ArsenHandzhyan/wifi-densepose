@@ -4,9 +4,12 @@ Hardware interface service for WiFi-DensePose API
 
 import logging
 import asyncio
+import math
+import shutil
 import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 
@@ -441,6 +444,75 @@ class HardwareService:
             results = {"message": "Manual collection triggered for all routers"}
         
         return results
+
+    async def record_live_csi_capture(
+        self,
+        *,
+        label: str,
+        duration_sec: float,
+        out_dir: str | None = None,
+    ) -> Dict[str, Any]:
+        """Capture one short live CSI clip via the canonical recording service."""
+        from src.services.csi_prediction_service import csi_prediction_service
+        from src.services.csi_recording_service import csi_recording_service
+
+        if not csi_prediction_service._running:
+            if not csi_prediction_service.binary_model:
+                if not csi_prediction_service.load_model():
+                    raise RuntimeError("Failed to load runtime CSI model for live capture")
+            try:
+                await csi_prediction_service.start_udp_listener()
+                asyncio.create_task(csi_prediction_service.prediction_loop(interval=2.0))
+            except OSError as exc:
+                if "Address already in use" not in str(exc):
+                    raise RuntimeError(f"Failed to start CSI UDP listener: {exc}") from exc
+
+        chunk_sec = max(1, int(math.ceil(float(duration_sec))))
+        started = await csi_recording_service.start_recording(
+            label=label,
+            chunk_sec=chunk_sec,
+            with_video=False,
+            voice_prompt=False,
+            skip_preflight=False,
+        )
+        if not started.get("ok"):
+            raise RuntimeError(str(started.get("error") or "Failed to start live CSI capture"))
+
+        try:
+            await asyncio.sleep(float(duration_sec))
+        finally:
+            stopped = await csi_recording_service.stop_recording(
+                voice_prompt=False,
+                reason="training_live_csi_capture",
+            )
+
+        if not stopped.get("ok"):
+            raise RuntimeError(str(stopped.get("error") or "Failed to stop live CSI capture"))
+
+        chunk = dict(stopped.get("last_chunk") or {})
+        data_path = str(chunk.get("data_path") or "").strip()
+        summary_path = str(chunk.get("summary_path") or "").strip()
+        if not data_path or not summary_path:
+            raise RuntimeError("Live CSI capture completed without data_path/summary_path")
+
+        if out_dir:
+            target_dir = Path(out_dir).expanduser().resolve()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            copied_data = target_dir / Path(data_path).name
+            copied_summary = target_dir / Path(summary_path).name
+            shutil.copy2(data_path, copied_data)
+            shutil.copy2(summary_path, copied_summary)
+            data_path = str(copied_data)
+            summary_path = str(copied_summary)
+
+        return {
+            "label": chunk.get("label") or label,
+            "data_path": data_path,
+            "summary_path": summary_path,
+            "duration_sec": chunk.get("duration_sec"),
+            "packet_count": chunk.get("packet_count"),
+            "nodes_active": chunk.get("nodes_active"),
+        }
     
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check."""

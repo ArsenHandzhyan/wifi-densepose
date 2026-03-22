@@ -2,6 +2,6 @@
 API routers package
 """
 
-from . import pose, stream, health, fp2, csi
+from . import pose, stream, health, fp2, csi, training
 
-__all__ = ["pose", "stream", "health", "fp2", "csi"]
+__all__ = ["pose", "stream", "health", "fp2", "csi", "training"]

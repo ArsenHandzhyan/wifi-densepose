@@ -7,8 +7,10 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -20,7 +22,7 @@ from src.middleware.auth import AuthenticationMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from src.middleware.rate_limit import RateLimitMiddleware
 from src.middleware.error_handler import ErrorHandlingMiddleware
-from src.api.routers import pose, stream, health, fp2, csi
+from src.api.routers import pose, stream, health, fp2, csi, training
 from src.api.websocket.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
@@ -102,7 +104,12 @@ def create_app(settings: Settings, orchestrator: ServiceOrchestrator) -> FastAPI
     
     # Add root endpoints
     setup_root_endpoints(app, settings)
-    
+
+    # Serve UI static files (must be LAST - catch-all)
+    ui_dir = Path(__file__).resolve().parents[2] / "ui"
+    if ui_dir.exists():
+        app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+
     return app
 
 
@@ -214,6 +221,12 @@ def setup_routers(app: FastAPI, settings: Settings):
         fp2.router,
         prefix=f"{settings.api_prefix}/fp2",
         tags=["FP2"]
+    )
+
+    app.include_router(
+        training.router,
+        prefix=f"{settings.api_prefix}/fp2/training",
+        tags=["CSI Training"]
     )
 
     app.include_router(

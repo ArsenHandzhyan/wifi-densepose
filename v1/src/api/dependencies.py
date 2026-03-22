@@ -15,6 +15,7 @@ from src.services.pose_service import PoseService
 from src.services.stream_service import StreamService
 from src.services.hardware_service import HardwareService
 from src.services.fp2_service import FP2Service
+from src.services.csi_training_store import CSITrainingStoreService
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,21 @@ def get_fp2_service() -> FP2Service:
     """Get FP2 service instance."""
     settings = get_settings()
     return FP2Service(settings=settings)
+
+
+@lru_cache()
+def get_csi_training_store_service() -> CSITrainingStoreService:
+    """Get CSI training store service instance."""
+    settings = get_settings()
+    return CSITrainingStoreService(settings=settings)
+
+
+async def get_hardware_service_from_request(request: Request) -> HardwareService:
+    """Prefer the live app hardware service instance bound to app.state."""
+    service = getattr(request.app.state, "hardware_service", None)
+    if service is not None:
+        return service
+    return get_hardware_service()
 
 
 # Authentication dependencies

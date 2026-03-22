@@ -32,6 +32,19 @@ ROOM_CONFIG_DEFAULT = ROOT / "data" / "room-layouts" / "fp2-room-config-17730224
 FP2_MONITOR_CTL = ROOT / "scripts" / "fp2_cloud_monitor_ctl.py"
 MAC_VIDEO_TEACHER_HOST_SCRIPT = ROOT / "scripts" / "mac_video_teacher_host.py"
 PIXEL_VIDEO_TEACHER_HOST_SCRIPT = ROOT / "scripts" / "pixel_video_teacher_host.py"
+MAC_CAMERA_SOURCE_ID = "mac_camera"
+NETWORK_RTSP_SOURCE_ID = "network_rtsp"
+DIRECT_AVFOUNDATION_SOURCE_ID = "direct_avfoundation"
+LEGACY_VIDEO_BACKEND_TO_SOURCE = {
+    "terminal_ffmpeg_avfoundation": MAC_CAMERA_SOURCE_ID,
+    "network_rtsp_ffmpeg": NETWORK_RTSP_SOURCE_ID,
+    "ffmpeg_avfoundation": DIRECT_AVFOUNDATION_SOURCE_ID,
+}
+VIDEO_SOURCE_TO_BACKEND = {
+    MAC_CAMERA_SOURCE_ID: "terminal_ffmpeg_avfoundation",
+    NETWORK_RTSP_SOURCE_ID: "network_rtsp_ffmpeg",
+    DIRECT_AVFOUNDATION_SOURCE_ID: "ffmpeg_avfoundation",
+}
 
 TRAIN_PACKS: dict[str, dict[str, Any]] = {
     "breathing_pack": {
@@ -189,6 +202,137 @@ TRAIN_PACKS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "v2_inplace_motion_center_pack": {
+        "title": "V2 In-Place Motion — Center Zone (Session F1)",
+        "scenario": "v2_taxonomy_gap_inplace",
+        "clips": [
+            {
+                "label_name": "in_place_motion",
+                "step_name": "bend_forward",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Плавно наклоняйся вперёд и возвращайся. Повторяй. Ноги на месте.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "squat_cycle",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Медленно приседай, держи 3 сек, встань. Повторяй. Ноги на месте.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "turn_in_place",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Повернись на 90° влево, вернись. Повернись на 90° вправо, вернись. Повторяй.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "reach_left_right",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Вытяни руку максимально влево, потом вправо. Повторяй плавно.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "arm_wave_cycle",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Медленно подними обе руки вверх, опусти. Повторяй.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "stand_weight_shift",
+                "duration_sec": 30,
+                "prompt": "Стой в центре. Плавно переноси вес с ноги на ногу. Не сходи с места.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "sit_fidget",
+                "duration_sec": 30,
+                "prompt": "Сядь на стул в центре. Ёрзай: двигай корпус, руки, поворачивайся. Не вставай.",
+                "person_count_expected": 1,
+            },
+        ],
+    },
+    "v2_zone_diversity_pack": {
+        "title": "V2 Zone Diversity — DOOR + CENTER variants (Session F3)",
+        "scenario": "v2_taxonomy_gap_zone_diversity",
+        "clips": [
+            {
+                "label_name": "in_place_motion",
+                "step_name": "bend_forward_door",
+                "duration_sec": 30,
+                "prompt": "Встань у двери (в 1 метре от двери). Плавно наклоняйся вперёд и возвращайся. Повторяй. Ноги на месте.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "squat_cycle_door",
+                "duration_sec": 30,
+                "prompt": "Стой у двери. Медленно приседай, держи 3 сек, встань. Повторяй. Ноги на месте.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "turn_in_place_door",
+                "duration_sec": 30,
+                "prompt": "Стой у двери. Повернись на 90° влево, вернись. Повернись вправо, вернись. Повторяй. Ноги на месте.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "reach_left_right_center",
+                "duration_sec": 30,
+                "prompt": "Пройди в центр. Стой на месте. Вытяни руку максимально влево, потом вправо. Повторяй.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "in_place_motion",
+                "step_name": "head_nod_turn_door",
+                "duration_sec": 30,
+                "prompt": "Вернись к двери. Кивай головой, потом поворачивай голову влево-вправо. Повторяй. Тело неподвижно.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "transition",
+                "step_name": "walk_door_to_center_stop",
+                "duration_sec": 30,
+                "prompt": "Стой у двери. Иди нормальным шагом к центру по проходу. Дойди до центра, остановись и замри до конца.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "transition",
+                "step_name": "walk_center_to_door_stop",
+                "duration_sec": 30,
+                "prompt": "Стой в центре неподвижно 5 сек. Потом иди к двери. Дойди до двери и остановись.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "transition",
+                "step_name": "enter_settle_center",
+                "duration_sec": 30,
+                "prompt": "Выйди за порог. После старта войди и пройди по проходу до центра. Остановись и замри.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "transition",
+                "step_name": "stand_center_exit",
+                "duration_sec": 30,
+                "prompt": "Стой в центре неподвижно 5 сек. Потом иди к двери и выйди из гаража полностью.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "transition",
+                "step_name": "sit_down_onset_door",
+                "duration_sec": 30,
+                "prompt": "Поставь стул у двери. Стой рядом 5 сек. Потом сядь и сиди до конца.",
+                "person_count_expected": 1,
+            },
+        ],
+    },
 }
 
 EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
@@ -234,6 +378,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video-teacher", action="store_true")
     parser.add_argument("--audio-teacher", action="store_true")
     parser.add_argument(
+        "--video-source",
+        choices=[MAC_CAMERA_SOURCE_ID, NETWORK_RTSP_SOURCE_ID, DIRECT_AVFOUNDATION_SOURCE_ID],
+        default=os.getenv("CSI_VIDEO_SOURCE", ""),
+        help="Canonical teacher source id. If omitted, legacy --video-backend mapping is used.",
+    )
+    parser.add_argument(
         "--video-backend",
         choices=["ffmpeg_avfoundation", "terminal_ffmpeg_avfoundation", "network_rtsp_ffmpeg"],
         default=os.getenv(
@@ -251,7 +401,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video-height", type=int, default=720)
     parser.add_argument("--video-fps", type=int, default=int(os.getenv("CSI_VIDEO_FPS", "30")))
     parser.add_argument("--video-input-pixel-format", default=os.getenv("CSI_VIDEO_INPUT_PIXEL_FORMAT", "nv12"))
-    parser.add_argument("--video-teacher-host", default=os.getenv("CSI_VIDEO_TEACHER_HOST", "mac_local"))
+    parser.add_argument("--video-teacher-host", default=os.getenv("CSI_VIDEO_TEACHER_HOST", ""))
     parser.add_argument("--video-manifest-dir", default=str(VIDEO_TEACHER_OUT_DIR_DEFAULT))
     parser.add_argument("--pose-url", default="http://127.0.0.1:8000/api/v1/pose/current")
     parser.add_argument("--live-window-url", default="http://127.0.0.1:8000/api/v1/pose/live-window")
@@ -264,6 +414,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp2-poll-interval", type=float, default=2.0)
     parser.add_argument("--require-live-fp2-coordinates", action="store_true")
     return parser.parse_args()
+
+
+def resolve_video_source_id(args: argparse.Namespace) -> str:
+    source_id = str(getattr(args, "video_source", "") or "").strip()
+    if source_id:
+        return source_id
+    return LEGACY_VIDEO_BACKEND_TO_SOURCE.get(str(args.video_backend or "").strip(), DIRECT_AVFOUNDATION_SOURCE_ID)
+
+
+def resolve_video_backend_id(args: argparse.Namespace) -> str:
+    return VIDEO_SOURCE_TO_BACKEND[resolve_video_source_id(args)]
+
+
+def resolve_video_teacher_host(args: argparse.Namespace) -> str:
+    source_id = resolve_video_source_id(args)
+    raw = str(getattr(args, "video_teacher_host", "") or "").strip()
+    if raw and raw != "mac_local":
+        return raw
+    if source_id == MAC_CAMERA_SOURCE_ID:
+        return "mac_terminal_bridge"
+    if source_id == NETWORK_RTSP_SOURCE_ID:
+        return raw or "network_rtsp_host"
+    return raw or "mac_direct_avfoundation"
+
+
+def load_json_path(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    if not path.exists() or path.stat().st_size <= 0:
+        return None, "json file missing or empty"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def now_iso() -> str:
@@ -470,7 +652,7 @@ def parse_user_description(raw: str, clip: dict[str, Any], teacher_mode: str) ->
 
 def build_clip_specs(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.pack_id:
-        library = TRAIN_PACKS if args.mode == "train_atomic" else EVAL_SCENARIOS if args.mode == "eval_scenario" else {}
+        library = TRAIN_PACKS if args.mode in ("train_atomic", "teacher_capture") else EVAL_SCENARIOS if args.mode == "eval_scenario" else {}
         pack = library.get(args.pack_id)
         if not pack:
             raise SystemExit(f"Unknown pack_id for mode {args.mode}: {args.pack_id}")
@@ -699,25 +881,29 @@ def tail_text(path: Path, *, limit_chars: int = 1200) -> str | None:
         return None
 
 
-def start_terminal_video_recorder(
+def start_mac_camera_recorder(
     *,
     capture_label: str,
     device_selector: str,
     fps: int,
     width: int,
     height: int,
-    duration_sec: float,
+    max_duration_sec: float,
+    expected_duration_sec: float | None,
     output_path: Path,
     input_pixel_format: str,
 ) -> dict[str, Any]:
     command_path = output_path.with_suffix(".teacher.command")
     log_path = output_path.with_suffix(".teacher.log")
     result_path = output_path.with_suffix(".teacher.result.json")
+    pid_path = output_path.with_suffix(".teacher.pid")
+    ready_path = output_path.with_suffix(".teacher.ready.json")
+    stop_path = output_path.with_suffix(".teacher.stop")
     completed = subprocess.run(
         [
             sys.executable,
             str(MAC_VIDEO_TEACHER_HOST_SCRIPT),
-            "write-capture-command",
+            "write-session-command",
             "--command-path",
             str(command_path),
             "--video-path",
@@ -726,6 +912,12 @@ def start_terminal_video_recorder(
             str(log_path),
             "--result-path",
             str(result_path),
+            "--pid-path",
+            str(pid_path),
+            "--ready-path",
+            str(ready_path),
+            "--stop-path",
+            str(stop_path),
             "--device-selector",
             device_selector,
             "--width",
@@ -736,47 +928,91 @@ def start_terminal_video_recorder(
             str(fps),
             "--pixel-format",
             input_pixel_format,
-            "--duration-sec",
-            f"{duration_sec:g}",
+            "--max-duration-sec",
+            f"{max_duration_sec:g}",
+            *(
+                ["--expected-duration-sec", f"{expected_duration_sec:g}"]
+                if expected_duration_sec is not None
+                else []
+            ),
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError((completed.stderr or completed.stdout or "failed to prepare terminal video recorder").strip())
-    opener = subprocess.run(["open", str(command_path)], capture_output=True, text=True, check=False)
-    if opener.returncode != 0:
-        raise RuntimeError((opener.stderr or opener.stdout or "failed to launch terminal video recorder").strip())
+        raise RuntimeError((completed.stderr or completed.stdout or "failed to prepare mac camera recorder").strip())
+    launched = mac_video_teacher_host("launch-terminal-command", "--command-path", str(command_path))
+    if not launched[0]:
+        raise RuntimeError(launched[2] or "failed to launch mac camera recorder")
+    launch_payload = launched[1] or {}
+    if not launch_payload.get("ok"):
+        raise RuntimeError(launch_payload.get("stderr") or launch_payload.get("stdout") or "failed to launch mac camera recorder")
     return {
+        "source_id": MAC_CAMERA_SOURCE_ID,
         "backend": "terminal_ffmpeg_avfoundation",
         "command_path": str(command_path),
         "log_path": str(log_path),
         "result_path": str(result_path),
+        "pid_path": str(pid_path),
+        "ready_path": str(ready_path),
+        "stop_path": str(stop_path),
         "video_path": str(output_path),
         "capture_label": capture_label,
+        "launch": launch_payload,
+        "expected_duration_sec": expected_duration_sec,
     }
 
 
-def finalize_terminal_video_recorder(handle: dict[str, Any], *, timeout_sec: float) -> tuple[dict[str, Any] | None, str | None]:
+def wait_for_mac_camera_ready(handle: dict[str, Any], *, timeout_sec: float) -> tuple[dict[str, Any] | None, str | None]:
+    ready_path = Path(str(handle.get("ready_path") or "")).expanduser()
+    result_path = Path(str(handle.get("result_path") or "")).expanduser()
+    log_path = Path(str(handle.get("log_path") or "")).expanduser()
+    deadline = time.time() + max(3.0, timeout_sec)
+    last_error = None
+    while time.time() < deadline:
+        if ready_path.exists():
+            payload, error = load_json_path(ready_path)
+            if payload is not None:
+                return payload, None
+            last_error = error
+        if result_path.exists():
+            payload, error = load_json_path(result_path)
+            if payload is not None:
+                reason = payload.get("failure_reason") or payload.get("status") or "mac_camera failed before ready"
+                log_tail = tail_text(log_path)
+                return payload, f"{reason}{f'; log={log_tail}' if log_tail else ''}"
+            last_error = error
+        time.sleep(0.25)
+    log_tail = tail_text(log_path)
+    suffix = f"; parse={last_error}" if last_error else ""
+    return None, f"mac_camera did not reach ready state in time{suffix}{f'; log={log_tail}' if log_tail else ''}"
+
+
+def finalize_mac_camera_recorder(handle: dict[str, Any], *, timeout_sec: float) -> tuple[dict[str, Any] | None, str | None]:
     result_path = Path(str(handle.get("result_path") or "")).expanduser()
     log_path = Path(str(handle.get("log_path") or "")).expanduser()
     deadline = time.time() + max(5.0, timeout_sec)
+    last_error = None
     while time.time() < deadline:
         if result_path.exists():
-            break
+            payload, error = load_json_path(result_path)
+            if payload is not None:
+                status = str(payload.get("status") or "").strip() or "unknown"
+                if status != "completed":
+                    log_tail = tail_text(log_path)
+                    return payload, f"mac_camera recorder {status}: {payload.get('failure_reason') or 'no failure_reason'}{f'; log={log_tail}' if log_tail else ''}"
+                return payload, None
+            last_error = error
         time.sleep(0.25)
-    if not result_path.exists():
-        log_tail = tail_text(log_path)
-        return None, f"terminal video recorder did not finish in time{f'; log={log_tail}' if log_tail else ''}"
-    try:
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return None, f"failed to parse terminal video recorder result: {exc}"
-    if int(payload.get("exit_code") or 0) != 0 or not payload.get("video_exists"):
-        log_tail = tail_text(log_path)
-        return payload, f"terminal video recorder failed: exit={payload.get('exit_code')} size={payload.get('video_size')}{f'; log={log_tail}' if log_tail else ''}"
-    return payload, None
+    log_tail = tail_text(log_path)
+    suffix = f"; parse={last_error}" if last_error else ""
+    return None, f"mac_camera recorder did not finish in time{suffix}{f'; log={log_tail}' if log_tail else ''}"
+
+
+def request_stop_mac_camera_recorder(handle: dict[str, Any]) -> None:
+    stop_path = Path(str(handle.get("stop_path") or "")).expanduser()
+    stop_path.write_text("stop\n", encoding="utf-8")
 
 
 def probe_avfoundation(
@@ -995,6 +1231,8 @@ def perform_preflight(
             return {"ok": False, "reason": f"FP2 snapshot unavailable after preflight: {fp2_error}", "sensor_report": sensor_report}
 
     recorder_snapshot = ffmpeg_backend_snapshot()
+    video_source_id = resolve_video_source_id(args)
+    video_backend_id = resolve_video_backend_id(args)
     teacher_report = {
         "video_teacher_enabled": video_teacher,
         "audio_teacher_enabled": audio_teacher,
@@ -1007,7 +1245,7 @@ def perform_preflight(
             return {"ok": False, "reason": "Teacher recording unavailable: ffmpeg not available", "sensor_report": sensor_report, "teacher_report": teacher_report}
         ffmpeg_path = str(recorder_snapshot.get("ffmpeg_path"))
         if video_teacher:
-            if args.video_backend == "network_rtsp_ffmpeg":
+            if video_source_id == NETWORK_RTSP_SOURCE_ID:
                 if not args.video_source_url:
                     return {
                         "ok": False,
@@ -1024,7 +1262,8 @@ def perform_preflight(
                 )
                 teacher_report["video_probe"] = {
                     "ok": probe_ok and bool(probe_payload and probe_payload.get("ok")),
-                    "backend": args.video_backend,
+                    "backend": video_backend_id,
+                    "source_id": video_source_id,
                     "source_name": args.video_source_name,
                     "source_url_redacted": redact_rtsp_url(args.video_source_url),
                     "probe": probe_payload,
@@ -1037,32 +1276,42 @@ def perform_preflight(
                         "sensor_report": sensor_report,
                         "teacher_report": teacher_report,
                     }
-            elif args.video_backend == "terminal_ffmpeg_avfoundation":
-                device_ok, device_payload, device_error = mac_video_teacher_host("list-devices")
-                status_ok, status_payload, status_error = mac_video_teacher_host("current-host-status")
-                if not device_ok or not device_payload:
-                    return {
-                        "ok": False,
-                        "reason": f"Camera device discovery failed: {device_error}",
-                        "sensor_report": sensor_report,
-                        "teacher_report": teacher_report,
-                    }
-                device_names = [str(item.get("name") or "") for item in device_payload.get("video_devices") or []]
+            elif video_source_id == MAC_CAMERA_SOURCE_ID:
                 selector = args.video_device_name or args.video_device
-                if selector not in device_names and args.video_device not in device_names:
+                status_ok, status_payload, status_error = mac_video_teacher_host(
+                    "source-status",
+                    "--device-selector",
+                    selector,
+                )
+                if not status_ok or not status_payload:
                     return {
                         "ok": False,
-                        "reason": f"Camera selector not found on Mac host: {selector}",
+                        "reason": f"Mac camera source-status failed: {status_error}",
                         "sensor_report": sensor_report,
                         "teacher_report": teacher_report,
                     }
+                available = bool(status_payload.get("available"))
+                reason = str(status_payload.get("reason") or "unknown")
                 teacher_report["video_probe"] = {
-                    "ok": True,
-                    "backend": args.video_backend,
+                    "ok": available,
+                    "backend": video_backend_id,
+                    "source_id": video_source_id,
                     "device": selector,
-                    "device_names": device_names,
-                    "current_host_camera_status": status_payload if status_ok else {"error": status_error},
+                    "source_status": status_payload,
+                    "error": None if available else reason,
                 }
+                if not available:
+                    permission_state = (status_payload.get("permission_confirmation") or {}).get("status_after_label") or "unknown"
+                    return {
+                        "ok": False,
+                        "reason": (
+                            "Mac camera unavailable: "
+                            f"{reason}; permission={permission_state}; device={selector}. "
+                            "Run write-request-access-command once via the Terminal helper."
+                        ),
+                        "sensor_report": sensor_report,
+                        "teacher_report": teacher_report,
+                    }
             else:
                 if not recorder_snapshot.get("avfoundation_available"):
                     return {
@@ -1202,6 +1451,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     clips = build_clip_specs(args)
     validate_durations(args.mode, clips)
+    video_source_id = resolve_video_source_id(args)
+    video_backend_id = resolve_video_backend_id(args)
+    video_teacher_host = resolve_video_teacher_host(args)
 
     video_teacher_enabled = bool(args.video_teacher or args.mode == "teacher_capture")
     audio_teacher_enabled = bool(args.audio_teacher)
@@ -1231,6 +1483,9 @@ def main() -> int:
         "teacher_mode": teacher_mode,
         "fp2_required": require_fp2,
         "video_teacher_enabled": video_teacher_enabled,
+        "video_source_id": video_source_id if video_teacher_enabled else None,
+        "video_backend_id": video_backend_id if video_teacher_enabled else None,
+        "video_teacher_host": video_teacher_host if video_teacher_enabled else None,
         "audio_teacher_enabled": audio_teacher_enabled,
         "room_context": room_context,
         "raw_user_description": args.raw_user_description or None,
@@ -1296,14 +1551,19 @@ def main() -> int:
             video_source_kind = None
             video_source_url_redacted = None
             if video_teacher_enabled:
-                if args.video_backend == "network_rtsp_ffmpeg":
+                if video_source_id == NETWORK_RTSP_SOURCE_ID:
                     video_device_name = args.video_source_name or "Pixel 8 Pro"
                     video_device_selector = redact_rtsp_url(args.video_source_url)
                     video_source_kind = "rtsp"
                     video_source_url_redacted = redact_rtsp_url(args.video_source_url)
+                elif video_source_id == MAC_CAMERA_SOURCE_ID:
+                    video_device_name = args.video_device_name or args.video_device
+                    video_device_selector = args.video_device_name or args.video_device
+                    video_source_kind = MAC_CAMERA_SOURCE_ID
                 else:
                     video_device_name = args.video_device_name or args.video_device
                     video_device_selector = args.video_device
+                    video_source_kind = DIRECT_AVFOUNDATION_SOURCE_ID
 
             clip_manifest: dict[str, Any] = {
                 "manifest_version": SCRIPT_VERSION,
@@ -1339,16 +1599,24 @@ def main() -> int:
                 "audio_file": str(audio_path) if audio_teacher_enabled else None,
                 "video_start_ts": None,
                 "video_end_ts": None,
+                "video_source_id": video_source_id if video_teacher_enabled else None,
                 "video_device_name": video_device_name if video_teacher_enabled else None,
                 "video_device_selector": video_device_selector if video_teacher_enabled else None,
                 "video_input_pixel_format": args.video_input_pixel_format if video_teacher_enabled else None,
-                "video_recorder_backend": args.video_backend if video_teacher_enabled else None,
-                "video_teacher_host": args.video_teacher_host if video_teacher_enabled else None,
+                "video_recorder_backend": video_backend_id if video_teacher_enabled else None,
+                "video_teacher_host": video_teacher_host if video_teacher_enabled else None,
                 "video_source_kind": video_source_kind if video_teacher_enabled else None,
                 "video_source_url_redacted": video_source_url_redacted if video_teacher_enabled else None,
                 "video_host_command_file": None,
                 "video_host_result_file": None,
                 "video_log_file": None,
+                "video_ready_file": None,
+                "video_stop_file": None,
+                "video_recording_status": None,
+                "video_failure_reason": None,
+                "video_expected_duration_sec": clip_duration_sec if video_teacher_enabled else None,
+                "video_actual_duration_sec": None,
+                "video_truth_coverage_ratio": None,
                 "audio_device_name": args.audio_device_name or args.audio_device if audio_teacher_enabled else None,
                 "camera_used": bool(video_teacher_enabled),
                 "csi_health_snapshot": preflight.get("csi_health_snapshot"),
@@ -1380,22 +1648,27 @@ def main() -> int:
                 ffmpeg_path = str(preflight["teacher_report"]["backend"]["ffmpeg_path"])
                 if video_teacher_enabled:
                     video_start_ts = now_iso()
-                    if args.video_backend == "terminal_ffmpeg_avfoundation":
-                        video_proc = start_terminal_video_recorder(
+                    if video_source_id == MAC_CAMERA_SOURCE_ID:
+                        video_proc = start_mac_camera_recorder(
                             capture_label=capture_label,
                             device_selector=args.video_device_name or args.video_device,
                             fps=args.video_fps,
                             width=args.video_width,
                             height=args.video_height,
-                            duration_sec=clip_duration_sec,
+                            max_duration_sec=clip_duration_sec,
+                            expected_duration_sec=clip_duration_sec,
                             output_path=video_path,
                             input_pixel_format=args.video_input_pixel_format or "nv12",
                         )
                         clip_manifest["video_host_command_file"] = video_proc.get("command_path")
                         clip_manifest["video_host_result_file"] = video_proc.get("result_path")
                         clip_manifest["video_log_file"] = video_proc.get("log_path")
-                        time.sleep(0.75)
-                    elif args.video_backend == "network_rtsp_ffmpeg":
+                        clip_manifest["video_ready_file"] = video_proc.get("ready_path")
+                        clip_manifest["video_stop_file"] = video_proc.get("stop_path")
+                        _, video_ready_error = wait_for_mac_camera_ready(video_proc, timeout_sec=max(4.0, args.timeout_sec + 2.0))
+                        if video_ready_error:
+                            raise RuntimeError(video_ready_error)
+                    elif video_source_id == NETWORK_RTSP_SOURCE_ID:
                         video_proc = start_recorder(
                             build_rtsp_video_command(
                                 ffmpeg_path=ffmpeg_path,
@@ -1445,6 +1718,7 @@ def main() -> int:
             write_json(clip_manifest_path, clip_manifest)
 
             capture_error: str | None = None
+            video_result: dict[str, Any] | None = None
             try:
                 print(f"Запускаю запись {capture_label} на {int(round(clip_duration_sec))} секунд", flush=True)
                 capture = trigger_live_csi_capture(args, capture_label=capture_label, duration_sec=clip_duration_sec)
@@ -1466,22 +1740,30 @@ def main() -> int:
                     teacher_poller.join(timeout=max(2.0, args.fp2_poll_interval + 1.0))
                     print(f"teacher_fp2: {teacher_fp2_path}", flush=True)
                 if video_proc is not None:
-                    if args.video_backend == "terminal_ffmpeg_avfoundation":
-                        video_result, video_error = finalize_terminal_video_recorder(
+                    if video_source_id == MAC_CAMERA_SOURCE_ID:
+                        video_result, video_error = finalize_mac_camera_recorder(
                             video_proc,
                             timeout_sec=max(10.0, clip_duration_sec + 15.0),
                         )
                         if video_result:
                             clip_manifest["video_host_result_file"] = video_proc.get("result_path")
                             clip_manifest["video_log_file"] = video_proc.get("log_path")
+                            clip_manifest["video_ready_file"] = video_proc.get("ready_path")
+                            clip_manifest["video_stop_file"] = video_proc.get("stop_path")
+                            clip_manifest["video_recording_status"] = video_result.get("status")
+                            clip_manifest["video_failure_reason"] = video_result.get("failure_reason")
+                            clip_manifest["video_actual_duration_sec"] = video_result.get("actual_duration_sec")
+                            clip_manifest["video_truth_coverage_ratio"] = video_result.get("truth_coverage_ratio")
                     else:
                         _, video_error = finalize_recorder(video_proc)
+                        clip_manifest["video_recording_status"] = "completed" if not video_error and video_path.exists() else "failed"
+                        clip_manifest["video_failure_reason"] = video_error
                     video_end_ts = now_iso()
                     if video_error:
                         clip_manifest.setdefault("notes", "")
                         clip_manifest["notes"] = ((clip_manifest["notes"] or "") + f" video_recorder={video_error}").strip()
                     print(f"video: {video_path}", flush=True)
-                    if clip_manifest.get("capture_file") and video_path.exists():
+                    if clip_manifest.get("capture_file") and video_path.exists() and clip_manifest.get("video_recording_status") == "completed":
                         manifest_path, template_path, manifest_error = build_video_teacher_manifest(
                             session_path=str(clip_manifest["capture_file"]),
                             video_path=video_path,
@@ -1491,7 +1773,7 @@ def main() -> int:
                             video_source_url_redacted=clip_manifest.get("video_source_url_redacted") or "",
                             label_prefix=args.label_prefix,
                             capture_label=capture_label,
-                            teacher_host=args.video_teacher_host,
+                            teacher_host=video_teacher_host,
                             out_dir=Path(args.video_manifest_dir).expanduser().resolve(),
                         )
                         if manifest_error:
@@ -1516,6 +1798,10 @@ def main() -> int:
 
             run_manifest["clips"].append(clip_manifest)
             write_json(run_manifest_path, run_manifest)
+            if video_teacher_enabled and clip_manifest.get("video_recording_status") not in (None, "completed"):
+                raise RuntimeError(
+                    f"video teacher degraded: {clip_manifest.get('video_recording_status')} / {clip_manifest.get('video_failure_reason') or 'unknown'}"
+                )
             speak("Стоп.", enable_voice=enable_voice, voice=args.voice)
 
         run_manifest["finished_at"] = now_iso()

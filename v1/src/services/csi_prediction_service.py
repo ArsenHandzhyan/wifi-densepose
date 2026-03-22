@@ -21,6 +21,7 @@ import pickle
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from scipy.stats import entropy, kurtosis, skew
@@ -28,13 +29,45 @@ from scipy.stats import entropy, kurtosis, skew
 logger = logging.getLogger(__name__)
 
 PROJECT = Path(__file__).resolve().parents[3]
-MODEL_PATH = PROJECT / "output" / "frozen_twostage_runtime_v1.pkl"
+MODEL_PATH = PROJECT / "output" / "v5_runtime_model_latest.pkl"
 UDP_PORT = 5005
 NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137"])
+
+# ── Track B v1 shadow-mode constants (2026-03-21) ────────────────
+# Track B uses raw CSI subcarrier amplitudes instead of statistical features.
+# It expects [50, 424] = 50 time steps × (4 nodes × 106 active subcarriers).
+# CRITICAL: node order must match training: n01, n02, n03, n04 (by node ID,
+#   NOT by IP sort). IP→node mapping below.
+TRACK_B_MODEL_PATH = PROJECT / "output" / "tcn_v2_track_b_v1_torchscript.pt"
+TRACK_B_CHECKPOINT_PATH = PROJECT / "output" / "tcn_v2_track_b_v1.pt"
+TRACK_B_ENABLED = True  # shadow mode only — does NOT affect production output
+TRACK_B_ACTIVE_LO = list(range(6, 59))    # subcarriers 6-58 (53 active)
+TRACK_B_ACTIVE_HI = list(range(70, 123))  # subcarriers 70-122 (53 active)
+TRACK_B_ACTIVE_SC = np.array(TRACK_B_ACTIVE_LO + TRACK_B_ACTIVE_HI, dtype=np.int32)  # 106
+TRACK_B_MAX_PACKETS = 50
+TRACK_B_N_NODES = 4
+TRACK_B_CLASS_NAMES = ["EMPTY", "STATIC", "MOTION"]
+# Node order for Track B tensor: n01, n02, n03, n04 (matches training corpus)
+TRACK_B_IP_ORDER = [
+    "192.168.1.137",  # n01
+    "192.168.1.117",  # n02
+    "192.168.1.101",  # n03
+    "192.168.1.125",  # n04
+]
 WINDOW_SEC = 5.0
 CSI_HEADER = 20
 BUFFER_WINDOWS = 3  # keep recent history; binary smoothing is not applied here yet
 MAX_BUFFER_SEC = 30  # max seconds of packets to keep in memory
+
+# ── Topology-aware warmup damping (2026-03-21) ──────────────────
+# When a node reconnects after being offline for longer than
+# WARMUP_OFFLINE_THRESHOLD_SEC, its CSI features are zeroed out for
+# WARMUP_DURATION_SEC to prevent cold-start noise from being
+# misclassified as motion.  Evidence: overnight head-to-head showed
+# motion FP jumped from 9% to 80% when node04 reconnected after
+# ~7 hours offline (AGENTCLOUD_ANALYSIS2, 2026-03-21).
+WARMUP_OFFLINE_THRESHOLD_SEC = 300.0   # 5 min gap → treat as cold reconnect
+WARMUP_DURATION_SEC = 120.0            # dampen for 2 min (24 × 5-sec windows)
 
 # Garage geometry (meters). Origin = center of room.
 # node01(192.168.1.137)=bottom-right near door, node02(117)=bottom-left near door
@@ -58,6 +91,7 @@ class CsiPredictionService:
         self.binary_model = None
         self.coarse_model = None
         self.coarse_labels = None
+        self._coarse_empty_boost = 0.0
 
         # Live packet buffer: {ip: [(t_sec, amp, phase), ...]}
         self._packets = defaultdict(list)
@@ -85,6 +119,12 @@ class CsiPredictionService:
             "pps": 0.0,
             "window_age_sec": 0.0,
             "model_version": "none",
+            "model_id": MODEL_PATH.name,
+            "model_filename": MODEL_PATH.name,
+            "model_path": str(MODEL_PATH.resolve()),
+            "model_kind": "unknown",
+            "model_default": True,
+            "binary_threshold": 0.5,
             "garage": {"width": GARAGE_WIDTH, "height": GARAGE_HEIGHT,
                        "nodes": {ip: {"x": x, "y": y} for ip, (x, y) in NODE_POSITIONS.items()},
                        "door": {"x": DOOR_POSITION[0], "y": DOOR_POSITION[1]}},
@@ -92,6 +132,108 @@ class CsiPredictionService:
         }
         self._prev_target = (0.0, 0.0)  # for position smoothing only
         self._node_baselines = {}  # running mean per node for relative positioning
+        self._active_model_path = str(MODEL_PATH)
+        self._active_model_id = MODEL_PATH.name
+        self._active_model_kind = None
+
+        # ── Topology-aware warmup state ──────────────────────────────
+        # Tracks per-node last-seen time and warmup expiry.
+        # When a node is in warmup, its features are zeroed out so that
+        # cold-start noise does not contaminate inference.
+        self._node_last_seen: dict[str, float] = {}      # ip → monotonic time
+        self._node_warmup_until: dict[str, float] = {}   # ip → monotonic time
+        self._node_warmup_log: list[dict] = []            # observable history
+
+        # ── Track B v1 shadow-mode state ─────────────────────────────
+        # Shadow inference runs Track B alongside Track A without affecting
+        # production output. All results go to logs/telemetry only.
+        self._track_b_model = None       # TorchScript model (torch.jit)
+        self._track_b_feat_mean = None   # np.ndarray [424]
+        self._track_b_feat_std = None    # np.ndarray [424]
+        self._track_b_loaded = False
+        self._track_b_shadow = {}        # latest shadow prediction
+        self._track_b_history: list[dict] = []  # recent shadow predictions
+
+    @staticmethod
+    def _classify_runtime_bundle(bundle: dict[str, Any]) -> str | None:
+        if "feature_columns" in bundle and "model" in bundle:
+            return "v25_like"
+        if "feature_names" in bundle and "binary_model" in bundle:
+            return "v21_like"
+        return None
+
+    def _inspect_runtime_bundle(self, path: Path) -> dict[str, Any] | None:
+        try:
+            with path.open("rb") as handle:
+                bundle = pickle.load(handle)
+        except Exception as error:
+            logger.warning("Skipping unreadable runtime bundle %s: %s", path.name, error)
+            return None
+
+        if not isinstance(bundle, dict):
+            return None
+
+        kind = self._classify_runtime_bundle(bundle)
+        if not kind:
+            return None
+
+        threshold = bundle.get("threshold", 0.5 if kind == "v25_like" else 0.5)
+        version = bundle.get("version") or path.stem
+        stat = path.stat()
+        resolved_path = str(path.resolve())
+        default_model = path.resolve() == MODEL_PATH.resolve()
+        active_model = Path(self._active_model_path).resolve() == path.resolve()
+
+        return {
+            "model_id": path.name,
+            "filename": path.name,
+            "display_name": f"{version} · {path.stem}",
+            "version": version,
+            "kind": kind,
+            "threshold": float(threshold),
+            "path": resolved_path,
+            "is_default": default_model,
+            "is_active": active_model,
+            "loaded": active_model and self.binary_model is not None,
+            "updated_at": int(stat.st_mtime * 1000),
+        }
+
+    def list_runtime_ready_models(self) -> list[dict[str, Any]]:
+        output_dir = MODEL_PATH.parent
+        if not output_dir.exists():
+            return []
+
+        models = []
+        for path in sorted(output_dir.glob("*.pkl")):
+            metadata = self._inspect_runtime_bundle(path)
+            if metadata:
+                models.append(metadata)
+
+        def sort_key(item: dict[str, Any]):
+            return (
+                0 if item["is_active"] else 1,
+                0 if item["is_default"] else 1,
+                -float(item["updated_at"]),
+                item["filename"],
+            )
+
+        return sorted(models, key=sort_key)
+
+    def select_runtime_model(self, model_id: str) -> dict[str, Any]:
+        if not model_id:
+            raise ValueError("model_id is required")
+
+        candidates = {item["model_id"]: item for item in self.list_runtime_ready_models()}
+        selected = candidates.get(model_id)
+        if not selected:
+            raise ValueError(f"Runtime-ready model not found: {model_id}")
+
+        loaded = self.load_model(selected["path"])
+        if not loaded:
+            raise RuntimeError(f"Failed to load runtime model: {model_id}")
+
+        refreshed = next((item for item in self.list_runtime_ready_models() if item["model_id"] == model_id), None)
+        return refreshed or selected
 
     def load_model(self, path: str | Path | None = None):
         """Load trained model bundle (supports V21/V22 and V25 formats)."""
@@ -101,17 +243,22 @@ class CsiPredictionService:
             return False
 
         try:
-            bundle = pickle.load(open(p, "rb"))
+            with p.open("rb") as handle:
+                bundle = pickle.load(handle)
             self.model_bundle = bundle
             version = bundle.get("version", "unknown")
+            kind = self._classify_runtime_bundle(bundle)
+            if not kind:
+                raise ValueError(f"Unsupported runtime bundle format: {p.name}")
 
             # V25 format: model, feature_columns, threshold
-            if "feature_columns" in bundle:
+            if kind == "v25_like":
                 self.feature_names = bundle["feature_columns"]
                 self.binary_model = bundle["model"]
                 self.coarse_model = bundle.get("coarse_model")
                 self.coarse_labels = bundle.get("coarse_labels", {0: "static", 1: "motion"})
                 self._binary_threshold = bundle.get("threshold", 0.5)
+                self._coarse_empty_boost = float((bundle.get("calibration") or {}).get("empty_boost", 0.0) or 0.0)
                 cv_score = bundle.get("binary_balaccc", 0)
             else:
                 # V21/V22 format
@@ -120,8 +267,12 @@ class CsiPredictionService:
                 self.coarse_model = bundle.get("coarse_model")
                 self.coarse_labels = bundle.get("coarse_labels", {0: "static", 1: "motion"})
                 self._binary_threshold = 0.5
+                self._coarse_empty_boost = float((bundle.get("calibration") or {}).get("empty_boost", 0.0) or 0.0)
                 cv_score = bundle.get("binary_cv_score", 0)
 
+            self._active_model_path = str(p.resolve())
+            self._active_model_id = p.name
+            self._active_model_kind = kind
             logger.info(
                 f"Model loaded: v={version}, "
                 f"features={len(self.feature_names)}, "
@@ -129,16 +280,224 @@ class CsiPredictionService:
                 f"threshold={self._binary_threshold}"
             )
             self.current["model_version"] = version
+            self.current["model_id"] = p.name
+            self.current["model_filename"] = p.name
+            self.current["model_path"] = str(p.resolve())
+            self.current["model_kind"] = kind
+            self.current["model_default"] = p.resolve() == MODEL_PATH.resolve()
+            self.current["binary_threshold"] = float(self._binary_threshold)
             return True
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             return False
 
+    # ── Track B v1 shadow-mode methods ──────────────────────────────
+
+    def _load_track_b(self) -> bool:
+        """Load Track B v1 TorchScript model + normalization vectors.
+
+        Safe to call repeatedly — skips if already loaded or if artifacts
+        are missing.  Never affects Track A production inference.
+        """
+        if self._track_b_loaded:
+            return True
+        if not TRACK_B_ENABLED:
+            return False
+
+        try:
+            import torch
+        except ImportError:
+            logger.warning("Track B shadow: torch not installed, skipping")
+            return False
+
+        if not TRACK_B_MODEL_PATH.exists():
+            logger.warning("Track B shadow: TorchScript model not found: %s",
+                           TRACK_B_MODEL_PATH)
+            return False
+        if not TRACK_B_CHECKPOINT_PATH.exists():
+            logger.warning("Track B shadow: checkpoint not found: %s",
+                           TRACK_B_CHECKPOINT_PATH)
+            return False
+
+        try:
+            # Load TorchScript model
+            self._track_b_model = torch.jit.load(
+                str(TRACK_B_MODEL_PATH), map_location="cpu")
+            self._track_b_model.eval()
+
+            # Load normalization vectors from checkpoint
+            ckpt = torch.load(str(TRACK_B_CHECKPOINT_PATH),
+                              map_location="cpu", weights_only=False)
+            norm = ckpt["normalization"]
+            self._track_b_feat_mean = np.array(norm["feat_mean"], dtype=np.float32)
+            self._track_b_feat_std = np.array(norm["feat_std"], dtype=np.float32)
+            self._track_b_feat_std = np.where(
+                self._track_b_feat_std < 1e-8, 1.0, self._track_b_feat_std)
+
+            self._track_b_loaded = True
+            logger.info(
+                "Track B v1 shadow loaded: TorchScript + normalization "
+                "(mean/std shape=%s)", self._track_b_feat_mean.shape)
+            return True
+        except Exception as e:
+            logger.error("Track B shadow load failed: %s", e)
+            self._track_b_model = None
+            self._track_b_feat_mean = None
+            self._track_b_feat_std = None
+            return False
+
+    def _build_raw_csi_window(self, t_start: float, t_end: float) -> np.ndarray | None:
+        """Build raw CSI tensor [50, 424] from live packet buffer.
+
+        Mirrors the exact training preprocessing:
+        - For each node in TRACK_B_IP_ORDER (n01, n02, n03, n04):
+          - Select packets in [t_start, t_end)
+          - Extract amplitude for ACTIVE_SC (106 subcarriers)
+          - Pad/truncate to MAX_PACKETS=50 rows
+        - Concatenate along axis=1 → [50, 424]
+
+        Returns None if fewer than 2 nodes have any data.
+        """
+        parts = []
+        nodes_with_data = 0
+
+        for ip in TRACK_B_IP_ORDER:
+            pkts = [(t, a) for t, a, _p in self._packets.get(ip, [])
+                    if t_start <= t < t_end]
+
+            if len(pkts) >= 2:
+                nodes_with_data += 1
+                # Build amplitude matrix [n_packets, 128], then select active SC
+                amp_mat = np.array([a for _, a in pkts], dtype=np.float32)
+                # Select 106 active subcarriers (same as training)
+                if amp_mat.shape[1] >= 128:
+                    active_mat = amp_mat[:, TRACK_B_ACTIVE_SC]
+                else:
+                    # Pad columns if fewer than 128
+                    padded = np.zeros((amp_mat.shape[0], 128), dtype=np.float32)
+                    padded[:, :amp_mat.shape[1]] = amp_mat
+                    active_mat = padded[:, TRACK_B_ACTIVE_SC]
+                # Pad/truncate to 50 rows
+                active_mat = self._pad_or_truncate(active_mat, TRACK_B_MAX_PACKETS)
+            else:
+                active_mat = np.zeros(
+                    (TRACK_B_MAX_PACKETS, len(TRACK_B_ACTIVE_SC)), dtype=np.float32)
+
+            parts.append(active_mat)
+
+        if nodes_with_data < 2:
+            return None
+
+        # [50, 106*4] = [50, 424]
+        return np.concatenate(parts, axis=1).astype(np.float32)
+
+    @staticmethod
+    def _pad_or_truncate(mat: np.ndarray, max_len: int) -> np.ndarray:
+        """Pad or truncate a 2D matrix to exactly max_len rows."""
+        if len(mat) == 0:
+            return np.zeros((max_len, mat.shape[1] if mat.ndim > 1 else 106),
+                            dtype=np.float32)
+        if len(mat) >= max_len:
+            return mat[:max_len]
+        pad = np.zeros((max_len - len(mat), mat.shape[1]), dtype=np.float32)
+        return np.vstack([mat, pad])
+
+    def _shadow_predict_track_b(self, t_start: float, t_end: float,
+                                 w_end: float) -> dict | None:
+        """Run Track B inference in shadow mode. Never affects production.
+
+        Returns shadow prediction dict or None if blocked.
+        """
+        if not self._track_b_loaded:
+            if not self._load_track_b():
+                return None
+
+        raw_window = self._build_raw_csi_window(t_start, t_end)
+        if raw_window is None:
+            return None
+
+        try:
+            import torch
+            import torch.nn.functional as F
+
+            # z-score normalize
+            x = (raw_window - self._track_b_feat_mean) / self._track_b_feat_std
+            x_tensor = torch.from_numpy(x).float().unsqueeze(0)  # [1, 50, 424]
+
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                logits = self._track_b_model(x_tensor)
+            inference_ms = (time.perf_counter() - t0) * 1000
+
+            probs = F.softmax(logits, dim=1).squeeze(0).numpy()
+            pred_idx = int(np.argmax(probs))
+            pred_class = TRACK_B_CLASS_NAMES[pred_idx]
+
+            shadow = {
+                "t": w_end,
+                "track": "B_v1",
+                "predicted_class": pred_class,
+                "predicted_idx": pred_idx,
+                "probabilities": {
+                    TRACK_B_CLASS_NAMES[i]: round(float(probs[i]), 4)
+                    for i in range(3)
+                },
+                "inference_ms": round(inference_ms, 2),
+                "nodes_with_data": sum(
+                    1 for ip in TRACK_B_IP_ORDER
+                    if any(t_start <= t < t_end
+                           for t, _, _ in self._packets.get(ip, []))
+                ),
+            }
+            self._track_b_shadow = shadow
+            self._track_b_history.append(shadow)
+            if len(self._track_b_history) > 60:
+                self._track_b_history = self._track_b_history[-60:]
+
+            logger.info(
+                "Track B SHADOW: %s (E=%.3f S=%.3f M=%.3f) %.1fms",
+                pred_class, probs[0], probs[1], probs[2], inference_ms)
+            return shadow
+
+        except Exception as e:
+            logger.error("Track B shadow inference failed: %s", e)
+            return None
+
     # ── CSI parsing ───────────────────────────────────────────────────
 
     @staticmethod
+    def _normalize_to_64(amp, phase=None):
+        """Normalize amplitude/phase to exactly 64 subcarriers.
+
+        FIX_SUB64 (2026-03-22): eliminates amplitude confound caused by
+        zero-padding 64-sub packets to 128 (halving mean amplitude) while
+        128-sub packets kept full amplitude.  All packets now produce 64
+        real-valued subcarriers with consistent amplitude scale.
+
+        - n_sub == 64 → keep as-is
+        - n_sub > 64  → average adjacent pairs (128→64, 96→48 then pad, etc.)
+        - n_sub < 64  → pad with zeros
+        """
+        n = len(amp)
+        if n == 64:
+            a64, p64 = amp, phase
+        elif n > 64:
+            k = n // 64
+            usable = 64 * k
+            a64 = amp[:usable].reshape(64, k).mean(axis=1)
+            if phase is not None:
+                # take every k-th phase sample (circular mean is fragile)
+                p64 = phase[:usable:k][:64]
+            else:
+                p64 = None
+        else:
+            a64 = np.pad(amp, (0, 64 - n), mode='constant')
+            p64 = np.pad(phase, (0, 64 - n), mode='constant') if phase is not None else None
+        return a64, p64
+
+    @staticmethod
     def _parse_csi(b64: str):
-        """Parse base64 CSI payload into amplitude and phase arrays."""
+        """Parse base64 CSI payload into amplitude and phase arrays (64-sub normalized)."""
         raw = base64.b64decode(b64)
         if len(raw) < CSI_HEADER + 40:
             return None, None
@@ -151,10 +510,7 @@ class CsiPredictionService:
         q_v = arr[:, 1].astype(np.float32)
         amp = np.sqrt(i_v**2 + q_v**2)
         phase = np.arctan2(q_v, i_v)
-        if len(amp) < 128:
-            amp = np.pad(amp, (0, 128 - len(amp)))
-            phase = np.pad(phase, (0, 128 - len(phase)))
-        return amp[:128], phase[:128]
+        return CSIPredictionService._normalize_to_64(amp, phase)
 
     # ── Feature extraction (mirrors V21) ──────────────────────────────
 
@@ -165,9 +521,22 @@ class CsiPredictionService:
         n_sc_ent, n_sc_frac, n_dop, n_bldev = [], [], [], []
         active_nodes = 0
 
+        now_mono = time.monotonic()
+
         for ni, ip in enumerate(NODE_IPS):
             pkts = [(t, a, p) for t, a, p in self._packets.get(ip, []) if t_start <= t < t_end]
             pre = f"n{ni}"
+
+            # ── Topology warmup gate: suppress features for reconnected node ─
+            warmup_end = self._node_warmup_until.get(ip, 0)
+            node_in_warmup = now_mono < warmup_end
+            if node_in_warmup and len(pkts) >= 5:
+                remaining = warmup_end - now_mono
+                logger.debug(
+                    f"Node warmup ACTIVE: {ip} has {len(pkts)} pkts but damped "
+                    f"({remaining:.0f}s remaining)"
+                )
+                pkts = []  # treat as offline — zero all features
 
             if len(pkts) < 5:
                 for s in [
@@ -209,12 +578,12 @@ class CsiPredictionService:
             else:
                 feat[f"{pre}_kurtosis"] = 0; feat[f"{pre}_skew"] = 0; feat[f"{pre}_zcr"] = 0
 
-            # V19 subcarrier features
+            # V19 subcarrier features (64-sub normalized)
             sc_var = amp_mat.var(axis=0)
             feat[f"{pre}_sc_var_mean"] = float(sc_var.mean())
             feat[f"{pre}_sc_var_max"] = float(sc_var.max())
-            feat[f"{pre}_sc_var_lo"] = float(sc_var[:30].mean())
-            feat[f"{pre}_sc_var_hi"] = float(sc_var[30:60].mean()) if len(sc_var) > 30 else 0
+            feat[f"{pre}_sc_var_lo"] = float(sc_var[:16].mean())
+            feat[f"{pre}_sc_var_hi"] = float(sc_var[16:32].mean()) if len(sc_var) > 16 else 0
 
             thresh = np.median(sc_var) * 2
             frac_hi = float((sc_var > thresh).mean())
@@ -238,10 +607,10 @@ class CsiPredictionService:
             # V22: amplitude skewness
             feat[f"{pre}_amp_skew"] = float(skew(amps)) if len(amps) > 3 else 0
 
-            # V22: temporal variance split by subcarrier bands
+            # V22: temporal variance split by subcarrier bands (64-sub normalized)
             sc_tvar = amp_mat.var(axis=0)
-            lo_band = sc_tvar[6:59]   # subcarriers 6-58
-            hi_band = sc_tvar[70:123] # subcarriers 70-122
+            lo_band = sc_tvar[3:30]   # lower active band (64-sub)
+            hi_band = sc_tvar[35:62]  # upper active band (64-sub)
             feat[f"{pre}_tvar_lo"] = float(lo_band.mean()) if len(lo_band) > 0 else 0
             feat[f"{pre}_tvar_hi"] = float(hi_band.mean()) if len(hi_band) > 0 else 0
 
@@ -267,10 +636,10 @@ class CsiPredictionService:
             else:
                 feat[f"{pre}_fft_peak"] = 0; feat[f"{pre}_fft_energy"] = 0
 
-            # PCA
+            # PCA (64-sub: take every 2nd for ~32 components)
             if amp_mat.shape[0] >= 5:
                 try:
-                    cov = np.cov(amp_mat[:, ::4].T)
+                    cov = np.cov(amp_mat[:, ::2].T)
                     ev = np.sort(np.linalg.eigvalsh(cov))[::-1]
                     feat[f"{pre}_pca_ev1"] = float(ev[0])
                     total = ev.sum()
@@ -328,6 +697,11 @@ class CsiPredictionService:
 
     # ── Prediction ────────────────────────────────────────────────────
 
+    def _normalize_coarse_label(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.lower()
+        return self.coarse_labels.get(value, str(value).lower())
+
     def predict_window(self):
         """Run prediction on the most recent complete window."""
         if not self.binary_model or not self._start_time:
@@ -364,14 +738,24 @@ class CsiPredictionService:
         coarse_label = "empty"
         coarse_conf = 0.0
         if bin_pred == 1 and self.coarse_model is not None:
-            coarse_pred = self.coarse_model.predict(X)[0]
             coarse_proba = self.coarse_model.predict_proba(X)[0]
-            # coarse_pred may be int (old models) or string (frozen_twostage_v1)
-            if isinstance(coarse_pred, str):
-                coarse_label = coarse_pred.lower()
+            coarse_classes = list(getattr(self.coarse_model, "classes_", []))
+            coarse_proba_adj = np.array(coarse_proba, copy=True)
+
+            if self._coarse_empty_boost > 0 and coarse_classes:
+                for idx, cls in enumerate(coarse_classes):
+                    if self._normalize_coarse_label(cls) == "empty":
+                        coarse_proba_adj[idx] += self._coarse_empty_boost
+                        break
+
+            if coarse_classes:
+                coarse_idx = int(np.argmax(coarse_proba_adj))
+                coarse_label = self._normalize_coarse_label(coarse_classes[coarse_idx])
+                coarse_conf = float(coarse_proba_adj[coarse_idx])
             else:
-                coarse_label = self.coarse_labels.get(coarse_pred, "unknown")
-            coarse_conf = float(max(coarse_proba))
+                coarse_pred = self.coarse_model.predict(X)[0]
+                coarse_label = self._normalize_coarse_label(coarse_pred)
+                coarse_conf = float(max(coarse_proba_adj))
         elif bin_pred == 1:
             # No coarse model — estimate motion from temporal variance (fallback)
             tvar_sum = sum(feat.get(f"n{i}_tvar", 0) for i in range(4))
@@ -476,6 +860,8 @@ class CsiPredictionService:
         try:
             telemetry_path = PROJECT / "temp" / "runtime_telemetry.ndjson"
             with open(telemetry_path, "a") as tf:
+                now_m = time.monotonic()
+                damped_ips = [ip for ip in NODE_IPS if now_m < self._node_warmup_until.get(ip, 0)]
                 telemetry_entry = {
                     "ts": time.time(),
                     "window_t": w_end,
@@ -488,6 +874,7 @@ class CsiPredictionService:
                     "nodes": active_nodes,
                     "pps": round(total_pps, 1),
                     "zone": zone,
+                    "warmup_damped": damped_ips if damped_ips else None,
                 }
                 tf.write(json.dumps(telemetry_entry) + "\n")
         except Exception:
@@ -517,6 +904,30 @@ class CsiPredictionService:
             f"| {active_nodes} nodes | {total_pps:.0f} pps"
         )
 
+        # ── Track B shadow inference (does NOT affect production output) ──
+        try:
+            shadow = self._shadow_predict_track_b(w_start, w_end, w_end)
+            if shadow is not None:
+                # Append to telemetry for offline comparison
+                try:
+                    shadow_path = PROJECT / "temp" / "track_b_shadow_telemetry.ndjson"
+                    with open(shadow_path, "a") as sf:
+                        shadow_entry = {
+                            "ts": time.time(),
+                            "window_t": w_end,
+                            "track_a_motion": motion_state,
+                            "track_a_coarse": coarse_label,
+                            "track_b_class": shadow["predicted_class"],
+                            "track_b_probs": shadow["probabilities"],
+                            "track_b_ms": shadow["inference_ms"],
+                            "agree": (shadow["predicted_class"].lower() == coarse_label),
+                        }
+                        sf.write(json.dumps(shadow_entry) + "\n")
+                except Exception:
+                    pass  # shadow telemetry must never crash
+        except Exception as e:
+            logger.debug("Track B shadow skipped: %s", e)
+
         # Prune old packets
         cutoff = now - MAX_BUFFER_SEC
         for ip in list(self._packets.keys()):
@@ -527,15 +938,18 @@ class CsiPredictionService:
     def _handle_raw_packet(self, data: bytes, addr: tuple):
         """Process one incoming raw UDP CSI packet from ESP32 node."""
         ip = addr[0]
-        if ip not in NODE_IPS:
-            return
 
-        # Feed to recording service (parallel capture — runs first to avoid data loss)
+        # Feed to recording service BEFORE filtering — shadow nodes (e.g. node05)
+        # are recorded but not used for inference.
         try:
             from .csi_recording_service import csi_recording_service
             csi_recording_service.ingest_packet(data, addr)
         except Exception:
             pass
+
+        # Only process packets from core inference nodes
+        if ip not in NODE_IPS:
+            return
 
         # Raw binary CSI — same format as capture scripts expect
         amp, phase = self._parse_csi_raw(data)
@@ -546,9 +960,34 @@ class CsiPredictionService:
         t_sec = time.time() - self._start_time
         self._packets[ip].append((t_sec, amp, phase))
 
+        # ── Topology warmup: detect reconnect after long offline ─────
+        now_mono = time.monotonic()
+        prev = self._node_last_seen.get(ip)
+        self._node_last_seen[ip] = now_mono
+
+        if prev is not None:
+            gap = now_mono - prev
+            if gap >= WARMUP_OFFLINE_THRESHOLD_SEC:
+                warmup_end = now_mono + WARMUP_DURATION_SEC
+                self._node_warmup_until[ip] = warmup_end
+                event = {
+                    "event": "warmup_started",
+                    "ip": ip,
+                    "gap_sec": round(gap, 1),
+                    "warmup_until_mono": round(warmup_end, 1),
+                    "ts": time.time(),
+                }
+                self._node_warmup_log.append(event)
+                if len(self._node_warmup_log) > 100:
+                    self._node_warmup_log = self._node_warmup_log[-50:]
+                logger.warning(
+                    f"Node warmup STARTED: {ip} reconnected after {gap:.0f}s offline, "
+                    f"damping features for {WARMUP_DURATION_SEC:.0f}s"
+                )
+
     @staticmethod
     def _parse_csi_raw(data: bytes):
-        """Parse raw binary CSI payload (not base64, direct bytes)."""
+        """Parse raw binary CSI payload (not base64, direct bytes). 64-sub normalized."""
         if len(data) < CSI_HEADER + 40:
             return None, None
         iq = data[CSI_HEADER : CSI_HEADER + 256]
@@ -560,10 +999,7 @@ class CsiPredictionService:
         q_v = arr[:, 1].astype(np.float32)
         amp = np.sqrt(i_v**2 + q_v**2)
         phase = np.arctan2(q_v, i_v)
-        if len(amp) < 128:
-            amp = np.pad(amp, (0, 128 - len(amp)))
-            phase = np.pad(phase, (0, 128 - len(phase)))
-        return amp[:128], phase[:128]
+        return CSIPredictionService._normalize_to_64(amp, phase)
 
     class _UdpProtocol(asyncio.DatagramProtocol):
         def __init__(self, service):
@@ -602,11 +1038,31 @@ class CsiPredictionService:
 
     def get_status(self) -> dict:
         """Get current prediction status for API."""
-        return {
+        now_mono = time.monotonic()
+        warmup_nodes = {}
+        for ip in NODE_IPS:
+            end = self._node_warmup_until.get(ip, 0)
+            if now_mono < end:
+                warmup_nodes[ip] = {
+                    "remaining_sec": round(end - now_mono, 1),
+                    "damped": True,
+                }
+        status = {
             "running": self._running,
             "model_loaded": self.binary_model is not None,
+            "warmup_active": len(warmup_nodes) > 0,
+            "warmup_nodes": warmup_nodes,
             **self.current,
         }
+        # Track B shadow info (debug surface only)
+        if self._track_b_loaded and self._track_b_shadow:
+            status["track_b_shadow"] = self._track_b_shadow
+        elif TRACK_B_ENABLED:
+            status["track_b_shadow"] = {
+                "loaded": self._track_b_loaded,
+                "status": "awaiting_first_window" if self._track_b_loaded else "not_loaded",
+            }
+        return status
 
 
 # Singleton

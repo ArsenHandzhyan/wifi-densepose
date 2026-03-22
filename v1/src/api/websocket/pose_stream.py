@@ -352,6 +352,22 @@ class PoseStreamHandler:
                 for client_id, sub in self.subscribers.items()
             }
         }
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Get current service status for health/UI surfaces."""
+        status = self.get_stream_status()
+        return {
+          "status": "healthy" if self.is_streaming else "inactive",
+          "running": self.is_streaming,
+          "initialized": True,
+          "subscriber_count": status["subscriber_count"],
+          "stream_fps": self.stream_config["fps"],
+          "min_confidence": self.stream_config["min_confidence"],
+          "message": (
+              f"stream loop {'активен' if self.is_streaming else 'остановлен'}"
+              f" · подписчиков {status['subscriber_count']}"
+          )
+        }
     
     async def get_performance_metrics(self) -> Dict[str, Any]:
         """Get streaming performance metrics."""

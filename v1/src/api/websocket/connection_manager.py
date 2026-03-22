@@ -316,6 +316,23 @@ class ConnectionManager:
         }
         
         return stats
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Get current service status for health/UI surfaces."""
+        stats = await self.get_connection_stats()
+        return {
+            "status": "healthy" if self._started else "inactive",
+            "running": self._started,
+            "initialized": True,
+            "active_clients": stats["active_clients"],
+            "total_clients": stats["total_clients"],
+            "clients_by_type": stats["clients_by_type"],
+            "clients_by_zone": stats["clients_by_zone"],
+            "message": (
+                f"менеджер соединений {'работает' if self._started else 'не запущен'}"
+                f" · активных клиентов {stats['active_clients']}"
+            )
+        }
     
     async def get_metrics(self) -> Dict[str, Any]:
         """Get detailed metrics."""

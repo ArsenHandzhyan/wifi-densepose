@@ -7,44 +7,83 @@ export class BackendDetector {
     this.isBackendAvailable = null;
     this.lastCheck = 0;
     this.checkInterval = 30000; // Check every 30 seconds
+    this.resolvedBaseUrl = API_CONFIG.BASE_URL;
   }
 
-  // Check if the real backend is available
-  async checkBackendAvailability() {
+  getBackendCandidates() {
+    const candidates = [];
+    const location = typeof window !== 'undefined' ? window.location : null;
+
+    const addCandidate = (value) => {
+      if (!value || candidates.includes(value)) {
+        return;
+      }
+      candidates.push(value);
+    };
+
+    if (location) {
+      const params = new URLSearchParams(location.search);
+      addCandidate(params.get('backend'));
+    }
+
+    const hostname = location?.hostname || '';
+    const isLocalOrigin = ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
+
+    if (isLocalOrigin) {
+      addCandidate(API_CONFIG.LOCAL_RUNTIME_URL);
+      if (hostname !== '127.0.0.1' && hostname !== 'localhost') {
+        addCandidate(`${location.protocol}//${hostname}:8000`);
+      }
+      if (hostname !== 'localhost') {
+        addCandidate('http://localhost:8000');
+      }
+    }
+
+    addCandidate(API_CONFIG.BASE_URL);
+    addCandidate(API_CONFIG.LOCAL_RUNTIME_URL);
+    addCandidate('http://localhost:8000');
+
+    return candidates;
+  }
+
+  async probeBackend(baseUrl, timeoutMs = 3000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${baseUrl}/health/live`, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      return response.ok;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  async resolveRealBackendBaseUrl(force = false) {
     const now = Date.now();
-    
-    // Use cached result if recent
-    if (this.isBackendAvailable !== null && (now - this.lastCheck) < this.checkInterval) {
-      return this.isBackendAvailable;
+
+    if (!force && this.resolvedBaseUrl && this.isBackendAvailable !== null && (now - this.lastCheck) < this.checkInterval) {
+      return this.resolvedBaseUrl;
     }
 
     try {
       console.log('🔍 Checking backend availability...');
 
-      const candidates = [
-        API_CONFIG.BASE_URL,
-        'http://127.0.0.1:8000',
-        'http://localhost:8000'
-      ].filter((v, i, a) => a.indexOf(v) === i);
+      const candidates = this.getBackendCandidates();
 
       for (const baseUrl of candidates) {
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3000);
+          const responseOk = await this.probeBackend(baseUrl);
 
-          const response = await fetch(`${baseUrl}/health/live`, {
-            method: 'GET',
-            signal: controller.signal,
-            headers: { 'Accept': 'application/json' }
-          });
-
-          clearTimeout(timeoutId);
-
-          if (response.ok) {
+          if (responseOk) {
             this.isBackendAvailable = true;
             this.lastCheck = now;
+            this.resolvedBaseUrl = baseUrl;
             console.log(`✅ Real backend is available at ${baseUrl}`);
-            return true;
+            return baseUrl;
           }
         } catch (_candidateError) {
           // Try next candidate
@@ -61,7 +100,25 @@ export class BackendDetector {
       } else {
         console.log(`❌ Backend unavailable: ${error.message}`);
       }
-      
+
+      this.resolvedBaseUrl = API_CONFIG.BASE_URL;
+      throw error;
+    }
+  }
+
+  // Check if the real backend is available
+  async checkBackendAvailability() {
+    const now = Date.now();
+
+    // Use cached result if recent
+    if (this.isBackendAvailable !== null && (now - this.lastCheck) < this.checkInterval) {
+      return this.isBackendAvailable;
+    }
+
+    try {
+      await this.resolveRealBackendBaseUrl(true);
+      return true;
+    } catch (_error) {
       return false;
     }
   }
@@ -95,13 +152,22 @@ export class BackendDetector {
   // Get the appropriate base URL
   async getBaseUrl() {
     const useMock = await this.shouldUseMockServer();
-    return useMock ? window.location.origin : API_CONFIG.BASE_URL;
+    if (useMock) {
+      return window.location.origin;
+    }
+
+    try {
+      return await this.resolveRealBackendBaseUrl();
+    } catch (_error) {
+      return this.resolvedBaseUrl || API_CONFIG.BASE_URL;
+    }
   }
 
   // Force a fresh check
   forceCheck() {
     this.isBackendAvailable = null;
     this.lastCheck = 0;
+    this.resolvedBaseUrl = API_CONFIG.BASE_URL;
   }
 }
 

@@ -1,0 +1,2514 @@
+import { API_CONFIG } from '../config/api.config.js';
+import { apiService } from './api.service.js';
+import { healthService } from './health.service.js';
+import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack } from '../data/guided-capture-packs.js';
+import {
+  buildManualCaptureLabel,
+  buildManualCaptureNotes,
+  getManualCapturePreset,
+  getManualCapturePresetVariant
+} from '../data/manual-capture-presets.js';
+
+const NODE_ORDER = ['node01', 'node02', 'node03', 'node04'];
+const NODE_IP_TO_ID = {
+  '192.168.1.137': 'node01',
+  '192.168.1.117': 'node02',
+  '192.168.1.101': 'node03',
+  '192.168.1.125': 'node04'
+};
+const DEFAULT_GARAGE_LAYOUT = {
+  widthMeters: 4.3,
+  heightMeters: 7.5,
+  door: { xMeters: 1.5, yMeters: 0.0 },
+  zones: {
+    doorMaxY: 1.5,
+    deepMinY: 5.0
+  },
+  nodes: [
+    { nodeId: 'node01', ip: '192.168.1.137', xMeters: 1.05, yMeters: 0.15, zone: 'door' },
+    { nodeId: 'node02', ip: '192.168.1.117', xMeters: -1.0, yMeters: 0.15, zone: 'door' },
+    { nodeId: 'node03', ip: '192.168.1.101', xMeters: 1.1, yMeters: 3.25, zone: 'center' },
+    { nodeId: 'node04', ip: '192.168.1.125', xMeters: -1.05, yMeters: 3.25, zone: 'center' }
+  ]
+};
+const CSI_ENDPOINTS = API_CONFIG?.ENDPOINTS?.CSI || {};
+const CSI_STATUS_ENDPOINT = CSI_ENDPOINTS.STATUS || '/api/v1/csi/status';
+const CSI_MODELS_ENDPOINT = CSI_ENDPOINTS.MODELS || '/api/v1/csi/models';
+const CSI_MODEL_SELECT_ENDPOINT = CSI_ENDPOINTS.MODEL_SELECT || '/api/v1/csi/model/select';
+const CSI_RECORD_ENDPOINTS = CSI_ENDPOINTS.RECORD || {
+  PREFLIGHT: '/api/v1/csi/record/preflight',
+  START: '/api/v1/csi/record/start',
+  STOP: '/api/v1/csi/record/stop',
+  STATUS: '/api/v1/csi/record/status'
+};
+const DEFAULT_POLLING = {
+  csi: 1000,
+  pose: 1000,
+  status: 15000,
+  metrics: 10000,
+  info: 60000,
+  runtimeModels: 60000,
+  forensicRuns: 30000,
+  recording: 2000
+};
+const OPERATOR_PRESENCE_GATE = {
+  confirmMotionWindows: 3,
+  clearNoMotionWindows: 2,
+  staleWindowAgeSec: 8,
+  minNodesActive: 3
+};
+const MULTI_PERSON_AMBIGUITY_SCORE_THRESHOLD = 0.55;
+const MULTI_PERSON_AMBIGUITY_RISK_TOKENS = ['collapse', 'ambigu', 'multi_person', 'multiperson'];
+const ACTIVE_GUIDED_STATUSES = ['cueing', 'running', 'paused', 'stopping'];
+const DEFAULT_GUIDED_COUNTDOWN_SEC = 4;
+const TEACHER_SOURCE_KINDS = {
+  PIXEL_RTSP: 'pixel_rtsp',
+  MAC_CAMERA: 'mac_camera',
+  NONE: 'none'
+};
+const DEFAULT_PIXEL_RTSP_URL = 'rtsp://admin:admin@192.168.1.148:8554/live';
+const DEFAULT_PIXEL_RTSP_NAME = 'Pixel 8 Pro';
+const DEFAULT_MAC_CAMERA_DEVICE = '0';
+const DEFAULT_MAC_CAMERA_DEVICE_NAME = 'Mac Camera (device 0)';
+const DEFAULT_TEACHER_INPUT_PIXEL_FORMAT = 'nv12';
+
+function isLocalHostname(hostname) {
+  return ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function safeNumber(value, fallback = null) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function makeManualRecordingLabel() {
+  return `manual_${nowIso()
+    .replace(/\.\d{3}Z$/, '')
+    .replaceAll('-', '')
+    .replaceAll(':', '')
+    .replace('T', '_')}`;
+}
+
+function makeFreeformRecordingLabel(personCount = 1) {
+  const stamp = nowIso()
+    .replace(/\.\d{3}Z$/, '')
+    .replaceAll('-', '')
+    .replaceAll(':', '')
+    .replace('T', '_');
+  const countToken = Number(personCount) >= 3 ? 'p3plus' : `p${Math.max(1, Number(personCount) || 1)}`;
+  return `freeform_${countToken}_${stamp}`;
+}
+
+function getFreeformRoleHint(personCount = 1) {
+  return Number(personCount) > 1
+    ? 'runtime_acceptance / forensic_reference'
+    : 'freeform_single_person';
+}
+
+function buildFreeformNotes(freeform) {
+  const personCount = Math.max(1, Number(freeform?.personCount) || 1);
+  const roleHint = Number(personCount) > 1
+    ? 'runtime_acceptance|forensic_reference'
+    : 'freeform_single_person';
+  const parts = [
+    'mode=freeform',
+    `person_count=${personCount}`,
+    'motion_type=free_motion',
+    `role_hint=${roleHint}`
+  ];
+  const extraNotes = String(freeform?.notes || '').trim();
+  if (extraNotes) {
+    parts.push(extraNotes);
+  }
+  return parts.join(', ');
+}
+
+function buildFreeformStopSummary(result, recording) {
+  const status = recording?.status || {};
+  const freeform = recording?.freeform || {};
+  return {
+    label: result?.label || status.label || freeform.label || null,
+    durationSec: safeNumber(result?.duration_sec),
+    totalChunks: safeNumber(result?.total_chunks),
+    totalPackets: safeNumber(result?.total_packets),
+    nodePackets: result?.node_packets || null,
+    lastChunk: result?.last_chunk || null,
+    withVideo: true,
+    personCount: Math.max(1, Number(status.person_count || freeform.personCount) || 1),
+    motionType: status.motion_type || 'free_motion',
+    stoppedAt: nowIso()
+  };
+}
+
+function inferActiveRecordingMode(recording) {
+  const status = recording?.status;
+  if (!status?.recording) {
+    return null;
+  }
+  if (ACTIVE_GUIDED_STATUSES.includes(recording?.guided?.status || 'idle')) {
+    return 'guided';
+  }
+  if (recording?.activeMode === 'freeform' || (status?.motion_type === 'free_motion' && status?.with_video)) {
+    return 'freeform';
+  }
+  if (recording?.activeMode === 'manual') {
+    return 'manual';
+  }
+  return 'manual';
+}
+
+function buildTeacherSourceState() {
+  return {
+    selectedKind: TEACHER_SOURCE_KINDS.PIXEL_RTSP,
+    pixelRtspUrl: DEFAULT_PIXEL_RTSP_URL,
+    pixelRtspName: DEFAULT_PIXEL_RTSP_NAME,
+    macDevice: DEFAULT_MAC_CAMERA_DEVICE,
+    macDeviceName: DEFAULT_MAC_CAMERA_DEVICE_NAME
+  };
+}
+
+function normalizeTeacherSourceKind(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return TEACHER_SOURCE_KINDS.PIXEL_RTSP;
+  }
+  if (raw === 'phone_rtsp' || raw === 'rtsp_teacher') {
+    return TEACHER_SOURCE_KINDS.PIXEL_RTSP;
+  }
+  if (raw === 'mac_camera_terminal') {
+    return TEACHER_SOURCE_KINDS.MAC_CAMERA;
+  }
+  if (Object.values(TEACHER_SOURCE_KINDS).includes(raw)) {
+    return raw;
+  }
+  return raw;
+}
+
+function buildTeacherSourceContract(
+  recording,
+  {
+    withVideo = true,
+    videoRequired = null,
+    allowLegacyNone = false
+  } = {}
+) {
+  const teacherSource = recording?.teacherSource || buildTeacherSourceState();
+  const requestedKind = normalizeTeacherSourceKind(teacherSource.selectedKind);
+  const videoRequested = Boolean(withVideo);
+  const strictVideoRequired = typeof videoRequired === 'boolean'
+    ? videoRequired
+    : videoRequested;
+  const fallbackKind = strictVideoRequired ? TEACHER_SOURCE_KINDS.PIXEL_RTSP : TEACHER_SOURCE_KINDS.NONE;
+  const effectiveKind = videoRequested ? (requestedKind || fallbackKind) : TEACHER_SOURCE_KINDS.NONE;
+  const contract = {
+    withVideo: videoRequested,
+    checkVideo: videoRequested,
+    videoRequired: strictVideoRequired && effectiveKind !== TEACHER_SOURCE_KINDS.NONE,
+    teacherSourceKind: effectiveKind,
+    teacherSourceUrl: '',
+    teacherSourceName: '',
+    teacherDevice: '',
+    teacherDeviceName: '',
+    teacherInputPixelFormat: DEFAULT_TEACHER_INPUT_PIXEL_FORMAT,
+    error: null
+  };
+
+  if (effectiveKind === TEACHER_SOURCE_KINDS.NONE) {
+    if (strictVideoRequired && !allowLegacyNone) {
+      contract.error = 'video_required=true требует явный teacher source вместо legacy none.';
+    }
+    return contract;
+  }
+
+  if (effectiveKind === TEACHER_SOURCE_KINDS.PIXEL_RTSP) {
+    contract.teacherSourceUrl = String(teacherSource.pixelRtspUrl || DEFAULT_PIXEL_RTSP_URL).trim();
+    contract.teacherSourceName = String(teacherSource.pixelRtspName || DEFAULT_PIXEL_RTSP_NAME).trim() || DEFAULT_PIXEL_RTSP_NAME;
+    if (!contract.teacherSourceUrl) {
+      contract.error = 'Для Pixel RTSP нужен явный teacher_source_url.';
+    }
+    return contract;
+  }
+
+  if (effectiveKind === TEACHER_SOURCE_KINDS.MAC_CAMERA) {
+    contract.teacherDevice = String(teacherSource.macDevice || DEFAULT_MAC_CAMERA_DEVICE).trim() || DEFAULT_MAC_CAMERA_DEVICE;
+    contract.teacherDeviceName = String(teacherSource.macDeviceName || DEFAULT_MAC_CAMERA_DEVICE_NAME).trim()
+      || DEFAULT_MAC_CAMERA_DEVICE_NAME;
+    contract.teacherSourceName = 'Mac Camera';
+    return contract;
+  }
+
+  contract.error = `Неподдерживаемый teacher source: ${effectiveKind}`;
+  return contract;
+}
+
+function applyTeacherSourceContract(target, contract) {
+  target.video_required = Boolean(contract.videoRequired);
+  target.teacher_source_kind = contract.teacherSourceKind;
+  if (contract.teacherSourceUrl) {
+    target.teacher_source_url = contract.teacherSourceUrl;
+  }
+  if (contract.teacherSourceName) {
+    target.teacher_source_name = contract.teacherSourceName;
+  }
+  if (contract.teacherDevice) {
+    target.teacher_device = contract.teacherDevice;
+  }
+  if (contract.teacherDeviceName) {
+    target.teacher_device_name = contract.teacherDeviceName;
+  }
+  if (contract.teacherInputPixelFormat) {
+    target.teacher_input_pixel_format = contract.teacherInputPixelFormat;
+  }
+}
+
+function applyManualCapturePreset(manual, { resetVariant = false } = {}) {
+  const preset = getManualCapturePreset(manual.labelPresetId);
+  if (!preset || preset.id === 'custom') {
+    return;
+  }
+
+  const fallbackVariant = preset.variants?.[0] || null;
+  const variant = getManualCapturePresetVariant(
+    manual.labelPresetId,
+    resetVariant ? fallbackVariant?.id : manual.labelVariantId
+  ) || fallbackVariant;
+
+  if (variant?.id) {
+    manual.labelVariantId = variant.id;
+  }
+
+  const generatedLabel = buildManualCaptureLabel(preset, variant);
+  const generatedNotes = buildManualCaptureNotes(preset, variant);
+
+  if (generatedLabel) {
+    manual.label = generatedLabel;
+  }
+  manual.notes = generatedNotes || '';
+
+  if (preset.motionType) {
+    manual.motionType = preset.motionType;
+  }
+  if (Number.isFinite(Number(preset.personCount))) {
+    manual.personCount = Number(preset.personCount);
+  }
+}
+
+function buildRecordingState() {
+  const defaultPack = GUIDED_CAPTURE_PACKS[0] || null;
+  return {
+    status: null,
+    activeMode: null,
+    lastStopResult: null,
+    preflight: null,
+    preflightLoading: false,
+    preflightError: null,
+    actionError: null,
+    selectedPackId: null,
+    teacherSource: buildTeacherSourceState(),
+    manual: {
+      label: '',
+      labelPresetId: 'custom',
+      labelVariantId: 'custom',
+      personCount: 1,
+      motionType: '',
+      chunkSec: 60,
+      withVideo: true,
+      voicePrompt: true,
+      notes: '',
+      skipPreflight: false
+    },
+    freeform: {
+      label: '',
+      personCount: 1,
+      chunkSec: 60,
+      notes: '',
+      voiceCue: true,
+      withVideo: true,
+      lastSummary: null
+    },
+    guided: {
+      packId: defaultPack?.id || null,
+      runToken: 0,
+      status: 'idle',
+      sequencePhase: null,
+      countdownValue: null,
+      stepIndex: -1,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      pauseUntil: null,
+      sessionPrefix: null,
+      currentStep: null,
+      currentRecordingLabel: null,
+      voiceEnabled: defaultPack?.voiceEnabledByDefault !== false,
+      withVideo: defaultPack?.withVideo !== false,
+      logs: [],
+      completedAt: null,
+      lastError: null
+    }
+  };
+}
+
+function makeGuidedSessionPrefix(pack) {
+  const stamp = nowIso()
+    .replace(/\.\d{3}Z$/, '')
+    .replaceAll('-', '')
+    .replaceAll(':', '')
+    .replace('T', '_');
+  return `${pack.labelPrefix || 'train'}_${stamp}_${pack.sessionSlug || pack.id}`;
+}
+
+function makeGuidedRecordingLabel(sessionPrefix, stepIndex, step) {
+  const stepNumber = String(stepIndex + 1).padStart(2, '0');
+  return `${sessionPrefix}_clip${stepNumber}_${step.id}`;
+}
+
+function updateGuidedLogEntry(logs, recordingLabel, patch) {
+  const nextLogs = [...logs];
+  const targetIndex = [...nextLogs].reverse().findIndex((entry) => entry.recordingLabel === recordingLabel);
+  if (targetIndex === -1) {
+    return nextLogs;
+  }
+  const actualIndex = nextLogs.length - 1 - targetIndex;
+  nextLogs[actualIndex] = {
+    ...nextLogs[actualIndex],
+    ...patch
+  };
+  return nextLogs;
+}
+
+function parseTopologySignature(signature) {
+  if (!signature || typeof signature !== 'string') {
+    return [];
+  }
+  return signature.split('+').map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizeGarageLayout(csiPayload) {
+  const garage = csiPayload?.garage || {};
+  const widthMeters = safeNumber(garage?.width, DEFAULT_GARAGE_LAYOUT.widthMeters) || DEFAULT_GARAGE_LAYOUT.widthMeters;
+  const heightMeters = safeNumber(garage?.height, DEFAULT_GARAGE_LAYOUT.heightMeters) || DEFAULT_GARAGE_LAYOUT.heightMeters;
+  const door = {
+    xMeters: safeNumber(garage?.door?.x, DEFAULT_GARAGE_LAYOUT.door.xMeters) || DEFAULT_GARAGE_LAYOUT.door.xMeters,
+    yMeters: safeNumber(garage?.door?.y, DEFAULT_GARAGE_LAYOUT.door.yMeters) || DEFAULT_GARAGE_LAYOUT.door.yMeters
+  };
+  const rawNodes = Object.entries(garage?.nodes || {})
+    .map(([ip, node]) => ({
+      nodeId: NODE_IP_TO_ID[ip] || ip,
+      ip,
+      xMeters: safeNumber(node?.x),
+      yMeters: safeNumber(node?.y),
+      zone: safeNumber(node?.y) != null
+        ? (safeNumber(node?.y) < DEFAULT_GARAGE_LAYOUT.zones.doorMaxY
+            ? 'door'
+            : safeNumber(node?.y) > DEFAULT_GARAGE_LAYOUT.zones.deepMinY
+              ? 'deep'
+              : 'center')
+        : 'unknown'
+    }))
+    .filter((node) => node.xMeters != null && node.yMeters != null);
+
+  const nodeById = new Map(DEFAULT_GARAGE_LAYOUT.nodes.map((node) => [node.nodeId, { ...node }]));
+  rawNodes.forEach((node) => {
+    nodeById.set(node.nodeId, { ...node });
+  });
+
+  return {
+    widthMeters,
+    heightMeters,
+    door,
+    zones: { ...DEFAULT_GARAGE_LAYOUT.zones },
+    nodes: Array.from(nodeById.values()).sort((left, right) => NODE_ORDER.indexOf(left.nodeId) - NODE_ORDER.indexOf(right.nodeId))
+  };
+}
+
+function buildCoordinateHistory(csiPayload, garageLayout, { motionOnly = false } = {}) {
+  const widthHalf = garageLayout.widthMeters / 2;
+  return asArray(csiPayload?.history)
+    .map((entry) => {
+      const motionState = entry?.motion_state || 'unknown';
+      if (motionOnly && motionState !== 'MOTION_DETECTED') {
+        return null;
+      }
+      const xMeters = safeNumber(entry?.target_x);
+      const yMeters = safeNumber(entry?.target_y);
+      if (xMeters == null || yMeters == null) {
+        return null;
+      }
+      return {
+        t: safeNumber(entry?.t),
+        motionState,
+        zone: entry?.zone || 'unknown',
+        xMeters: clamp(xMeters, -widthHalf, widthHalf),
+        yMeters: clamp(yMeters, 0, garageLayout.heightMeters)
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildOperatorPresenceEntries(csiPayload) {
+  const history = asArray(csiPayload?.history);
+  const normalizedHistory = history
+    .map((entry) => ({
+      t: safeNumber(entry?.t),
+      motionState: entry?.motion_state || 'unknown',
+      xMeters: safeNumber(entry?.target_x),
+      yMeters: safeNumber(entry?.target_y),
+      zone: entry?.zone || 'unknown',
+      nodesActive: safeNumber(entry?.nodes_active, safeNumber(csiPayload?.nodes_active, 0)) || 0,
+      confidence: safeNumber(entry?.motion_confidence)
+    }))
+    .filter((entry) => entry.motionState !== 'unknown' && entry.t != null)
+    .sort((left, right) => left.t - right.t);
+
+  if (normalizedHistory.length) {
+    const latestT = normalizedHistory.at(-1)?.t ?? null;
+    const currentWindowAgeSec = safeNumber(csiPayload?.window_age_sec, 0) || 0;
+    return normalizedHistory.map((entry) => ({
+      ...entry,
+      ageSec: latestT != null ? Math.max(0, currentWindowAgeSec + Math.max(0, latestT - entry.t)) : currentWindowAgeSec
+    }));
+  }
+
+  if (!csiPayload) {
+    return [];
+  }
+
+  return [{
+    t: 0,
+    motionState: csiPayload?.motion_state || 'unknown',
+    xMeters: safeNumber(csiPayload?.target_x),
+    yMeters: safeNumber(csiPayload?.target_y),
+    zone: csiPayload?.target_zone || 'unknown',
+    nodesActive: safeNumber(csiPayload?.nodes_active, 0) || 0,
+    confidence: safeNumber(csiPayload?.motion_confidence),
+    ageSec: safeNumber(csiPayload?.window_age_sec)
+  }].filter((entry) => entry.motionState !== 'unknown');
+}
+
+function isEligibleOperatorMotion(entry) {
+  return entry?.motionState === 'MOTION_DETECTED'
+    && (safeNumber(entry?.nodesActive, 0) || 0) >= OPERATOR_PRESENCE_GATE.minNodesActive
+    && safeNumber(entry?.xMeters) != null
+    && safeNumber(entry?.yMeters) != null;
+}
+
+function countTrailingState(entries, state) {
+  let count = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.motionState !== state) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function getTrailingMotionRun(entries, endIndexInclusive) {
+  if (endIndexInclusive < 0) {
+    return [];
+  }
+  const run = [];
+  for (let index = endIndexInclusive; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (!isEligibleOperatorMotion(entry)) {
+      break;
+    }
+    run.push(entry);
+  }
+  return run.reverse();
+}
+
+function evaluateOperatorPresenceGate(csiPayload) {
+  const entries = buildOperatorPresenceEntries(csiPayload);
+  const payloadWindowAgeSec = safeNumber(csiPayload?.window_age_sec);
+  const payloadFresh = payloadWindowAgeSec == null || payloadWindowAgeSec <= OPERATOR_PRESENCE_GATE.staleWindowAgeSec;
+  const consecutiveMotion = countTrailingState(entries, 'MOTION_DETECTED');
+  const consecutiveNoMotion = countTrailingState(entries, 'NO_MOTION');
+
+  let confirmedRun = [];
+  if (consecutiveMotion >= OPERATOR_PRESENCE_GATE.confirmMotionWindows) {
+    confirmedRun = getTrailingMotionRun(entries, entries.length - 1);
+  } else if (consecutiveNoMotion === 1) {
+    confirmedRun = getTrailingMotionRun(entries, entries.length - 2);
+  }
+
+  const confirmed = confirmedRun.length >= OPERATOR_PRESENCE_GATE.confirmMotionWindows;
+  const lastConfirmedEntry = confirmed ? confirmedRun.at(-1) : null;
+
+  const activeForOperator = Boolean(
+    csiPayload?.running
+    && csiPayload?.model_loaded
+    && payloadFresh
+    && confirmed
+    && lastConfirmedEntry
+  );
+
+  const note = activeForOperator
+    ? `operator presence подтверждён: >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED`
+    : `operator presence скрыт до >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED`;
+
+  return {
+    source: 'confirmed_motion_gate',
+    confirmed: activeForOperator,
+    payloadFresh,
+    rawMotionState: csiPayload?.motion_state || 'unknown',
+    rawBinary: csiPayload?.binary || 'unknown',
+    rawCoarse: csiPayload?.coarse || 'unknown',
+    consecutiveMotion,
+    consecutiveNoMotion,
+    confirmThreshold: OPERATOR_PRESENCE_GATE.confirmMotionWindows,
+    clearThreshold: OPERATOR_PRESENCE_GATE.clearNoMotionWindows,
+    windowAgeSec: payloadWindowAgeSec,
+    lastConfirmedAtWindowT: lastConfirmedEntry?.t ?? null,
+    lastConfirmedAgeSec: lastConfirmedEntry?.ageSec ?? null,
+    lastConfirmedZone: lastConfirmedEntry?.zone || 'unknown',
+    lastConfirmedX: lastConfirmedEntry?.xMeters ?? null,
+    lastConfirmedY: lastConfirmedEntry?.yMeters ?? null,
+    lastConfirmedConfidence: lastConfirmedEntry?.confidence ?? null,
+    note
+  };
+}
+
+function buildServiceCards(statusPayload) {
+  const services = statusPayload?.services || {};
+  return Object.entries(services).map(([name, value]) => ({
+    name,
+    status: value?.status || 'unknown',
+    detail: value?.last_error
+      || value?.message
+      || (value?.status === 'unknown' ? 'backend прислал только status=unknown' : null),
+    running: value?.running,
+    initialized: value?.initialized,
+    uptime: safeNumber(value?.uptime)
+  }));
+}
+
+function buildMotionRuntime(csiPayload, posePayload) {
+  const garage = normalizeGarageLayout(csiPayload);
+  return {
+    state: csiPayload?.motion_state || posePayload?.motion_state || 'unknown',
+    confidence: safeNumber(csiPayload?.motion_confidence),
+    running: Boolean(csiPayload?.running),
+    modelLoaded: Boolean(csiPayload?.model_loaded),
+    nodesActive: safeNumber(csiPayload?.nodes_active),
+    packetsInWindow: safeNumber(csiPayload?.packets_in_window),
+    packetsPerSecond: safeNumber(csiPayload?.pps),
+    windowAgeSec: safeNumber(csiPayload?.window_age_sec),
+    targetZone: csiPayload?.target_zone || 'unknown',
+    targetX: safeNumber(csiPayload?.target_x),
+    targetY: safeNumber(csiPayload?.target_y),
+    modelVersion: csiPayload?.model_version || 'unknown',
+    modelId: csiPayload?.model_id || csiPayload?.model_filename || null,
+    modelKind: csiPayload?.model_kind || 'unknown',
+    modelDefault: Boolean(csiPayload?.model_default),
+    binaryThreshold: safeNumber(csiPayload?.binary_threshold),
+    history: asArray(csiPayload?.history),
+    garage
+  };
+}
+
+function buildExperimentalRuntime(csiPayload) {
+  return {
+    binary: csiPayload?.binary || 'unknown',
+    binaryConfidence: safeNumber(csiPayload?.binary_confidence),
+    coarse: csiPayload?.coarse || 'unknown',
+    coarseConfidence: safeNumber(csiPayload?.coarse_confidence)
+  };
+}
+
+function buildTrackBShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.track_b_shadow || {};
+  const probabilities = shadow?.probabilities || {};
+  const predictedClass = typeof shadow?.predicted_class === 'string'
+    ? shadow.predicted_class
+    : null;
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(predictedClass);
+  const status = shadow?.status
+    || (predictedClass ? 'shadow_live' : (loaded ? 'awaiting_first_window' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.track_b_shadow),
+    track: shadow?.track || 'B_v1',
+    loaded,
+    status,
+    predictedClass,
+    predictedIdx: safeNumber(shadow?.predicted_idx),
+    probabilities,
+    emptyProbability: safeNumber(probabilities?.EMPTY),
+    staticProbability: safeNumber(probabilities?.STATIC),
+    motionProbability: safeNumber(probabilities?.MOTION),
+    inferenceMs: safeNumber(shadow?.inference_ms),
+    nodesWithData: safeNumber(shadow?.nodes_with_data),
+    windowT: safeNumber(shadow?.t)
+  };
+}
+
+function normalizeRuntimeModelItem(item, activeModelId, defaultModelId, modelLoaded) {
+  const version = item?.version || item?.display_name || item?.filename || 'unknown';
+  const fileName = item?.filename || item?.model_id || 'unknown';
+  const kind = item?.kind || 'unknown';
+  const threshold = safeNumber(item?.threshold);
+  const isActive = Boolean(item?.is_active) || (!!activeModelId && fileName === activeModelId);
+  const isDefault = Boolean(item?.is_default) || (!!defaultModelId && fileName === defaultModelId);
+
+  return {
+    modelId: item?.model_id || fileName,
+    fileName,
+    displayName: item?.display_name || `${version} · ${fileName}`,
+    version,
+    kind,
+    threshold,
+    isActive,
+    isDefault,
+    loaded: Boolean(item?.loaded) || (isActive && Boolean(modelLoaded)),
+    updatedAt: item?.updated_at || null,
+    path: item?.path || null
+  };
+}
+
+function buildRuntimeModelsState(state) {
+  const catalog = state.runtimeModels;
+  const activeModelId = state.csi?.model_id || catalog?.activeModelId || null;
+  const defaultModelId = catalog?.defaultModelId || null;
+  const modelLoaded = Boolean(state.csi?.model_loaded);
+  const items = asArray(catalog?.items).map((item) =>
+    normalizeRuntimeModelItem(item, activeModelId, defaultModelId, modelLoaded)
+  );
+
+  return {
+    items,
+    activeModelId,
+    defaultModelId,
+    loadedAt: catalog?.loadedAt || null,
+    loading: Boolean(catalog?.loading),
+    error: catalog?.error || null,
+    switching: Boolean(catalog?.switching),
+    actionError: catalog?.actionError || null
+  };
+}
+
+function buildShadowDiagnostics(metadata) {
+  const items = [];
+
+  if (metadata?.staged_motion_shadow_enabled) {
+    items.push({
+      label: 'Тень дверной границы',
+      status: metadata.staged_motion_shadow_status || 'unknown',
+      prediction: metadata.staged_motion_shadow_prediction || 'n/a',
+      detail: metadata.staged_motion_shadow_decision_reason || 'решение не сформировано'
+    });
+  }
+
+  if (metadata?.staged_single_person_router_enabled) {
+    items.push({
+      label: 'Роутер одного человека',
+      status: metadata.staged_single_person_router_status || 'unknown',
+      prediction: metadata.staged_single_person_router_prediction || 'n/a',
+      detail: metadata.staged_single_person_router_route_name || 'маршрут не выбран'
+    });
+  }
+
+  if (metadata?.staged_single_person_validated_router_enabled) {
+    items.push({
+      label: 'Проверенный роутер',
+      status: metadata.staged_single_person_validated_router_status || 'unknown',
+      prediction: metadata.staged_single_person_validated_router_prediction || 'n/a',
+      detail: metadata.staged_single_person_validated_router_route_name || 'маршрут не выбран'
+    });
+  }
+
+  items.push({
+    label: 'Риск схлопывания',
+    status: metadata?.collapse_risk_runtime_status || 'unknown',
+    prediction: metadata?.multi_person_collapse_risk_flag ? 'risk' : 'clear',
+    detail: metadata?.multi_person_ambiguity_score != null
+      ? `неоднозначность ${metadata.multi_person_ambiguity_score}`
+      : 'оценка неоднозначности недоступна'
+  });
+
+  return items;
+}
+
+function normalizeRiskText(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function hasAmbiguityRiskToken(value) {
+  const normalized = normalizeRiskText(value);
+  return MULTI_PERSON_AMBIGUITY_RISK_TOKENS.some((token) => normalized.includes(token));
+}
+
+function deriveAmbiguityMode(csiPayload, posePayload, support, operatorPresence) {
+  const metadata = posePayload?.metadata || {};
+  const ambiguityScore = safeNumber(metadata?.multi_person_ambiguity_score);
+  const explicitCollapseRisk = Boolean(metadata?.multi_person_collapse_risk_flag);
+  const collapseRuntimeStatus = metadata?.collapse_risk_runtime_status || 'unknown';
+  const supportSignals = [
+    support?.invalidation_reason,
+    support?.reason,
+    support?.status,
+    support?.pending_direction,
+    collapseRuntimeStatus
+  ];
+  const textualRisk = supportSignals.some((value) => hasAmbiguityRiskToken(value));
+  const highAmbiguity = Boolean(
+    explicitCollapseRisk
+    || (ambiguityScore != null && ambiguityScore >= MULTI_PERSON_AMBIGUITY_SCORE_THRESHOLD)
+    || textualRisk
+  );
+  const targetZone = (
+    operatorPresence?.lastConfirmedZone && operatorPresence.lastConfirmedZone !== 'unknown'
+      ? operatorPresence.lastConfirmedZone
+      : csiPayload?.target_zone || 'unknown'
+  );
+  const active = Boolean(
+    csiPayload?.running
+    && csiPayload?.model_loaded
+    && operatorPresence?.payloadFresh !== false
+    && highAmbiguity
+    && (
+      operatorPresence?.confirmed
+      || csiPayload?.motion_state === 'MOTION_DETECTED'
+    )
+  );
+
+  let reason = 'none';
+  let detail = 'single-target marker разрешён';
+  if (explicitCollapseRisk) {
+    reason = 'multi_person_collapse_risk_flag';
+    detail = 'backend пометил collapse risk: single-target marker скрыт';
+  } else if (ambiguityScore != null && ambiguityScore >= MULTI_PERSON_AMBIGUITY_SCORE_THRESHOLD) {
+    reason = 'multi_person_ambiguity_score';
+    detail = `ambiguity score ${ambiguityScore.toFixed(2)}: точная одиночная позиция скрыта`;
+  } else if (textualRisk) {
+    reason = 'collapse_support_signal';
+    detail = 'support/collapse signal указывает на неоднозначную одиночную позицию';
+  }
+
+  return {
+    active,
+    highAmbiguity,
+    singleTargetAllowed: Boolean(operatorPresence?.confirmed && !active),
+    reason,
+    detail,
+    headline: active ? 'несколько людей / позиция неоднозначна' : 'single-target safe',
+    ambiguityScore,
+    ambiguityScoreThreshold: MULTI_PERSON_AMBIGUITY_SCORE_THRESHOLD,
+    collapseRiskFlag: explicitCollapseRisk,
+    collapseRiskRuntimeStatus: collapseRuntimeStatus,
+    targetZone: ['door', 'center', 'deep'].includes(targetZone) ? targetZone : 'center',
+    rawTargetZone: csiPayload?.target_zone || 'unknown',
+    source: explicitCollapseRisk
+      ? 'collapse_risk_flag'
+      : ambiguityScore != null && ambiguityScore >= MULTI_PERSON_AMBIGUITY_SCORE_THRESHOLD
+        ? 'ambiguity_score'
+        : textualRisk
+          ? 'support_risk_signal'
+          : 'clear'
+  };
+}
+
+function buildNodeSummary(csiPayload, posePayload, statusPayload) {
+  const metadata = posePayload?.metadata || {};
+  const support = posePayload?.support_observations?.four_node_entry_exit_shadow_core || {};
+  const sourceTotals = statusPayload?.services?.hardware?.live_udp?.source_totals || {};
+  const liveSignature = asArray(metadata.live_source_signature);
+  const requiredNodes = parseTopologySignature(support.required_topology_signature || support.observed_topology_signature);
+  const union = new Set([...NODE_ORDER, ...Object.keys(sourceTotals), ...liveSignature, ...requiredNodes]);
+  const total = Object.values(sourceTotals).reduce((sum, value) => sum + (safeNumber(value, 0) || 0), 0);
+  const breakdownAvailable = liveSignature.length > 0 || Object.keys(sourceTotals).length > 0;
+  const aggregateNodesActive = safeNumber(csiPayload?.nodes_active, 0) || 0;
+
+  return Array.from(union)
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftIndex = NODE_ORDER.indexOf(left);
+      const rightIndex = NODE_ORDER.indexOf(right);
+      return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+    })
+    .map((nodeId) => {
+      if (!breakdownAvailable && aggregateNodesActive > 0) {
+        const allKnownNodesActive = aggregateNodesActive >= union.size && union.size > 0;
+        return {
+          nodeId,
+          packets: null,
+          packetShare: null,
+          active: allKnownNodesActive ? true : null,
+          aggregateOnly: true,
+          required: requiredNodes.length ? requiredNodes.includes(nodeId) : true
+        };
+      }
+      const packets = safeNumber(sourceTotals[nodeId], 0) || 0;
+      return {
+        nodeId,
+        packets,
+        packetShare: total > 0 ? packets / total : 0,
+        active: liveSignature.includes(nodeId),
+        aggregateOnly: false,
+        required: requiredNodes.includes(nodeId)
+      };
+    });
+}
+
+function deriveLastMeaningfulEvent(csiPayload, posePayload, support, operatorPresence, ambiguityMode) {
+  const supportAge = safeNumber(support?.last_event_age_sec);
+  const motionAge = safeNumber(csiPayload?.window_age_sec);
+  const latestMotion = asArray(csiPayload?.history).at(-1);
+
+  if (ambiguityMode?.active) {
+    const detail = [
+      ambiguityMode.detail,
+      ambiguityMode.targetZone ? `зона ${ambiguityMode.targetZone}` : null,
+      ambiguityMode.ambiguityScore != null ? `score ${ambiguityMode.ambiguityScore.toFixed(2)}` : null
+    ].filter(Boolean).join(' / ');
+    return {
+      source: 'ambiguity_safe_mode',
+      label: ambiguityMode.headline,
+      ageSec: operatorPresence?.lastConfirmedAgeSec ?? motionAge,
+      timestamp: null,
+      detail: detail || 'single-target marker hidden in ambiguity safe-mode'
+    };
+  }
+
+  if (operatorPresence?.confirmed) {
+    const detail = [
+      `gate ${operatorPresence.confirmThreshold}/${operatorPresence.confirmThreshold}`,
+      operatorPresence.lastConfirmedZone ? `зона ${operatorPresence.lastConfirmedZone}` : null,
+      operatorPresence.lastConfirmedConfidence != null
+        ? `conf ${operatorPresence.lastConfirmedConfidence.toFixed(2)}`
+        : null
+    ].filter(Boolean).join(' / ');
+    return {
+      source: operatorPresence.source,
+      label: 'CONFIRMED_MOTION',
+      ageSec: operatorPresence.lastConfirmedAgeSec,
+      timestamp: null,
+      detail: detail || 'motion confirmation gate active'
+    };
+  }
+
+  if (csiPayload?.motion_state === 'MOTION_DETECTED' && (motionAge == null || supportAge == null || motionAge <= supportAge)) {
+    const confidence = safeNumber(latestMotion?.motion_confidence ?? csiPayload?.motion_confidence);
+    const zone = latestMotion?.zone || csiPayload?.target_zone;
+    const pps = safeNumber(latestMotion?.pps ?? csiPayload?.pps);
+    const detail = [
+      `raw spike ${operatorPresence?.consecutiveMotion || 0}/${operatorPresence?.confirmThreshold || OPERATOR_PRESENCE_GATE.confirmMotionWindows}`,
+      confidence != null ? `conf ${confidence.toFixed(2)}` : null,
+      zone ? `зона ${zone}` : null,
+      pps != null ? `${pps.toFixed(1)} pps` : null
+    ].filter(Boolean).join(' / ');
+    return {
+      source: 'motion_runtime_raw',
+      label: 'UNCONFIRMED_MOTION_SPIKE',
+      ageSec: motionAge,
+      timestamp: null,
+      detail: detail || 'raw motion spike is not yet operator-confirmed'
+    };
+  }
+
+  if (csiPayload?.motion_state && (motionAge == null || supportAge == null || motionAge <= supportAge)) {
+    const confidence = safeNumber(latestMotion?.motion_confidence ?? csiPayload?.motion_confidence);
+    const zone = latestMotion?.zone || csiPayload?.target_zone;
+    const pps = safeNumber(latestMotion?.pps ?? csiPayload?.pps);
+    const detail = [
+      confidence != null ? `conf ${confidence.toFixed(2)}` : null,
+      zone ? `зона ${zone}` : null,
+      pps != null ? `${pps.toFixed(1)} pps` : null
+    ].filter(Boolean).join(' / ');
+    return {
+      source: 'motion_runtime',
+      label: csiPayload.motion_state,
+      ageSec: motionAge,
+      timestamp: null,
+      detail: detail || 'motion runtime active'
+    };
+  }
+
+  if (support?.last_event) {
+    return {
+      source: 'support_path',
+      label: support.last_event,
+      ageSec: supportAge,
+      timestamp: support.last_event_ts,
+      detail: support.context_validity || support.status || 'unknown'
+    };
+  }
+
+  return {
+    source: 'none',
+    label: 'no_meaningful_event',
+    ageSec: null,
+    timestamp: null,
+    detail: posePayload ? 'Сейчас нет свежего motion-runtime события или support-перехода.' : 'Сейчас нет live CSI runtime payload.'
+  };
+}
+
+function deriveFailureSignal(posePayload, support) {
+  if (support?.invalidation_reason) {
+    return {
+      label: support.invalidation_reason,
+      tone: 'risk',
+      summary: 'Support-path сейчас невалиден.'
+    };
+  }
+
+  if (support?.pending_review) {
+    return {
+      label: 'review_hold',
+      tone: 'warn',
+      summary: 'Support-path активен, но не разрешён и остаётся на review-hold.'
+    };
+  }
+
+  if (support?.positive) {
+    return {
+      label: support.pending_direction || support.resolution_event || support.status || 'active_shadow',
+      tone: 'info',
+      summary: 'Shadow-support live, но это по-прежнему неавторитетное evidence.'
+    };
+  }
+
+  return {
+    label: 'no_active_failure_family_signal',
+    tone: 'ok',
+    summary: 'В текущем кадре нет активной live-signature семейства сбоев.'
+  };
+}
+
+function deriveTrust(csiPayload, support) {
+  if (!csiPayload) {
+    return {
+      label: 'offline',
+      tone: 'risk',
+      summary: 'CSI runtime status недоступен.'
+    };
+  }
+
+  if (!csiPayload.running) {
+    return {
+      label: 'offline',
+      tone: 'risk',
+      summary: 'CSI runtime не запущен.'
+    };
+  }
+
+  if (!csiPayload.model_loaded) {
+    return {
+      label: 'degraded',
+      tone: 'risk',
+      summary: 'Motion-only runtime поднят, но модель не загружена.'
+    };
+  }
+
+  const topologyMatch = support?.topology_match !== false;
+  const nodesActive = safeNumber(csiPayload.nodes_active, 0) || 0;
+  const packetsPerSecond = safeNumber(csiPayload.pps);
+  const windowAgeSec = safeNumber(csiPayload.window_age_sec);
+
+  if (windowAgeSec != null && windowAgeSec > 8) {
+    return {
+      label: 'degraded',
+      tone: 'warn',
+      summary: 'Motion-only runtime отвечает, но окно CSI уже несвежее.'
+    };
+  }
+
+  if (nodesActive < 3) {
+    return {
+      label: 'degraded',
+      tone: 'warn',
+      summary: 'Motion-only runtime жив, но активных узлов меньше трёх.'
+    };
+  }
+
+  if (packetsPerSecond != null && packetsPerSecond < 20) {
+    return {
+      label: 'degraded',
+      tone: 'warn',
+      summary: 'Motion-only runtime жив, но packet-rate слишком низкий.'
+    };
+  }
+
+  if (!topologyMatch) {
+    return {
+      label: 'topology_mismatch',
+      tone: 'risk',
+      summary: 'Motion-only runtime жив, но support-топология не совпадает с frozen-контрактом.'
+    };
+  }
+
+  const confidence = safeNumber(csiPayload.motion_confidence);
+  return {
+    label: 'ready',
+    tone: 'ok',
+    summary: `Motion-runtime свежий${confidence != null ? `, уверенность ${confidence.toFixed(2)}` : ''}; семантика entry/exit остаётся только support-слоем.`
+  };
+}
+
+function buildRuntimePaths(csiPayload, metadata, support, trackBShadow) {
+  const experimentalAvailable = csiPayload && (
+    (csiPayload.binary && csiPayload.binary !== 'unknown')
+    || (csiPayload.coarse && csiPayload.coarse !== 'unknown')
+  );
+  const trackBStatus = trackBShadow?.loaded
+    ? (trackBShadow?.predictedClass ? 'healthy' : 'inactive')
+    : (trackBShadow?.status === 'not_loaded' ? 'failed' : 'inactive');
+  const trackBMode = trackBShadow?.predictedClass
+    ? `shadow_${String(trackBShadow.predictedClass).toLowerCase()}`
+    : (trackBShadow?.status || 'unknown');
+
+  return [
+    {
+      label: 'Motion-only runtime',
+      status: csiPayload?.running && csiPayload?.model_loaded ? 'healthy' : 'failed',
+      mode: csiPayload?.motion_state || 'unknown',
+      role: 'active_primary'
+    },
+    {
+      label: 'Track B shadow',
+      status: trackBStatus,
+      mode: trackBMode,
+      role: 'shadow_candidate'
+    },
+    {
+      label: 'Coordinate regressor',
+      status: metadata?.coordinate_runtime_status || 'unknown',
+      mode: metadata?.coordinate_model_source || 'unknown',
+      role: 'active_reference'
+    },
+    {
+      label: 'Binary/coarse diagnostics',
+      status: experimentalAvailable ? 'healthy' : 'inactive',
+      mode: experimentalAvailable ? 'experimental_only' : 'unknown',
+      role: 'active_diagnostic'
+    },
+    {
+      label: 'Entry/exit shadow core',
+      status: support?.candidate_status || support?.status || 'unknown',
+      mode: support?.support_only ? 'support_only' : 'active',
+      role: 'support_path'
+    },
+    {
+      label: 'Риск схлопывания',
+      status: metadata?.collapse_risk_runtime_status || 'unknown',
+      mode: metadata?.multi_person_collapse_risk_flag ? 'risk' : 'clear',
+      role: 'active_diagnostic'
+    }
+  ];
+}
+
+async function requestUiJson(path) {
+  const location = typeof window !== 'undefined' ? window.location : null;
+  const shouldUseLocalUiOrigin = path.startsWith('/api/agent7/')
+    && location
+    && isLocalHostname(location.hostname)
+    && location.port !== '3000';
+  const baseUrl = shouldUseLocalUiOrigin ? API_CONFIG.LOCAL_UI_URL : '';
+
+  const response = await fetch(`${baseUrl}${path}`, {
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const payloadError = payload?.error;
+    const message = typeof payloadError === 'string'
+      ? payloadError
+      : typeof payloadError?.message === 'string'
+        ? payloadError.message
+        : typeof payload?.message === 'string'
+          ? payload.message
+          : `UI forensic request failed with HTTP ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+
+  return response.json();
+}
+
+function normalizeSnapshot(state, service = null) {
+  const csi = state.csi;
+  const pose = state.pose;
+  const metadata = pose?.metadata || {};
+  const support = pose?.support_observations?.four_node_entry_exit_shadow_core || {};
+  const primaryRuntime = buildMotionRuntime(csi, pose);
+  const garageLayout = primaryRuntime.garage || normalizeGarageLayout(csi);
+  const secondaryRuntime = buildExperimentalRuntime(csi);
+  const trackBShadow = buildTrackBShadowRuntime(csi);
+  const operatorPresence = evaluateOperatorPresenceGate(csi);
+  const ambiguity = deriveAmbiguityMode(csi, pose, support, operatorPresence);
+  const lastMeaningfulEvent = deriveLastMeaningfulEvent(csi, pose, support, operatorPresence, ambiguity);
+  const cachedRunIds = service ? Array.from(service.forensicDetailCache.keys()) : [];
+  const inflightRunIds = service ? Array.from(service.forensicDetailRequests.keys()) : [];
+
+  return {
+    now: new Date().toISOString(),
+    errors: { ...state.errors },
+    info: state.info,
+    status: state.status,
+    metrics: state.metrics,
+    csi,
+    pose,
+    recording: {
+      ...state.recording,
+      teacherSource: {
+        ...(state.recording.teacherSource || buildTeacherSourceState())
+      },
+      manual: {
+        ...state.recording.manual
+      },
+      freeform: {
+        ...state.recording.freeform,
+        lastSummary: state.recording.freeform?.lastSummary
+          ? { ...state.recording.freeform.lastSummary }
+          : null
+      },
+      guided: {
+        ...state.recording.guided,
+        logs: [...state.recording.guided.logs]
+      }
+    },
+    runtimeModels: buildRuntimeModelsState(state),
+    services: buildServiceCards(state.status),
+    forensics: {
+      ...state.forensics,
+      cacheState: {
+        cachedRunIds,
+        inflightRunIds
+      }
+    },
+    live: {
+      trust: deriveTrust(csi, support),
+      failureSignal: deriveFailureSignal(pose, support),
+      lastMeaningfulEvent,
+      primaryRuntime,
+      secondaryRuntime,
+      trackBShadow,
+      operatorPresence,
+      ambiguity,
+      supportPath: {
+        candidateName: support?.candidate_name || 'unavailable',
+        candidateStatus: support?.candidate_status || 'unknown',
+        status: support?.status || 'unknown',
+        reason: support?.reason || 'unknown',
+        supportOnly: Boolean(support?.support_only),
+        authoritative: Boolean(support?.authoritative),
+        topologyMatch: support?.topology_match !== false,
+        requiredTopologySignature: support?.required_topology_signature || 'unknown',
+        observedTopologySignature: support?.observed_topology_signature || 'unknown',
+        threshold: safeNumber(support?.threshold),
+        probability: safeNumber(support?.probability),
+        positive: Boolean(support?.positive),
+        lastEvent: support?.last_event || null,
+        lastEventTs: support?.last_event_ts || null,
+        lastEventAgeSec: safeNumber(support?.last_event_age_sec),
+        pulseSeq: safeNumber(support?.pulse_seq, 0) || 0,
+        pendingReview: Boolean(support?.pending_review),
+        pendingDirection: support?.pending_direction || null,
+        contextValidity: support?.context_validity || 'unknown',
+        invalidationReason: support?.invalidation_reason || null,
+        reviewHoldSec: safeNumber(support?.review_hold_sec),
+        maxActiveSec: safeNumber(support?.max_active_sec),
+        gapGraceSec: safeNumber(support?.gap_grace_sec),
+        scope: asArray(support?.runtime_scope)
+      },
+      topology: {
+        signature: support?.observed_topology_signature || metadata?.live_source_signature?.join('+') || 'unknown',
+        liveNodes: asArray(metadata?.live_source_signature),
+        sourceCount: safeNumber(metadata?.live_source_count, safeNumber(csi?.nodes_active, 0)) || 0,
+        liveWindowSeconds: safeNumber(metadata?.live_window_seconds, safeNumber(csi?.window_age_sec)),
+        liveTotalPackets: safeNumber(metadata?.live_total_packets, safeNumber(csi?.packets_in_window)),
+        lastPacketAgeSec: safeNumber(metadata?.live_last_packet_age_sec, safeNumber(csi?.window_age_sec)),
+        motionWindowSeconds: safeNumber(metadata?.motion_window_seconds, safeNumber(csi?.window_age_sec)),
+        motionTotalPackets: safeNumber(metadata?.motion_total_packets, safeNumber(csi?.packets_in_window)),
+        vitalsWindowSeconds: safeNumber(metadata?.vitals_window_seconds),
+        vitalsTotalPackets: safeNumber(metadata?.vitals_total_packets),
+        nodes: buildNodeSummary(csi, pose, state.status)
+      },
+      motion: {
+        label: csi?.motion_state || metadata?.motion_runtime_label || metadata?.motion_label || pose?.motion_state || 'unknown',
+        probabilities: metadata?.motion_runtime_probabilities || metadata?.motion_probabilities || {},
+        state: csi?.motion_state || pose?.motion_state || 'unknown',
+        confidence: safeNumber(csi?.motion_confidence),
+        activity: pose?.activity || 'unknown'
+      },
+      fingerprint: {
+        label: metadata?.room_fingerprint_label || 'unknown',
+        margin: safeNumber(metadata?.room_fingerprint_margin),
+        distances: metadata?.room_fingerprint_distances || {}
+      },
+      coordinate: {
+        xCm: safeNumber(metadata?.coordinate_plane_x_cm, safeNumber(csi?.target_x) != null ? safeNumber(csi?.target_x) * 100 : null),
+        yCm: safeNumber(metadata?.coordinate_plane_y_cm, safeNumber(csi?.target_y) != null ? safeNumber(csi?.target_y) * 100 : null),
+        xMeters: safeNumber(csi?.target_x, safeNumber(metadata?.coordinate_plane_x_cm) != null ? safeNumber(metadata.coordinate_plane_x_cm) / 100 : null),
+        yMeters: safeNumber(csi?.target_y, safeNumber(metadata?.coordinate_plane_y_cm) != null ? safeNumber(metadata.coordinate_plane_y_cm) / 100 : null),
+        targetZone: csi?.target_zone || 'unknown',
+        operatorXMeters: operatorPresence.lastConfirmedX,
+        operatorYMeters: operatorPresence.lastConfirmedY,
+        operatorTargetZone: operatorPresence.lastConfirmedZone || 'unknown',
+        ambiguityActive: Boolean(ambiguity.active),
+        ambiguityTargetZone: ambiguity.targetZone || 'unknown',
+        source: metadata?.coordinate_model_source || 'unknown',
+        history: buildCoordinateHistory(csi, garageLayout),
+        motionHistory: buildCoordinateHistory(csi, garageLayout, { motionOnly: true }),
+        activeForMap: Boolean(operatorPresence.confirmed && ambiguity.singleTargetAllowed)
+      },
+      garage: garageLayout,
+      shadowDiagnostics: buildShadowDiagnostics(metadata),
+      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow)
+    }
+  };
+}
+
+export class CsiOperatorService {
+  constructor() {
+    this.state = {
+      info: null,
+      status: null,
+      metrics: null,
+      csi: null,
+      pose: null,
+      runtimeModels: {
+        items: [],
+        activeModelId: null,
+        defaultModelId: null,
+        loadedAt: null,
+        loading: false,
+        error: null,
+        switching: false,
+        actionError: null
+      },
+      recording: buildRecordingState(),
+      errors: {},
+      forensics: {
+        manifest: [],
+        manifestLoadedAt: null,
+        manifestError: null,
+        selectedRunId: null,
+        selectedRun: null,
+        selectedRunLoadedAt: null,
+        selectedRunError: null,
+        loadingManifest: false,
+        loadingRun: false
+      }
+    };
+    this.subscribers = new Set();
+    this.timers = new Map();
+    this.running = false;
+    this.guidedStepTimer = null;
+    this.guidedPauseTimer = null;
+    this.forensicDetailCache = new Map();
+    this.forensicDetailRequests = new Map();
+    this.forensicDetailRevision = 0;
+    this.guidedSpeechToken = 0;
+    this.guidedUtterance = null;
+    this.operatorCueToken = 0;
+    this.operatorCueUtterance = null;
+    this.visibilityListener = () => {
+      if (!document.hidden) {
+        void this.refreshAll(true);
+      }
+    };
+  }
+
+  subscribe(callback) {
+    this.subscribers.add(callback);
+    callback(normalizeSnapshot(this.state, this));
+    return () => this.subscribers.delete(callback);
+  }
+
+  emit() {
+    const snapshot = normalizeSnapshot(this.state, this);
+    this.subscribers.forEach((callback) => {
+      try {
+        callback(snapshot);
+      } catch (error) {
+        console.error('CSI operator subscriber failed:', error);
+      }
+    });
+  }
+
+  clearGuidedTimers() {
+    if (this.guidedStepTimer) {
+      clearTimeout(this.guidedStepTimer);
+      this.guidedStepTimer = null;
+    }
+    if (this.guidedPauseTimer) {
+      clearTimeout(this.guidedPauseTimer);
+      this.guidedPauseTimer = null;
+    }
+    this.cancelGuidedSpeech();
+  }
+
+  cancelGuidedSpeech() {
+    this.guidedSpeechToken += 1;
+    this.guidedUtterance = null;
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (error) {
+        console.warn('Failed to cancel guided speech:', error);
+      }
+    }
+  }
+
+  cancelOperatorCue() {
+    this.operatorCueToken += 1;
+    this.operatorCueUtterance = null;
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (error) {
+        console.warn('Failed to cancel operator cue:', error);
+      }
+    }
+  }
+
+  getGuidedVoice() {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      return null;
+    }
+    const voices = window.speechSynthesis.getVoices?.() || [];
+    return voices.find((voice) => /^ru/i.test(voice.lang || ''))
+      || voices.find((voice) => /milena/i.test(voice.name || ''))
+      || null;
+  }
+
+  async speakOperatorCue(text) {
+    if (!text || typeof window === 'undefined' || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') {
+      return false;
+    }
+
+    this.cancelOperatorCue();
+    const token = ++this.operatorCueToken;
+
+    return new Promise((resolve) => {
+      try {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'ru-RU';
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+
+        const voices = window.speechSynthesis.getVoices?.() || [];
+        const preferredVoice = voices.find((voice) => voice.lang?.toLowerCase().startsWith('ru'));
+        if (preferredVoice) {
+          utterance.voice = preferredVoice;
+        }
+
+        const finalize = () => {
+          if (this.operatorCueToken === token) {
+            this.operatorCueUtterance = null;
+          }
+          resolve(true);
+        };
+
+        utterance.onend = finalize;
+        utterance.onerror = finalize;
+        this.operatorCueUtterance = utterance;
+        window.speechSynthesis.speak(utterance);
+      } catch (error) {
+        console.warn('Operator cue failed:', error);
+        resolve(false);
+      }
+    });
+  }
+
+  async speakGuidedPrompt(text, { forceSilence = false } = {}) {
+    if (forceSilence || !text) {
+      return;
+    }
+    if (typeof window === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) {
+      return;
+    }
+
+    this.cancelGuidedSpeech();
+    const token = this.guidedSpeechToken;
+
+    await new Promise((resolve) => {
+      const utterance = new window.SpeechSynthesisUtterance(text);
+      utterance.lang = 'ru-RU';
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      const voice = this.getGuidedVoice();
+      if (voice) {
+        utterance.voice = voice;
+      }
+      utterance.onend = () => {
+        if (token === this.guidedSpeechToken) {
+          this.guidedUtterance = null;
+        }
+        resolve();
+      };
+      utterance.onerror = () => {
+        if (token === this.guidedSpeechToken) {
+          this.guidedUtterance = null;
+        }
+        resolve();
+      };
+      this.guidedUtterance = utterance;
+      window.speechSynthesis.speak(utterance);
+    });
+  }
+
+  async runGuidedStartSequence(pack, step, stepIndex, runToken) {
+    const guided = this.state.recording.guided;
+    if (guided.runToken !== runToken) {
+      return false;
+    }
+
+    guided.status = 'cueing';
+    guided.sequencePhase = 'prompt';
+    guided.countdownValue = null;
+    this.emit();
+
+    const instructionPrompt = step.voiceInstruction
+      || `Шаг ${stepIndex + 1}. ${step.label}. ${step.instruction}`;
+    await this.speakGuidedPrompt(instructionPrompt, {
+      forceSilence: guided.voiceEnabled === false
+    });
+    if (guided.runToken !== runToken) {
+      return false;
+    }
+
+    const countdownSec = Number(pack.countdownSec || DEFAULT_GUIDED_COUNTDOWN_SEC);
+    for (let countdown = countdownSec; countdown >= 1; countdown -= 1) {
+      guided.status = 'cueing';
+      guided.sequencePhase = 'countdown';
+      guided.countdownValue = countdown;
+      this.emit();
+      await delay(1000);
+      if (guided.runToken !== runToken) {
+        return false;
+      }
+    }
+
+    guided.status = 'cueing';
+    guided.sequencePhase = 'start_cue';
+    guided.countdownValue = 0;
+    this.emit();
+    await this.speakGuidedPrompt(step.startCue || 'Старт', {
+      forceSilence: guided.voiceEnabled === false
+    });
+    return guided.runToken === runToken;
+  }
+
+  resetForensicDetailCache() {
+    this.forensicDetailRevision += 1;
+    this.forensicDetailCache.clear();
+    this.forensicDetailRequests.clear();
+  }
+
+  pruneForensicDetailCache(validRunIds) {
+    if (!(validRunIds instanceof Set)) {
+      return;
+    }
+
+    this.forensicDetailCache.forEach((_, runId) => {
+      if (!validRunIds.has(runId)) {
+        this.forensicDetailCache.delete(runId);
+      }
+    });
+
+    this.forensicDetailRequests.forEach((_, runId) => {
+      if (!validRunIds.has(runId)) {
+        this.forensicDetailRequests.delete(runId);
+      }
+    });
+  }
+
+  getCachedForensicDetail(runId) {
+    return this.forensicDetailCache.get(runId) || null;
+  }
+
+  async fetchForensicRunDetail(runId, { force = false } = {}) {
+    if (!runId) {
+      return null;
+    }
+
+    if (force) {
+      this.forensicDetailCache.delete(runId);
+      this.forensicDetailRequests.delete(runId);
+    }
+
+    const cachedEntry = !force ? this.getCachedForensicDetail(runId) : null;
+    if (cachedEntry?.payload) {
+      return cachedEntry.payload;
+    }
+
+    const inflightRequest = !force ? this.forensicDetailRequests.get(runId) : null;
+    if (inflightRequest) {
+      return inflightRequest;
+    }
+
+    const revision = this.forensicDetailRevision;
+    const query = force
+      ? `run_id=${encodeURIComponent(runId)}&_=${Date.now()}`
+      : `run_id=${encodeURIComponent(runId)}`;
+    const request = requestUiJson(`/api/agent7/forensics/run?${query}`)
+      .then((payload) => {
+        const currentRequest = this.forensicDetailRequests.get(runId);
+        if (revision === this.forensicDetailRevision && currentRequest === request) {
+          this.forensicDetailCache.set(runId, {
+            payload,
+            loadedAt: payload?.generated_at || new Date().toISOString()
+          });
+        }
+        return payload;
+      })
+      .finally(() => {
+        const currentRequest = this.forensicDetailRequests.get(runId);
+        if (currentRequest === request) {
+          this.forensicDetailRequests.delete(runId);
+          this.emit();
+        }
+      });
+
+    this.forensicDetailRequests.set(runId, request);
+    this.emit();
+    return request;
+  }
+
+  async prefetchForensicRuns(runIds, { force = false } = {}) {
+    const uniqueRunIds = Array.from(new Set((runIds || []).filter(Boolean)));
+    if (!uniqueRunIds.length) {
+      return;
+    }
+
+    const targets = uniqueRunIds.filter((runId) => {
+      if (force) {
+        return true;
+      }
+      if (this.forensicDetailCache.has(runId)) {
+        return false;
+      }
+      if (this.forensicDetailRequests.has(runId)) {
+        return false;
+      }
+      return true;
+    });
+
+    if (!targets.length) {
+      return;
+    }
+
+    await Promise.allSettled(targets.map((runId) => this.fetchForensicRunDetail(runId, { force })));
+  }
+
+  async start() {
+    if (this.running) {
+      return;
+    }
+    this.running = true;
+    document.addEventListener('visibilitychange', this.visibilityListener);
+    await this.refreshAll(true);
+    this.schedule('csi', DEFAULT_POLLING.csi, () => this.refreshCsi());
+    this.schedule('pose', DEFAULT_POLLING.pose, () => this.refreshPose());
+    this.schedule('status', DEFAULT_POLLING.status, () => this.refreshStatus());
+    this.schedule('metrics', DEFAULT_POLLING.metrics, () => this.refreshMetrics());
+    this.schedule('info', DEFAULT_POLLING.info, () => this.refreshInfo());
+    this.schedule('runtimeModels', DEFAULT_POLLING.runtimeModels, () => this.refreshRuntimeModels());
+    this.schedule('recording', DEFAULT_POLLING.recording, () => this.refreshRecordingStatus());
+    this.schedule('forensicRuns', DEFAULT_POLLING.forensicRuns, () => this.refreshForensicRuns());
+  }
+
+  stop() {
+    this.running = false;
+    document.removeEventListener('visibilitychange', this.visibilityListener);
+    this.timers.forEach((timerId) => clearInterval(timerId));
+    this.timers.clear();
+    this.clearGuidedTimers();
+  }
+
+  schedule(key, intervalMs, task) {
+    if (this.timers.has(key)) {
+      clearInterval(this.timers.get(key));
+    }
+    const timerId = setInterval(() => {
+      if (document.hidden && key === 'pose') {
+        return;
+      }
+      void task();
+    }, intervalMs);
+    this.timers.set(key, timerId);
+  }
+
+  async refreshAll(force = false) {
+    await Promise.allSettled([
+      this.refreshInfo(force),
+      this.refreshStatus(force),
+      this.refreshMetrics(force),
+      this.refreshCsi(force),
+      this.refreshPose(force),
+      this.refreshRuntimeModels(force),
+      this.refreshRecordingStatus(force),
+      this.refreshForensicRuns(force)
+    ]);
+  }
+
+  async refreshInfo(force = false) {
+    try {
+      this.state.info = await healthService.getApiInfo(force);
+      delete this.state.errors.info;
+    } catch (error) {
+      this.state.errors.info = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  async refreshStatus(force = false) {
+    try {
+      this.state.status = await healthService.getApiStatus(force);
+      delete this.state.errors.status;
+    } catch (error) {
+      this.state.errors.status = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  async refreshMetrics() {
+    try {
+      this.state.metrics = await healthService.getSystemMetrics();
+      delete this.state.errors.metrics;
+    } catch (error) {
+      this.state.errors.metrics = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  async refreshCsi(force = false) {
+    try {
+      this.state.csi = await apiService.get(CSI_STATUS_ENDPOINT, force ? { _: Date.now() } : {});
+      delete this.state.errors.csi;
+    } catch (error) {
+      this.state.errors.csi = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  async refreshPose(force = false) {
+    try {
+      this.state.pose = await apiService.get(API_CONFIG.ENDPOINTS.POSE.CURRENT, force ? { _: Date.now() } : {});
+      delete this.state.errors.pose;
+    } catch (error) {
+      this.state.errors.pose = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  async refreshRuntimeModels(force = false) {
+    const runtimeModels = this.state.runtimeModels;
+    if (runtimeModels.loading && !force) {
+      return runtimeModels.items;
+    }
+
+    runtimeModels.loading = true;
+    if (force) {
+      runtimeModels.error = null;
+    }
+    this.emit();
+
+    try {
+      const payload = await apiService.get(
+        CSI_MODELS_ENDPOINT,
+        force ? { _: Date.now() } : {}
+      );
+      runtimeModels.items = Array.isArray(payload?.models) ? payload.models : [];
+      runtimeModels.activeModelId = payload?.active_model_id || this.state.csi?.model_id || null;
+      runtimeModels.defaultModelId = payload?.default_model_id || null;
+      runtimeModels.loadedAt = new Date().toISOString();
+      runtimeModels.error = null;
+      return runtimeModels.items;
+    } catch (error) {
+      runtimeModels.error = error.message;
+      return runtimeModels.items;
+    } finally {
+      runtimeModels.loading = false;
+      this.emit();
+    }
+  }
+
+  async selectRuntimeModel(modelId) {
+    if (!modelId) {
+      return { ok: false, error: 'model_id is required' };
+    }
+
+    const runtimeModels = this.state.runtimeModels;
+    if (runtimeModels.switching) {
+      return { ok: false, error: 'Модель уже переключается.' };
+    }
+
+    runtimeModels.switching = true;
+    runtimeModels.actionError = null;
+    this.emit();
+
+    try {
+      const payload = await apiService.post(CSI_MODEL_SELECT_ENDPOINT, {
+        model_id: modelId
+      });
+      await Promise.allSettled([
+        this.refreshRuntimeModels(true),
+        this.refreshCsi(true)
+      ]);
+      runtimeModels.actionError = null;
+      return { ok: true, payload };
+    } catch (error) {
+      runtimeModels.actionError = error.message;
+      return { ok: false, error: error.message };
+    } finally {
+      runtimeModels.switching = false;
+      this.emit();
+    }
+  }
+
+  selectGuidedCapturePack(packId) {
+    const pack = getGuidedCapturePack(packId);
+    if (!pack) {
+      return;
+    }
+    this.state.recording.selectedPackId = packId;
+    const guided = this.state.recording.guided;
+    if (!ACTIVE_GUIDED_STATUSES.includes(guided.status)) {
+      guided.packId = packId;
+      guided.voiceEnabled = pack.voiceEnabledByDefault !== false;
+      guided.withVideo = pack.withVideo !== false;
+    }
+    this.emit();
+  }
+
+  async runRecordingPreflight({ packId = null, force = true, checkVideoOverride = null } = {}) {
+    const recording = this.state.recording;
+    const pack = getGuidedCapturePack(packId || recording.selectedPackId);
+    const checkVideo = typeof checkVideoOverride === 'boolean'
+      ? checkVideoOverride
+      : pack?.preflightCheckVideo !== false;
+    const teacherContract = buildTeacherSourceContract(recording, {
+      withVideo: checkVideo,
+      videoRequired: checkVideo,
+      allowLegacyNone: !checkVideo
+    });
+
+    if (recording.preflightLoading) {
+      return recording.preflight;
+    }
+
+    recording.selectedPackId = pack?.id || recording.selectedPackId;
+    recording.preflightLoading = true;
+    recording.preflightError = null;
+    recording.actionError = null;
+    if (teacherContract.error) {
+      recording.preflightLoading = false;
+      recording.preflightError = teacherContract.error;
+      recording.actionError = teacherContract.error;
+      this.emit();
+      return null;
+    }
+    this.emit();
+
+    try {
+      const params = {
+        check_video: checkVideo
+      };
+      applyTeacherSourceContract(params, teacherContract);
+      if (force) {
+        params._ = Date.now();
+      }
+      recording.preflight = await apiService.get(CSI_RECORD_ENDPOINTS.PREFLIGHT, params);
+      recording.preflightError = null;
+      return recording.preflight;
+    } catch (error) {
+      recording.preflightError = error.message;
+      recording.actionError = error.message;
+      return null;
+    } finally {
+      recording.preflightLoading = false;
+      this.emit();
+    }
+  }
+
+  async refreshRecordingStatus(force = false) {
+    try {
+      this.state.recording.status = await apiService.get(
+        CSI_RECORD_ENDPOINTS.STATUS,
+        force ? { _: Date.now() } : {}
+      );
+      this.state.recording.activeMode = inferActiveRecordingMode(this.state.recording);
+      delete this.state.errors.recording;
+    } catch (error) {
+      this.state.errors.recording = error.message;
+    } finally {
+      this.emit();
+    }
+  }
+
+  updateManualRecordingField(field, value) {
+    const manual = this.state.recording.manual;
+    if (!Object.prototype.hasOwnProperty.call(manual, field)) {
+      return;
+    }
+    manual[field] = value;
+    if (field === 'labelPresetId') {
+      if (value === 'custom') {
+        manual.labelVariantId = 'custom';
+      } else {
+        applyManualCapturePreset(manual, { resetVariant: true });
+      }
+    } else if (field === 'labelVariantId') {
+      applyManualCapturePreset(manual, { resetVariant: false });
+    }
+    this.emit();
+  }
+
+  updateFreeformRecordingField(field, value) {
+    const freeform = this.state.recording.freeform;
+    if (!Object.prototype.hasOwnProperty.call(freeform, field)) {
+      return;
+    }
+    freeform[field] = value;
+    this.emit();
+  }
+
+  updateTeacherSourceField(field, value) {
+    const teacherSource = this.state.recording.teacherSource;
+    if (!Object.prototype.hasOwnProperty.call(teacherSource, field)) {
+      return;
+    }
+    teacherSource[field] = field === 'selectedKind'
+      ? normalizeTeacherSourceKind(value)
+      : value;
+    this.emit();
+  }
+
+  async stopActiveRecording() {
+    const recording = this.state.recording;
+    const activeMode = inferActiveRecordingMode(recording) || recording.activeMode;
+    const shouldSpeakFreeformStop = activeMode === 'freeform' && recording.freeform?.voiceCue !== false;
+    const result = await apiService.post(CSI_RECORD_ENDPOINTS.STOP, {});
+    this.state.recording.status = {
+      recording: false,
+      preflight: this.state.recording.preflight
+    };
+    this.state.recording.activeMode = null;
+    this.state.recording.lastStopResult = result;
+    if (activeMode === 'freeform') {
+      this.state.recording.freeform.lastSummary = buildFreeformStopSummary(result, recording);
+    }
+    this.emit();
+    if (shouldSpeakFreeformStop) {
+      void this.speakOperatorCue('Запись остановлена');
+    }
+    return result;
+  }
+
+  async startManualRecording() {
+    const recording = this.state.recording;
+    const manual = recording.manual;
+    const guidedStatus = recording.guided?.status || 'idle';
+    const teacherContract = buildTeacherSourceContract(recording, {
+      withVideo: Boolean(manual.withVideo),
+      videoRequired: Boolean(manual.withVideo),
+      allowLegacyNone: !manual.withVideo
+    });
+    const selectedPreset = getManualCapturePreset(manual.labelPresetId);
+    const selectedVariant = getManualCapturePresetVariant(manual.labelPresetId, manual.labelVariantId);
+    const generatedLabel = buildManualCaptureLabel(selectedPreset, selectedVariant);
+    const generatedNotes = buildManualCaptureNotes(selectedPreset, selectedVariant);
+
+    if (ACTIVE_GUIDED_STATUSES.includes(guidedStatus)) {
+      recording.actionError = 'Сначала останови активный guided-пакет.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (recording.status?.recording) {
+      recording.actionError = 'Запись уже идёт. Сначала останови текущий run.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (teacherContract.error) {
+      recording.actionError = teacherContract.error;
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (!manual.skipPreflight) {
+      const preflight = await this.runRecordingPreflight({
+        force: true,
+        checkVideoOverride: Boolean(manual.withVideo)
+      });
+      if (!preflight?.ok) {
+        recording.actionError = recording.preflightError || 'Предпроверка не пройдена.';
+        this.emit();
+        return { ok: false, error: recording.actionError };
+      }
+    }
+
+    const label = String(manual.label || '').trim() || generatedLabel || makeManualRecordingLabel();
+    const notes = String(manual.notes || '').trim() || generatedNotes || '';
+    recording.actionError = null;
+    this.emit();
+
+    try {
+      const request = {
+        label,
+        chunk_sec: Number(manual.chunkSec || 60),
+        with_video: Boolean(manual.withVideo),
+        person_count: Number(manual.personCount || 0),
+        motion_type: manual.motionType || '',
+        notes,
+        voice_prompt: Boolean(manual.voicePrompt),
+        skip_preflight: Boolean(manual.skipPreflight)
+      };
+      applyTeacherSourceContract(request, teacherContract);
+      const payload = await apiService.post(CSI_RECORD_ENDPOINTS.START, request);
+      recording.manual.label = label;
+      recording.manual.notes = notes;
+      recording.activeMode = 'manual';
+      recording.lastStopResult = null;
+      await this.refreshRecordingStatus(true);
+      return { ok: true, payload };
+    } catch (error) {
+      recording.actionError = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async startFreeformRecording() {
+    const recording = this.state.recording;
+    const freeform = recording.freeform;
+    const guidedStatus = recording.guided?.status || 'idle';
+    const teacherContract = buildTeacherSourceContract(recording, {
+      withVideo: true,
+      videoRequired: true,
+      allowLegacyNone: false
+    });
+
+    if (ACTIVE_GUIDED_STATUSES.includes(guidedStatus)) {
+      recording.actionError = 'Сначала останови активный guided-пакет.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (recording.status?.recording) {
+      recording.actionError = 'Запись уже идёт. Сначала останови текущий run.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (!freeform.personCount) {
+      recording.actionError = 'Для freeform-режима сначала выбери количество людей.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (teacherContract.error) {
+      recording.actionError = teacherContract.error;
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    const preflight = await this.runRecordingPreflight({
+      force: true,
+      checkVideoOverride: true
+    });
+    if (!preflight?.ok) {
+      recording.actionError = recording.preflightError || 'Предпроверка не пройдена.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (!preflight.video?.available) {
+      recording.actionError = 'Freeform-режим требует обязательное видео, но video preflight не пройден.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    const personCount = Math.max(1, Number(freeform.personCount) || 1);
+    const label = String(freeform.label || '').trim() || makeFreeformRecordingLabel(personCount);
+    const notes = buildFreeformNotes(freeform);
+    recording.actionError = null;
+    this.emit();
+
+    try {
+      const request = {
+        label,
+        chunk_sec: Number(freeform.chunkSec || 60),
+        with_video: true,
+        person_count: personCount,
+        motion_type: 'free_motion',
+        notes,
+        voice_prompt: false,
+        skip_preflight: false
+      };
+      applyTeacherSourceContract(request, teacherContract);
+      const payload = await apiService.post(CSI_RECORD_ENDPOINTS.START, request);
+      recording.freeform.label = label;
+      recording.freeform.notes = String(freeform.notes || '').trim();
+      recording.freeform.lastSummary = null;
+      recording.activeMode = 'freeform';
+      recording.lastStopResult = null;
+      await this.refreshRecordingStatus(true);
+      if (freeform.voiceCue !== false) {
+        void this.speakOperatorCue('Запись началась');
+      }
+      return { ok: true, payload };
+    } catch (error) {
+      recording.actionError = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async startGuidedCapturePack(packId, options = {}) {
+    const pack = getGuidedCapturePack(packId || this.state.recording.selectedPackId);
+    if (!pack) {
+      this.state.recording.actionError = 'Guided pack не найден.';
+      this.emit();
+      return { ok: false, error: this.state.recording.actionError };
+    }
+
+    const recording = this.state.recording;
+    const currentGuided = recording.guided;
+    if (ACTIVE_GUIDED_STATUSES.includes(currentGuided.status)) {
+      recording.actionError = 'Guided run уже активен.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (recording.status?.recording) {
+      recording.actionError = 'Сейчас уже идёт запись. Сначала останови текущий run.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    const preflight = await this.runRecordingPreflight({ packId: pack.id, force: true });
+    if (!preflight?.ok) {
+      recording.guided = {
+        ...recording.guided,
+        packId: pack.id,
+        status: 'preflight_failed',
+        completedAt: nowIso(),
+        lastError: preflight?.error || recording.preflightError || 'Preflight не пройден.',
+        sequencePhase: null,
+        countdownValue: null,
+        currentStep: null,
+        currentRecordingLabel: null,
+        stepIndex: -1,
+        stepStartedAt: null,
+        stepEndsAt: null,
+        pauseUntil: null
+      };
+      recording.actionError = recording.guided.lastError;
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    this.clearGuidedTimers();
+    const runToken = currentGuided.runToken + 1;
+    recording.selectedPackId = pack.id;
+    recording.actionError = null;
+    recording.guided = {
+      packId: pack.id,
+      runToken,
+      status: 'idle',
+      sequencePhase: null,
+      countdownValue: null,
+      stepIndex: -1,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      pauseUntil: null,
+      sessionPrefix: makeGuidedSessionPrefix(pack),
+      currentStep: null,
+      currentRecordingLabel: null,
+      voiceEnabled: options.voiceEnabled ?? pack.voiceEnabledByDefault !== false,
+      withVideo: options.withVideo ?? pack.withVideo !== false,
+      logs: [],
+      completedAt: null,
+      lastError: null
+    };
+    this.emit();
+
+    return this.runGuidedCaptureStep(pack.id, 0, runToken);
+  }
+
+  async runGuidedCaptureStep(packId, stepIndex, runToken) {
+    const pack = getGuidedCapturePack(packId);
+    const recording = this.state.recording;
+    const guided = recording.guided;
+
+    if (!pack || guided.runToken !== runToken) {
+      return { ok: false, error: 'Guided pack устарел.' };
+    }
+
+    const step = pack.steps[stepIndex];
+    if (!step) {
+      guided.status = 'completed';
+      guided.completedAt = nowIso();
+      guided.sequencePhase = null;
+      guided.countdownValue = null;
+      guided.currentStep = null;
+      guided.currentRecordingLabel = null;
+      guided.stepStartedAt = null;
+      guided.stepEndsAt = null;
+      guided.pauseUntil = null;
+      this.emit();
+      return { ok: true };
+    }
+
+    const recordingLabel = makeGuidedRecordingLabel(guided.sessionPrefix, stepIndex, step);
+    const notes = [pack.notesPrefix, step.notes].filter(Boolean).join(', ');
+    const teacherContract = buildTeacherSourceContract(recording, {
+      withVideo: Boolean(guided.withVideo),
+      videoRequired: Boolean(guided.withVideo),
+      allowLegacyNone: !guided.withVideo
+    });
+
+    recording.actionError = null;
+    if (teacherContract.error) {
+      guided.status = 'error';
+      guided.lastError = teacherContract.error;
+      guided.completedAt = nowIso();
+      this.emit();
+      return { ok: false, error: teacherContract.error };
+    }
+    guided.status = 'cueing';
+    guided.sequencePhase = 'prompt';
+    guided.countdownValue = null;
+    guided.stepIndex = stepIndex;
+    guided.stepStartedAt = null;
+    guided.stepEndsAt = null;
+    guided.pauseUntil = null;
+    guided.currentRecordingLabel = recordingLabel;
+    guided.currentStep = {
+      ...step,
+      index: stepIndex,
+      totalSteps: pack.steps.length
+    };
+    guided.logs = [
+      ...guided.logs,
+      {
+        stepId: step.id,
+        stepLabel: step.label,
+        recordingLabel,
+        status: 'cueing',
+        startedAt: null,
+        expectedDurationSec: step.durationSec,
+        instruction: step.instruction
+      }
+    ];
+    this.emit();
+
+    try {
+      const sequenceReady = await this.runGuidedStartSequence(pack, step, stepIndex, runToken);
+      if (!sequenceReady || guided.runToken !== runToken) {
+        return { ok: false, error: 'Guided start sequence interrupted.' };
+      }
+
+      const startedAt = nowIso();
+      const request = {
+        label: recordingLabel,
+        chunk_sec: Number(step.durationSec || 30),
+        with_video: guided.withVideo,
+        person_count: Number(step.personCountExpected || pack.personCount || 1),
+        motion_type: pack.motionType || '',
+        notes,
+        voice_prompt: false,
+        skip_preflight: true
+      };
+      applyTeacherSourceContract(request, teacherContract);
+      await apiService.post(CSI_RECORD_ENDPOINTS.START, request);
+      guided.status = 'running';
+      guided.sequencePhase = null;
+      guided.countdownValue = null;
+      guided.stepStartedAt = startedAt;
+      guided.stepEndsAt = new Date(Date.now() + Number(step.durationSec || 0) * 1000).toISOString();
+      await this.refreshRecordingStatus(true);
+      guided.logs = updateGuidedLogEntry(guided.logs, recordingLabel, {
+        status: 'running',
+        startedAt
+      });
+      this.emit();
+      this.guidedStepTimer = setTimeout(() => {
+        void this.completeGuidedCaptureStep(pack.id, stepIndex, runToken);
+      }, Number(step.durationSec || 0) * 1000);
+      return { ok: true };
+    } catch (error) {
+      guided.status = 'error';
+      guided.lastError = error.message;
+      guided.completedAt = nowIso();
+      guided.sequencePhase = null;
+      guided.countdownValue = null;
+      recording.actionError = error.message;
+      guided.logs = updateGuidedLogEntry(guided.logs, recordingLabel, {
+        status: 'error',
+        finishedAt: nowIso(),
+        error: error.message
+      });
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async completeGuidedCaptureStep(packId, stepIndex, runToken) {
+    const pack = getGuidedCapturePack(packId);
+    const recording = this.state.recording;
+    const guided = recording.guided;
+
+    if (!pack || guided.runToken !== runToken) {
+      return;
+    }
+
+    const step = pack.steps[stepIndex];
+    const recordingLabel = guided.currentRecordingLabel || makeGuidedRecordingLabel(guided.sessionPrefix, stepIndex, step);
+
+    guided.status = 'stopping';
+    guided.sequencePhase = null;
+    guided.countdownValue = null;
+    this.emit();
+
+    let stopResult = null;
+    try {
+      stopResult = await this.stopActiveRecording();
+    } catch (error) {
+      if (!/Not recording/i.test(error.message || '')) {
+        guided.status = 'error';
+        guided.lastError = error.message;
+        guided.completedAt = nowIso();
+        guided.sequencePhase = null;
+        guided.countdownValue = null;
+        recording.actionError = error.message;
+        guided.logs = updateGuidedLogEntry(guided.logs, recordingLabel, {
+          status: 'error',
+          finishedAt: nowIso(),
+          error: error.message
+        });
+        this.emit();
+        return;
+      }
+    }
+
+    guided.logs = updateGuidedLogEntry(guided.logs, recordingLabel, {
+      status: 'completed',
+      finishedAt: nowIso(),
+      result: stopResult,
+      lastChunkLabel: stopResult?.last_chunk?.label || null
+    });
+
+    const nextStepIndex = stepIndex + 1;
+    if (nextStepIndex >= pack.steps.length) {
+      guided.status = 'completed';
+      guided.completedAt = nowIso();
+      guided.currentStep = null;
+      guided.currentRecordingLabel = null;
+      guided.stepStartedAt = null;
+      guided.stepEndsAt = null;
+      guided.pauseUntil = null;
+      this.emit();
+      return;
+    }
+
+    const pauseBetweenStepsSec = Number(pack.pauseBetweenStepsSec || 0);
+    guided.status = pauseBetweenStepsSec > 0 ? 'paused' : 'idle';
+    guided.sequencePhase = null;
+    guided.countdownValue = null;
+    guided.stepIndex = stepIndex;
+    guided.currentStep = null;
+    guided.currentRecordingLabel = null;
+    guided.stepStartedAt = null;
+    guided.stepEndsAt = null;
+    guided.pauseUntil = pauseBetweenStepsSec > 0
+      ? new Date(Date.now() + pauseBetweenStepsSec * 1000).toISOString()
+      : null;
+    this.emit();
+
+    if (pauseBetweenStepsSec > 0) {
+      this.guidedPauseTimer = setTimeout(() => {
+        void this.runGuidedCaptureStep(pack.id, nextStepIndex, runToken);
+      }, pauseBetweenStepsSec * 1000);
+      return;
+    }
+
+    void this.runGuidedCaptureStep(pack.id, nextStepIndex, runToken);
+  }
+
+  async stopGuidedCapturePack() {
+    const recording = this.state.recording;
+    const guided = recording.guided;
+    if (!guided.packId) {
+      return { ok: false, error: 'Guided run не активен.' };
+    }
+
+    this.clearGuidedTimers();
+    const currentRunToken = guided.runToken;
+    guided.runToken += 1;
+    guided.status = 'stopping';
+    guided.sequencePhase = null;
+    guided.countdownValue = null;
+    this.emit();
+
+    let stopResult = null;
+    try {
+      if (recording.status?.recording || guided.currentRecordingLabel) {
+        stopResult = await this.stopActiveRecording();
+      }
+    } catch (error) {
+      if (!/Not recording/i.test(error.message || '')) {
+        guided.status = 'error';
+        guided.lastError = error.message;
+        guided.completedAt = nowIso();
+        recording.actionError = error.message;
+        this.emit();
+        return { ok: false, error: error.message };
+      }
+    }
+
+    const cancelledRecordingLabel = guided.currentRecordingLabel;
+    if (cancelledRecordingLabel) {
+      guided.logs = updateGuidedLogEntry(guided.logs, cancelledRecordingLabel, {
+        status: 'cancelled',
+        finishedAt: nowIso(),
+        result: stopResult,
+        lastChunkLabel: stopResult?.last_chunk?.label || null
+      });
+    }
+
+    guided.status = 'cancelled';
+    guided.completedAt = nowIso();
+    guided.sequencePhase = null;
+    guided.countdownValue = null;
+    guided.currentStep = null;
+    guided.currentRecordingLabel = null;
+    guided.stepStartedAt = null;
+    guided.stepEndsAt = null;
+    guided.pauseUntil = null;
+    this.emit();
+    return { ok: true, result: stopResult };
+  }
+
+  async refreshForensicRuns(force = false) {
+    const forensics = this.state.forensics;
+    if (forensics.loadingManifest && !force) {
+      return;
+    }
+
+    forensics.loadingManifest = true;
+    if (force) {
+      forensics.manifestError = null;
+    }
+    this.emit();
+
+    try {
+      const query = force ? `?_=${Date.now()}` : '';
+      const payload = await requestUiJson(`/api/agent7/forensics/runs${query}`);
+      if (force) {
+        this.resetForensicDetailCache();
+      }
+      forensics.manifest = Array.isArray(payload?.runs) ? payload.runs : [];
+      forensics.manifestLoadedAt = payload?.generated_at || new Date().toISOString();
+      forensics.manifestError = null;
+      this.pruneForensicDetailCache(new Set(forensics.manifest.map((item) => item.run_id).filter(Boolean)));
+
+      const selectedRunStillExists = forensics.selectedRunId
+        && forensics.manifest.some((item) => item.run_id === forensics.selectedRunId);
+      const nextRunId = selectedRunStillExists
+        ? forensics.selectedRunId
+        : (forensics.manifest[0]?.run_id || null);
+
+      if (nextRunId && nextRunId !== forensics.selectedRunId) {
+        forensics.selectedRunId = nextRunId;
+        forensics.selectedRun = null;
+        forensics.selectedRunLoadedAt = null;
+      }
+
+      if (nextRunId && (!forensics.selectedRun || force || nextRunId !== forensics.selectedRun?.run_id)) {
+        await this.selectForensicRun(nextRunId, { force });
+      }
+    } catch (error) {
+      forensics.manifestError = error.message;
+    } finally {
+      forensics.loadingManifest = false;
+      this.emit();
+    }
+  }
+
+  async selectForensicRun(runId, { force = false } = {}) {
+    const forensics = this.state.forensics;
+
+    if (!runId) {
+      forensics.selectedRunId = null;
+      forensics.selectedRun = null;
+      forensics.selectedRunLoadedAt = null;
+      forensics.selectedRunError = null;
+      this.emit();
+      return;
+    }
+
+    const sameRunAlreadyLoaded = forensics.selectedRun?.run_id === runId && !force;
+    if (sameRunAlreadyLoaded) {
+      forensics.selectedRunId = runId;
+      this.emit();
+      return;
+    }
+
+    const cachedEntry = !force ? this.getCachedForensicDetail(runId) : null;
+    if (cachedEntry?.payload) {
+      forensics.selectedRunId = runId;
+      forensics.selectedRun = cachedEntry.payload;
+      forensics.selectedRunLoadedAt = cachedEntry.loadedAt;
+      forensics.selectedRunError = null;
+      forensics.loadingRun = false;
+      this.emit();
+      return;
+    }
+
+    forensics.selectedRunId = runId;
+    forensics.loadingRun = true;
+    forensics.selectedRunError = null;
+    this.emit();
+
+    try {
+      const payload = await this.fetchForensicRunDetail(runId, { force });
+      forensics.selectedRun = payload;
+      forensics.selectedRunLoadedAt = this.getCachedForensicDetail(runId)?.loadedAt || payload?.generated_at || new Date().toISOString();
+      forensics.selectedRunError = null;
+    } catch (error) {
+      forensics.selectedRun = null;
+      forensics.selectedRunLoadedAt = null;
+      forensics.selectedRunError = error.message;
+    } finally {
+      forensics.loadingRun = false;
+      this.emit();
+    }
+  }
+}

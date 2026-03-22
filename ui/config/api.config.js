@@ -2,6 +2,8 @@
 
 export const API_CONFIG = {
   BASE_URL: 'https://wifi-densepose-qtgc.onrender.com',  // Render backend
+  LOCAL_RUNTIME_URL: 'http://127.0.0.1:8000', // Canonical local operator runtime
+  LOCAL_UI_URL: 'http://127.0.0.1:3000', // Canonical local CSI operator UI / forensic server
   API_VERSION: '/api/v1',
   WS_PREFIX: 'ws://',
   WSS_PREFIX: 'wss://',
@@ -40,6 +42,19 @@ export const API_CONFIG = {
       CALIBRATE: '/api/v1/pose/calibrate',
       CALIBRATION_STATUS: '/api/v1/pose/calibration/status',
       STATS: '/api/v1/pose/stats'
+    },
+
+    // CSI runtime
+    CSI: {
+      STATUS: '/api/v1/csi/status',
+      MODELS: '/api/v1/csi/models',
+      MODEL_SELECT: '/api/v1/csi/model/select',
+      RECORD: {
+        PREFLIGHT: '/api/v1/csi/record/preflight',
+        START: '/api/v1/csi/record/start',
+        STOP: '/api/v1/csi/record/stop',
+        STATUS: '/api/v1/csi/record/status'
+      }
     },
     
     // Streaming

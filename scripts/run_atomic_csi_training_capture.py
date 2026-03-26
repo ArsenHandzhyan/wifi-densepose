@@ -26,6 +26,7 @@ from live_sensor_guard import fetch_json, format_health_report, verify_online_se
 
 SCRIPT_VERSION = "atomic_capture_v1_2026-03-12"
 ROOT = Path("/Users/arsen/Desktop/wifi-densepose")
+sys.path.insert(0, str(ROOT))
 OUT_DIR_DEFAULT = ROOT / "temp" / "captures"
 VIDEO_TEACHER_OUT_DIR_DEFAULT = ROOT / "temp" / "video_teacher"
 ROOM_CONFIG_DEFAULT = ROOT / "data" / "room-layouts" / "fp2-room-config-1773022408043.json"
@@ -492,6 +493,14 @@ def speak(text: str, *, enable_voice: bool, voice: str) -> None:
     print(text, flush=True)
     if not enable_voice:
         return
+    try:
+        from v1.src.services.tts_service import get_tts_service
+        tts = get_tts_service()
+        if tts.available:
+            tts.speak(text, block=True)
+            return
+    except Exception:
+        pass
     cmd = ["say"]
     if voice:
         cmd.extend(["-v", voice])

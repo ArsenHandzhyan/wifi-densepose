@@ -78,10 +78,21 @@ async def websocket_pose_stream(
 ):
     """WebSocket endpoint for real-time pose data streaming."""
     client_id = None
+    pose_service = get_pose_service()
     
     try:
         # Accept WebSocket connection
         await websocket.accept()
+        if pose_service.is_mock_only_api_surface():
+            await websocket.send_json({
+                "type": "error",
+                "message": pose_service.get_mock_only_reason(),
+                "error": "pose_api_mock_only",
+                "mock_only_api_surface": True,
+                "live_signal_available": False,
+            })
+            await websocket.close(code=1013)
+            return
         
         # Check authentication if enabled
         from src.config.settings import get_settings

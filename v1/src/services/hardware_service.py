@@ -53,6 +53,17 @@ class HardwareService:
         # Data buffers
         self.recent_samples = []
         self.max_recent_samples = 1000
+
+    def _live_collection_available(self) -> bool:
+        """True when at least one router exposes a real collector backend."""
+        return any(getattr(interface, "live_collection_available", False) for interface in self.router_interfaces.values())
+
+    def _collection_mode(self) -> str:
+        if self.settings.mock_hardware:
+            return "mock"
+        if self._live_collection_available():
+            return "live"
+        return "disabled_unimplemented"
     
     async def initialize(self):
         """Initialize the hardware service."""
@@ -72,8 +83,12 @@ class HardwareService:
             self.is_running = True
             
             # Start background tasks
-            if not self.settings.mock_hardware:
+            if not self.settings.mock_hardware and self._live_collection_available():
                 self.collection_task = asyncio.create_task(self._data_collection_loop())
+            elif not self.settings.mock_hardware:
+                self.logger.warning(
+                    "Hardware service started without collection loop: live CSI backend is not implemented in RouterInterface"
+                )
             
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
             
@@ -320,6 +335,8 @@ class HardwareService:
                 "router_id": router_id,
                 "healthy": is_healthy,
                 "connected": status.get("connected", False),
+                "live_collection_available": status.get("live_collection_available", False),
+                "collection_backend": status.get("collection_backend"),
                 "last_data_time": status.get("last_data_time"),
                 "error_count": status.get("error_count", 0),
                 "configuration": status.get("configuration", {})
@@ -369,10 +386,18 @@ class HardwareService:
     
     async def get_status(self) -> Dict[str, Any]:
         """Get service status."""
+        collection_mode = self._collection_mode()
+        if self.is_running and not self.last_error:
+            status = "healthy" if collection_mode in {"mock", "live"} else "degraded"
+        else:
+            status = "unhealthy"
         return {
-            "status": "healthy" if self.is_running and not self.last_error else "unhealthy",
+            "status": status,
             "running": self.is_running,
             "last_error": self.last_error,
+            "live_csi_collection_available": self._live_collection_available(),
+            "collection_backend": collection_mode,
+            "collection_loop_active": bool(self.collection_task and not self.collection_task.done()),
             "statistics": self.stats.copy(),
             "configuration": {
                 "mock_hardware": self.settings.mock_hardware,
@@ -517,7 +542,11 @@ class HardwareService:
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check."""
         try:
-            status = "healthy" if self.is_running and not self.last_error else "unhealthy"
+            collection_mode = self._collection_mode()
+            if self.is_running and not self.last_error:
+                status = "healthy" if collection_mode in {"mock", "live"} else "degraded"
+            else:
+                status = "unhealthy"
             
             # Check router health
             healthy_routers = 0
@@ -532,7 +561,13 @@ class HardwareService:
             
             return {
                 "status": status,
-                "message": self.last_error if self.last_error else "Hardware service is running normally",
+                "message": self.last_error if self.last_error else (
+                    "Hardware service is running in mock mode"
+                    if collection_mode == "mock"
+                    else "Hardware service is running with live collection enabled"
+                    if collection_mode == "live"
+                    else "Hardware service is up, but real CSI collection is not implemented in RouterInterface"
+                ),
                 "connected_routers": f"{healthy_routers}/{total_routers}",
                 "metrics": {
                     "total_samples": self.stats["total_samples"],
@@ -551,4 +586,6 @@ class HardwareService:
     
     async def is_ready(self) -> bool:
         """Check if service is ready."""
-        return self.is_running and len(self.router_interfaces) > 0
+        return self.is_running and len(self.router_interfaces) > 0 and (
+            self.settings.mock_hardware or self._live_collection_available()
+        )

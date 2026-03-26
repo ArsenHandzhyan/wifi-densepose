@@ -32,7 +32,7 @@ PROJECT = Path(__file__).resolve().parents[3]
 MODEL_PATH = PROJECT / "output" / "v25_best_model.pkl"
 UDP_PORT = 5005
 UDP_PORT_CSV = 5006  # ESP32-S3 nodes with CSI_DATA CSV format
-NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137", "192.168.1.33"])
+NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137", "192.168.1.33", "192.168.1.77", "192.168.1.41"])
 
 # ── Track B v1 shadow-mode constants (2026-03-21) ────────────────
 # Track B uses raw CSI subcarrier amplitudes instead of statistical features.
@@ -128,6 +128,23 @@ NODE_HEALTH_MIN_PPS = 15.0
 NODE_HEALTH_MAX_PPS = 25.0
 SC_VAR_HI_THRESHOLD = 3.8
 SC_VAR_MOTION_TVAR_CEILING = 1.5
+
+# ── V29 CNN zone prediction (2026-03-26) ──────────────────────────
+# ImprovedCNN1D on raw subcarrier amplitudes [40, 208] → 3 zones.
+# LODO BA=0.442, door recall=0.789. Shadow mode only initially.
+V29_CNN_MODEL_PATH = PROJECT / "output" / "train_runs" / "v29_cnn_zone_model.pt"
+V29_CNN_SHADOW_ENABLED = True
+V29_CNN_MAX_PACKETS = 40
+V29_CNN_N_SC = 52  # subcarriers 2-53 per node
+V29_CNN_SC_START = 2
+V29_CNN_SC_END = 54
+V29_CNN_ZONE_NAMES = ["door", "center", "deep"]
+V29_CNN_IP_ORDER = [
+    "192.168.1.137",  # node01
+    "192.168.1.117",  # node02
+    "192.168.1.101",  # node03
+    "192.168.1.125",  # node04
+]
 
 # ── Topology-aware warmup damping (2026-03-21) ──────────────────
 # When a node reconnects after being offline for longer than
@@ -229,6 +246,7 @@ class CsiPredictionService:
         self._baseline_capture_active = False
         self._baseline_capture_windows: dict[str, list[dict]] = defaultdict(list)
         self._load_empty_baselines()  # auto-load on startup if file exists
+        self._fewshot_adaptation_shadow: dict[str, Any] = {}
 
         # ── Track B v1 shadow-mode state ─────────────────────────────
         # Shadow inference runs Track B alongside Track A without affecting
@@ -316,6 +334,14 @@ class CsiPredictionService:
         self._old_router_domain_adapt_shadow = {}
         self._old_router_domain_adapt_history: list[dict] = []
         self._old_router_domain_adapt_warmup_windows = 0
+
+        # ── V29 CNN zone prediction shadow state ──────────────────────
+        self._v29_cnn_model = None
+        self._v29_cnn_feat_mean = None
+        self._v29_cnn_feat_std = None
+        self._v29_cnn_loaded = False
+        self._v29_cnn_shadow: dict = {}
+        self._v29_cnn_history: list[dict] = []
 
         # ── Zone calibration shadow state (per-session centroid) ────────
         # Shadow-only zone predictions from per-session NearestCentroid.
@@ -750,6 +776,153 @@ class CsiPredictionService:
 
         except Exception as e:
             logger.error("Track B shadow inference failed: %s", e)
+            return None
+
+    # ── V29 CNN zone prediction methods ─────────────────────────────
+
+    def _load_v29_cnn(self) -> bool:
+        """Load V29 ImprovedCNN1D zone model. Safe to call repeatedly."""
+        if self._v29_cnn_loaded:
+            return True
+        if not V29_CNN_SHADOW_ENABLED or not V29_CNN_MODEL_PATH.exists():
+            return False
+        try:
+            import torch
+            checkpoint = torch.load(V29_CNN_MODEL_PATH, map_location="cpu", weights_only=False)
+            self._v29_cnn_feat_mean = checkpoint["feat_mean"]
+            self._v29_cnn_feat_std = checkpoint["feat_std"]
+
+            # Reconstruct model
+            import torch.nn as nn
+            import torch.nn.functional as F
+
+            class ImprovedCNN1D(nn.Module):
+                def __init__(self, in_channels=208, n_classes=3, hidden=96, dropout=0.3):
+                    super().__init__()
+                    self.conv1 = nn.Conv1d(in_channels, hidden, kernel_size=7, padding=3)
+                    self.bn1 = nn.BatchNorm1d(hidden)
+                    self.conv2 = nn.Conv1d(hidden, hidden, kernel_size=5, padding=2)
+                    self.bn2 = nn.BatchNorm1d(hidden)
+                    self.conv3 = nn.Conv1d(hidden, hidden, kernel_size=3, padding=1)
+                    self.bn3 = nn.BatchNorm1d(hidden)
+                    self.conv4 = nn.Conv1d(hidden, hidden // 2, kernel_size=3, padding=1)
+                    self.bn4 = nn.BatchNorm1d(hidden // 2)
+                    self.drop = nn.Dropout(dropout)
+                    self.fc = nn.Linear(hidden // 2, n_classes)
+                    self.res_proj = nn.Conv1d(hidden, hidden, kernel_size=1)
+
+                def forward(self, x):
+                    x = x.transpose(1, 2)
+                    x = self.drop(F.relu(self.bn1(self.conv1(x))))
+                    res = x
+                    x = self.drop(F.relu(self.bn2(self.conv2(x))))
+                    x = x + self.res_proj(res)
+                    x = self.drop(F.relu(self.bn3(self.conv3(x))))
+                    x = self.drop(F.relu(self.bn4(self.conv4(x))))
+                    x = x.mean(dim=2)
+                    return self.fc(x)
+
+            in_ch = checkpoint.get("in_channels", 208)
+            n_cl = checkpoint.get("n_classes", 3)
+            model = ImprovedCNN1D(in_channels=in_ch, n_classes=n_cl)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.eval()
+            self._v29_cnn_model = model
+            self._v29_cnn_loaded = True
+            logger.info("V29 CNN zone model loaded: %s (%d ch, %d classes)",
+                        V29_CNN_MODEL_PATH.name, in_ch, n_cl)
+            return True
+        except Exception as e:
+            logger.warning("V29 CNN zone model load failed: %s", e)
+            self._v29_cnn_model = None
+            self._v29_cnn_loaded = False
+            return False
+
+    def _build_v29_raw_window(self, t_start: float, t_end: float) -> np.ndarray | None:
+        """Build raw CSI tensor [40, 208] for V29 CNN zone prediction.
+
+        Uses 52 subcarriers (indices 2-53) per node × 4 nodes = 208 channels.
+        Pad/truncate to 40 time steps per node.
+        """
+        parts = []
+        nodes_with_data = 0
+
+        for ip in V29_CNN_IP_ORDER:
+            pkts = [(t, a) for t, _r, a, _p in self._packets.get(ip, [])
+                    if t_start <= t < t_end]
+
+            if len(pkts) >= 3:
+                nodes_with_data += 1
+                # Build amplitude matrix [n_packets, 128+], select SC 2-53
+                amp_mat = np.array([a for _, a in pkts], dtype=np.float32)
+                if amp_mat.shape[1] >= V29_CNN_SC_END:
+                    sc_mat = amp_mat[:, V29_CNN_SC_START:V29_CNN_SC_END]
+                else:
+                    padded = np.zeros((amp_mat.shape[0], V29_CNN_SC_END), dtype=np.float32)
+                    padded[:, :amp_mat.shape[1]] = amp_mat
+                    sc_mat = padded[:, V29_CNN_SC_START:V29_CNN_SC_END]
+                sc_mat = self._pad_or_truncate(sc_mat, V29_CNN_MAX_PACKETS)
+            else:
+                sc_mat = np.zeros((V29_CNN_MAX_PACKETS, V29_CNN_N_SC), dtype=np.float32)
+
+            parts.append(sc_mat)
+
+        if nodes_with_data < 2:
+            return None
+
+        return np.concatenate(parts, axis=1).astype(np.float32)  # [40, 208]
+
+    def _shadow_predict_v29_zone(self, t_start: float, t_end: float,
+                                   w_end: float) -> dict | None:
+        """Run V29 CNN zone inference in shadow mode. Never affects production."""
+        if not self._v29_cnn_loaded:
+            if not self._load_v29_cnn():
+                return None
+
+        raw_window = self._build_v29_raw_window(t_start, t_end)
+        if raw_window is None:
+            return None
+
+        try:
+            import torch
+            import torch.nn.functional as F
+
+            # z-score normalize with training stats
+            x = (raw_window - self._v29_cnn_feat_mean) / self._v29_cnn_feat_std
+            x_tensor = torch.from_numpy(x).float().unsqueeze(0)  # [1, 40, 208]
+
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                logits = self._v29_cnn_model(x_tensor)
+            inference_ms = (time.perf_counter() - t0) * 1000
+
+            probs = F.softmax(logits, dim=1).squeeze(0).numpy()
+            pred_idx = int(np.argmax(probs))
+            pred_zone = V29_CNN_ZONE_NAMES[pred_idx]
+
+            shadow = {
+                "t": w_end,
+                "model": "v29_cnn",
+                "zone": pred_zone,
+                "zone_idx": pred_idx,
+                "probabilities": {
+                    V29_CNN_ZONE_NAMES[i]: round(float(probs[i]), 4)
+                    for i in range(len(V29_CNN_ZONE_NAMES))
+                },
+                "inference_ms": round(inference_ms, 2),
+            }
+            self._v29_cnn_shadow = shadow
+            self._v29_cnn_history.append(shadow)
+            if len(self._v29_cnn_history) > 60:
+                self._v29_cnn_history = self._v29_cnn_history[-60:]
+
+            logger.info(
+                "V29 CNN ZONE: %s (door=%.3f center=%.3f deep=%.3f) %.1fms",
+                pred_zone, probs[0], probs[1], probs[2], inference_ms)
+            return shadow
+
+        except Exception as e:
+            logger.error("V29 CNN zone inference failed: %s", e)
             return None
 
     # ── V7 warehouse-bound canonical shadow-mode methods ────────────
@@ -2269,6 +2442,12 @@ class CsiPredictionService:
         except Exception as e:
             logger.debug("Track B pre-inference skipped: %s", e)
 
+        # ── V29 CNN zone shadow prediction ──
+        try:
+            self._shadow_predict_v29_zone(w_start, w_end, w_end)
+        except Exception as e:
+            logger.debug("V29 CNN zone shadow skipped: %s", e)
+
         # Binary prediction with custom threshold
         bin_proba = self.binary_model.predict_proba(X)[0]
         threshold = getattr(self, '_binary_threshold', 0.5)
@@ -2684,6 +2863,8 @@ class CsiPredictionService:
             "target_x": round(target_x, 2),
             "target_y": round(target_y, 2),
             "zone": zone,
+            "v29_cnn_zone": self._v29_cnn_shadow.get("zone") if self._v29_cnn_shadow.get("t") == w_end else None,
+            "v29_cnn_probs": self._v29_cnn_shadow.get("probabilities") if self._v29_cnn_shadow.get("t") == w_end else None,
             "nodes_active": active_nodes,
             "pps": round(total_pps, 1),
         }
@@ -2802,6 +2983,41 @@ class CsiPredictionService:
                     pass
         except Exception as e:
             logger.debug("Zone calibration shadow skipped: %s", e)
+
+        # ── Few-shot packet adaptation shadow (saved packet consumer only) ──
+        try:
+            from .fewshot_adaptation_consumer_service import (
+                fewshot_adaptation_consumer_service as _fewshot_consumer,
+            )
+            fewshot_result = _fewshot_consumer.predict(
+                feat,
+                active_nodes,
+                pkt_count=pkt_count,
+                window_t=w_end,
+            )
+            self._fewshot_adaptation_shadow = fewshot_result
+            if fewshot_result.get("status") == "shadow_live":
+                try:
+                    shadow_path = PROJECT / "temp" / "fewshot_adaptation_shadow_telemetry.ndjson"
+                    shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(shadow_path, "a") as sf:
+                        sf.write(json.dumps({
+                            "ts": time.time(),
+                            "window_t": w_end,
+                            "v20_binary": binary_label,
+                            "v20_zone": zone,
+                            "fewshot_zone": fewshot_result.get("zone"),
+                            "fewshot_zone_raw": fewshot_result.get("zone_raw"),
+                            "fewshot_confidence": fewshot_result.get("confidence"),
+                            "fewshot_status": fewshot_result.get("status"),
+                            "fewshot_session_id": fewshot_result.get("active_session_id"),
+                            "fewshot_probabilities": fewshot_result.get("probabilities", {}),
+                            "fewshot_smoothing": fewshot_result.get("smoothing", {}),
+                        }) + "\n")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Few-shot adaptation shadow skipped: %s", e)
 
         # ── Coordinate stabilization (shadow-only) ───────────────────
         try:
@@ -3512,6 +3728,16 @@ class CsiPredictionService:
                 **shadow_stub,
             }
 
+        # ── V29 CNN zone shadow status ──────────────────────────────────
+        if self._v29_cnn_loaded and self._v29_cnn_shadow:
+            status["v29_cnn_zone_shadow"] = self._v29_cnn_shadow
+        elif V29_CNN_SHADOW_ENABLED:
+            status["v29_cnn_zone_shadow"] = {
+                "loaded": self._v29_cnn_loaded,
+                "status": "awaiting_first_window" if self._v29_cnn_loaded else "not_loaded",
+                "model_path": str(V29_CNN_MODEL_PATH),
+            }
+
         # ── Zone calibration shadow status (per-session centroid) ─────
         try:
             from .zone_calibration_service import zone_calibration_service as _zone_cal
@@ -3521,6 +3747,18 @@ class CsiPredictionService:
             }
         except Exception:
             status["zone_calibration_shadow"] = {"calibrated": False, "status": "not_loaded"}
+
+        # ── Few-shot adaptation shadow status (saved packet consumer) ──
+        try:
+            from .fewshot_adaptation_consumer_service import (
+                fewshot_adaptation_consumer_service as _fewshot_consumer,
+            )
+            status["fewshot_adaptation_shadow"] = {
+                **_fewshot_consumer.get_status(),
+                "last_prediction": self._fewshot_adaptation_shadow if self._fewshot_adaptation_shadow else None,
+            }
+        except Exception:
+            status["fewshot_adaptation_shadow"] = {"enabled": True, "active": False, "status": "not_loaded"}
 
         # ── Coord stabilization shadow status ──────────────────────────
         try:

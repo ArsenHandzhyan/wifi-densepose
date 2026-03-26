@@ -5,6 +5,7 @@ Records CSI data in parallel with live prediction.
 Features:
 - Pre-flight checks: all 4 ESP32 nodes + explicit teacher source probe
 - Strict video-backed gate: CSI recording starts only after teacher truth is alive
+- Post-start CSI signal gate: CSI-dead starts auto-abort within first seconds
 - Voice prompts: Russian macOS 'say' for start/stop/failure and optional cues
 - Parallel operation: feeds packets to prediction service simultaneously
 - Truthful summary: session duration, real video duration, truth coverage, labeling verdict
@@ -29,6 +30,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from .recording_truth_hardening import (
+    build_truth_hardening_report,
+    build_zone_review_autowire_status,
+)
+from .csi_node_inventory import CORE_NODE_IPS, NODE_IPS, NODE_NAMES
+
 logger = logging.getLogger(__name__)
 
 PROJECT = Path(__file__).resolve().parents[3]
@@ -37,19 +44,8 @@ CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
 MAC_VIDEO_TEACHER_HOST_SCRIPT = PROJECT / "scripts" / "mac_video_teacher_host.py"
 PIXEL_VIDEO_TEACHER_HOST_SCRIPT = PROJECT / "scripts" / "pixel_video_teacher_host.py"
+GARAGE_ZONE_REVIEW_PACKET_SCRIPT = PROJECT / "scripts" / "init_garage_zone_review_packet.py"
 
-# Core 4-node set (used for preflight — these must be present)
-CORE_NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137"])
-# All recordable nodes (core + shadow nodes like node05/node06)
-NODE_IPS = sorted(CORE_NODE_IPS + ["192.168.1.33", "192.168.1.77"])
-NODE_NAMES = {
-    "192.168.1.137": "node01",
-    "192.168.1.117": "node02",
-    "192.168.1.101": "node03",
-    "192.168.1.125": "node04",
-    "192.168.1.33": "node05",
-    "192.168.1.77": "node06",
-}
 RTSP_URL = "rtsp://admin:admin@192.168.1.148:8554/live"
 
 KNOWN_TEACHER_SOURCE_KINDS = {"none", "rtsp_teacher", "mac_camera", "phone_rtsp", "pixel_rtsp", "mac_camera_terminal"}
@@ -65,6 +61,10 @@ HOST_SCRIPT_PYTHON = (
     or shutil.which("python3")
     or sys.executable
 )
+POST_START_SIGNAL_GRACE_SEC = float(os.getenv("CSI_POST_START_SIGNAL_GRACE_SEC", "6.0"))
+POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES = int(os.getenv("CSI_POST_START_MIN_ACTIVE_CORE_NODES", "1"))
+POST_START_SIGNAL_MIN_PACKETS = int(os.getenv("CSI_POST_START_MIN_PACKETS", "20"))
+POST_START_SIGNAL_MIN_PPS = float(os.getenv("CSI_POST_START_MIN_PPS", "5.0"))
 
 
 class CsiRecordingService:
@@ -76,7 +76,7 @@ class CsiRecordingService:
         self.video_required = False
         self.voice_prompt_enabled = True
         self.voice_cues: list[dict[str, Any]] = []
-        self.person_count = 0
+        self.person_count: int | None = None
         self.motion_type = ""
         self.space_id = "garage"
         self.notes = ""
@@ -107,6 +107,7 @@ class CsiRecordingService:
         self._video_path: Path | None = None
         self._teacher_handle: dict[str, Any] | None = None
         self._teacher_monitor_task: asyncio.Task | None = None
+        self._startup_guard_task: asyncio.Task | None = None
         self._voice_cue_task: asyncio.Task | None = None
         self._session_token = 0
         self._teacher_ready = False
@@ -126,6 +127,8 @@ class CsiRecordingService:
         self._session_summary_path: Path | None = None
         self._last_stop_result: dict[str, Any] | None = None
         self._stop_reason: str | None = None
+        self._truth_hardening: dict[str, Any] | None = None
+        self._startup_signal_guard: dict[str, Any] | None = None
 
         # Voice prompt subprocess
         self._say_proc: subprocess.Popen[bytes] | None = None
@@ -204,7 +207,7 @@ class CsiRecordingService:
                         "error": str(exc),
                     }
 
-        if nodes_ok < 4:
+        if nodes_ok < 3:
             results["ok"] = False
             results["error"] = f"Only {nodes_ok}/4 nodes responding"
 
@@ -232,15 +235,15 @@ class CsiRecordingService:
     # ── Voice prompts ──────────────────────────────────────────────
 
     def _say(self, text: str):
-        """Speak text using macOS say (Russian voice)."""
+        """Speak text using ElevenLabs TTS only (no macOS say fallback)."""
         try:
-            self._say_proc = subprocess.Popen(
-                ["say", "-v", "Milena", text],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            from v1.src.services.tts_service import get_tts_service
+            tts = get_tts_service()
+            if tts.available:
+                tts.speak(text, block=False)
+                return
         except Exception as exc:
-            logger.warning("Voice prompt failed: %s", exc)
+            logger.warning("ElevenLabs TTS failed: %s", exc)
 
     async def _voice_cue_loop(self, session_token: int):
         ordered_cues = sorted(
@@ -259,6 +262,74 @@ class CsiRecordingService:
             if self.recording and self._session_token == session_token:
                 self._say(str(cue.get("text")).strip())
 
+    def _build_startup_signal_snapshot(self) -> dict[str, Any]:
+        chunk_elapsed = max(time.time() - self._chunk_start, 0.0)
+        chunk_packets = len(self._chunk_packets)
+        active_core_nodes = sum(1 for ip in CORE_NODE_IPS if self._node_packet_counts.get(ip, 0) > 0)
+        active_nodes = sum(1 for ip in NODE_IPS if self._node_packet_counts.get(ip, 0) > 0)
+        return {
+            "checked_at": datetime.now().isoformat(),
+            "grace_sec": POST_START_SIGNAL_GRACE_SEC,
+            "chunk_elapsed_sec": round(chunk_elapsed, 2),
+            "chunk_packets": chunk_packets,
+            "chunk_pps": round(chunk_packets / max(chunk_elapsed, 0.1), 2),
+            "total_packets": self._total_packets,
+            "active_core_nodes": active_core_nodes,
+            "active_nodes": active_nodes,
+            "node_packets": dict(self._node_packet_counts),
+            "thresholds": {
+                "min_active_core_nodes": POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES,
+                "min_packets": POST_START_SIGNAL_MIN_PACKETS,
+                "min_pps": POST_START_SIGNAL_MIN_PPS,
+            },
+        }
+
+    def _startup_signal_guard_ok(self, snapshot: dict[str, Any]) -> bool:
+        return (
+            int(snapshot.get("active_core_nodes") or 0) >= POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES
+            and int(snapshot.get("chunk_packets") or 0) >= POST_START_SIGNAL_MIN_PACKETS
+            and float(snapshot.get("chunk_pps") or 0.0) >= POST_START_SIGNAL_MIN_PPS
+        )
+
+    async def _startup_signal_guard_loop(self, session_token: int):
+        await asyncio.sleep(max(1.0, POST_START_SIGNAL_GRACE_SEC))
+        if not self.recording or self._session_token != session_token:
+            return
+
+        snapshot = self._build_startup_signal_snapshot()
+        if self._startup_signal_guard_ok(snapshot):
+            snapshot["status"] = "passed"
+            self._startup_signal_guard = snapshot
+            logger.info(
+                "Post-start CSI guard passed: label=%s core_nodes=%s packets=%s pps=%.2f",
+                self.session_label,
+                snapshot["active_core_nodes"],
+                snapshot["chunk_packets"],
+                snapshot["chunk_pps"],
+            )
+            return
+
+        snapshot["status"] = "failed"
+        snapshot["reason"] = "csi_dead_on_start"
+        self._startup_signal_guard = snapshot
+        logger.warning(
+            "Post-start CSI guard failed: label=%s core_nodes=%s packets=%s pps=%.2f",
+            self.session_label,
+            snapshot["active_core_nodes"],
+            snapshot["chunk_packets"],
+            snapshot["chunk_pps"],
+        )
+        await self.stop_recording(
+            voice_prompt=True,
+            reason=(
+                "csi_dead_on_start:"
+                f"core_nodes={snapshot['active_core_nodes']},"
+                f"packets={snapshot['chunk_packets']},"
+                f"pps={snapshot['chunk_pps']}"
+            ),
+            failure_prompt="CSI сигнал не пошёл. Запись остановлена.",
+        )
+
     # ── Recording control ─────────────────────────────────────────
 
     async def start_recording(
@@ -266,7 +337,7 @@ class CsiRecordingService:
         label: str,
         chunk_sec: int = 60,
         with_video: bool = False,
-        person_count: int = 0,
+        person_count: int | None = None,
         motion_type: str = "",
         notes: str = "",
         voice_prompt: bool = True,
@@ -336,6 +407,14 @@ class CsiRecordingService:
         self.voice_prompt_enabled = bool(voice_prompt)
         self.voice_cues = list(voice_cues or [])
         self.person_count = person_count
+        if person_count is None:
+            logger.warning(
+                "person_count not specified for session %s — "
+                "metadata will record person_count_expected=null. "
+                "Downstream truth layers may flag this as ambiguous. "
+                "Pass explicit person_count to avoid this warning.",
+                label,
+            )
         self.motion_type = motion_type
         self.notes = notes
 
@@ -383,9 +462,19 @@ class CsiRecordingService:
 
         # Start first chunk
         self._start_new_chunk()
+        self._startup_signal_guard = {
+            "status": "pending",
+            "grace_sec": POST_START_SIGNAL_GRACE_SEC,
+            "thresholds": {
+                "min_active_core_nodes": POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES,
+                "min_packets": POST_START_SIGNAL_MIN_PACKETS,
+                "min_pps": POST_START_SIGNAL_MIN_PPS,
+            },
+        }
 
         if self.with_video:
             self._teacher_monitor_task = asyncio.create_task(self._teacher_monitor_loop(self._session_token))
+        self._startup_guard_task = asyncio.create_task(self._startup_signal_guard_loop(self._session_token))
         if self.voice_prompt_enabled and self.voice_cues:
             self._voice_cue_task = asyncio.create_task(self._voice_cue_loop(self._session_token))
 
@@ -441,10 +530,10 @@ class CsiRecordingService:
         duration = time.time() - self._session_start
 
         session_summary = self._build_session_summary(duration, teacher_finalize)
-        self._session_summary = session_summary
-        if self._session_summary_path:
-            with self._session_summary_path.open("w", encoding="utf-8") as handle:
-                json.dump(session_summary, handle, indent=2, ensure_ascii=False)
+        zone_review_packet_path = await asyncio.to_thread(
+            self._normalize_and_persist_session_summary_sync,
+            session_summary,
+        )
 
         if voice_enabled:
             if failure_prompt:
@@ -467,6 +556,8 @@ class CsiRecordingService:
             "session_summary_path": str(self._session_summary_path) if self._session_summary_path else None,
             "truth_summary": session_summary["truth_summary"],
             "labeling_verdict": session_summary["labeling_verdict"],
+            "truth_hardening": session_summary.get("truth_hardening"),
+            "zone_review_packet_path": session_summary.get("zone_review_packet_path") or zone_review_packet_path,
         }
         self._last_stop_result = result
         logger.info("Recording stopped: %s", result)
@@ -914,12 +1005,21 @@ class CsiRecordingService:
             ready_path = Path(str(ready_path_value)).expanduser()
             if ready_path.exists():
                 try:
-                    sample["ready_payload"] = json.loads(ready_path.read_text(encoding="utf-8"))
-                    sample["ready"] = True
+                    ready_text = ready_path.read_text(encoding="utf-8")
+                    if ready_text.strip():
+                        sample["ready_payload"] = json.loads(ready_text)
+                        sample["ready"] = True
                 except Exception as exc:
-                    sample["error"] = f"invalid teacher ready payload: {exc}"
-                    sample["fatal"] = True
-                    return sample
+                    proc = handle.get("proc")
+                    process_running = proc is not None and proc.poll() is None
+                    # Treat a transient empty/partial ready file as "not ready yet"
+                    # while the teacher process is still starting up.
+                    if process_running and ready_path.stat().st_size == 0:
+                        sample["error"] = "teacher ready payload not written yet"
+                    else:
+                        sample["error"] = f"invalid teacher ready payload: {exc}"
+                        sample["fatal"] = True
+                        return sample
         path_value = handle.get("video_path")
         path = Path(str(path_value)).expanduser() if path_value else None
         if path and path.exists():
@@ -1169,6 +1269,14 @@ class CsiRecordingService:
                     "reason": "CSI session completed." if not self.with_video else "Optional video remained available.",
                 }
 
+        if self._stop_reason and self._stop_reason.startswith("csi_dead_on_start"):
+            session_status = "failed"
+            verdict = {
+                "code": "csi_dead_on_start",
+                "suitable_for_labeling": False,
+                "reason": "CSI signal did not become live during the post-start guard window.",
+            }
+
         truth_summary = {
             "with_video": self.with_video,
             "video_required": self.video_required,
@@ -1192,6 +1300,7 @@ class CsiRecordingService:
             "coverage_status": coverage_status,
             "coverage_started_at": self._time_to_iso(self._teacher_truth_started_at),
             "coverage_ended_at": self._time_to_iso(self._teacher_truth_ended_at),
+            "startup_signal_guard": self._startup_signal_guard,
         }
 
         return {
@@ -1205,6 +1314,7 @@ class CsiRecordingService:
             "total_packets": self._total_packets,
             "node_packets": dict(self._node_packet_counts),
             "preflight": self._preflight,
+            "startup_signal_guard": self._startup_signal_guard,
             "teacher": teacher_finalize,
             "truth_summary": truth_summary,
             "labeling_verdict": verdict,
@@ -1220,10 +1330,103 @@ class CsiRecordingService:
         effective_end = end_time or self._teacher_last_growth_at or time.time()
         return max(0.0, float(effective_end) - float(self._teacher_truth_started_at))
 
+    def _persist_session_summary_sync(self, session_summary: dict[str, Any]) -> None:
+        if not self._session_summary_path:
+            return
+        with self._session_summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(session_summary, handle, indent=2, ensure_ascii=False)
+
+    def _normalize_and_persist_session_summary_sync(self, session_summary: dict[str, Any]) -> str | None:
+        zone_review_packet_path = str(session_summary.get("zone_review_packet_path") or "").strip() or None
+        if zone_review_packet_path:
+            existing_path = Path(zone_review_packet_path).expanduser()
+            if not existing_path.exists():
+                zone_review_packet_path = None
+                session_summary.pop("zone_review_packet_path", None)
+            else:
+                zone_review_packet_path = str(existing_path)
+                session_summary["zone_review_packet_path"] = zone_review_packet_path
+
+        # Persist an initial summary before packet bootstrap so the helper script
+        # always sees a coherent stop payload.
+        self._persist_session_summary_sync(session_summary)
+
+        if not zone_review_packet_path:
+            zone_review_packet_path = self._maybe_generate_zone_review_packet_sync(session_summary)
+            if zone_review_packet_path:
+                session_summary["zone_review_packet_path"] = zone_review_packet_path
+
+        session_summary["truth_hardening"] = build_truth_hardening_report(
+            session_summary,
+            zone_review_packet_path=zone_review_packet_path,
+        )
+        self._truth_hardening = session_summary["truth_hardening"]
+        self._session_summary = session_summary
+        self._persist_session_summary_sync(session_summary)
+        return zone_review_packet_path
+
+    def _maybe_generate_zone_review_packet_sync(self, session_summary: dict[str, Any]) -> str | None:
+        if not self._session_summary_path:
+            return None
+        zone_review_status = build_zone_review_autowire_status(session_summary)
+        self._truth_hardening = build_truth_hardening_report(session_summary)
+        if not zone_review_status.get("eligible"):
+            logger.info(
+                "Garage zone review packet autowire skipped for %s: %s",
+                self.session_label,
+                ", ".join(zone_review_status.get("blockers") or [zone_review_status.get("reason") or "not_eligible"]),
+            )
+            return None
+        if not GARAGE_ZONE_REVIEW_PACKET_SCRIPT.exists():
+            logger.warning("Garage zone review packet script missing: %s", GARAGE_ZONE_REVIEW_PACKET_SCRIPT)
+            return None
+
+        try:
+            completed = subprocess.run(
+                [
+                    HOST_SCRIPT_PYTHON,
+                    str(GARAGE_ZONE_REVIEW_PACKET_SCRIPT),
+                    "--summary",
+                    str(self._session_summary_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("Garage zone review packet bootstrap failed: %s", exc)
+            return None
+
+        if completed.returncode != 0:
+            logger.warning(
+                "Garage zone review packet bootstrap exited with code %s: %s",
+                completed.returncode,
+                (completed.stderr or completed.stdout).strip(),
+            )
+            return None
+
+        packet_path = (completed.stdout or "").strip().splitlines()
+        if not packet_path:
+            logger.warning("Garage zone review packet bootstrap returned no output for %s", self.session_label)
+            return None
+        packet_path_str = packet_path[-1].strip()
+        if not packet_path_str:
+            return None
+        packet_path_obj = Path(packet_path_str).expanduser()
+        if not packet_path_obj.exists():
+            logger.warning("Garage zone review packet path does not exist: %s", packet_path_obj)
+            return None
+        self._truth_hardening = build_truth_hardening_report(
+            session_summary,
+            zone_review_packet_path=str(packet_path_obj),
+        )
+        return str(packet_path_obj)
+
     async def _cancel_background_tasks(self):
         current = asyncio.current_task()
         tasks: list[asyncio.Task] = []
-        for attr in ("_teacher_monitor_task", "_voice_cue_task"):
+        for attr in ("_teacher_monitor_task", "_startup_guard_task", "_voice_cue_task"):
             task = getattr(self, attr)
             if task is None:
                 continue
@@ -1252,6 +1455,7 @@ class CsiRecordingService:
         self._video_proc = None
         self._video_path = None
         self._teacher_handle = None
+        self._startup_signal_guard = None
         self._teacher_ready = False
         self._teacher_degraded = False
         self._teacher_stop_requested = False
@@ -1267,6 +1471,7 @@ class CsiRecordingService:
         self._session_summary_path = None
         self._last_stop_result = None
         self._stop_reason = None
+        self._truth_hardening = None
 
     def _run_json_script(self, script_path: Path, *args: str) -> tuple[bool, dict[str, Any] | None, str | None]:
         completed = subprocess.run(
@@ -1394,6 +1599,7 @@ class CsiRecordingService:
             return {
                 "recording": False,
                 "preflight": self._preflight,
+                "startup_signal_guard": self._startup_signal_guard,
                 "last_result": self._last_stop_result,
                 "last_session_summary": self._session_summary,
             }
@@ -1426,6 +1632,7 @@ class CsiRecordingService:
             "motion_type": self.motion_type,
             "node_packets": dict(self._node_packet_counts),
             "preflight": self._preflight,
+            "startup_signal_guard": self._startup_signal_guard,
             "teacher_status": {
                 "ready": self._teacher_ready,
                 "degraded": self._teacher_degraded,

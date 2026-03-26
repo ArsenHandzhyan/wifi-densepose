@@ -56,6 +56,14 @@ class PoseStreamHandler:
         if self.is_streaming:
             logger.warning("Pose streaming already active")
             return
+        if self.pose_service.is_mock_only_api_surface():
+            logger.warning(
+                "Pose streaming not started: public pose surface is mock-only (%s)",
+                self.pose_service.get_mock_only_reason(),
+            )
+            self.is_streaming = False
+            self.stream_task = None
+            return
         
         self.is_streaming = True
         self.stream_task = asyncio.create_task(self._stream_loop())

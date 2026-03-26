@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _mock_only_pose_detail(pose_service: PoseService) -> Dict[str, Any]:
+    return {
+        "error": "pose_api_mock_only",
+        "message": pose_service.get_mock_only_reason(),
+        "mock_only_api_surface": True,
+        "live_signal_available": False,
+    }
+
+
+def _ensure_live_pose_surface(pose_service: PoseService) -> None:
+    if pose_service.is_mock_only_api_surface():
+        raise HTTPException(status_code=503, detail=_mock_only_pose_detail(pose_service))
+
+
 # Request/Response models
 class PoseEstimationRequest(BaseModel):
     """Request model for pose estimation."""
@@ -120,6 +134,7 @@ async def get_current_pose_estimation(
 ):
     """Get current pose estimation from WiFi signals."""
     try:
+        _ensure_live_pose_surface(pose_service)
         logger.info(f"Processing pose estimation request from user: {current_user.get('id') if current_user else 'anonymous'}")
         
         # Get current pose estimation
@@ -150,6 +165,7 @@ async def analyze_pose_data(
 ):
     """Trigger pose analysis with custom parameters."""
     try:
+        _ensure_live_pose_surface(pose_service)
         logger.info(f"Custom pose analysis requested by user: {current_user['id']}")
         
         # Trigger analysis
@@ -186,6 +202,7 @@ async def get_zone_occupancy(
 ):
     """Get current occupancy for a specific zone."""
     try:
+        _ensure_live_pose_surface(pose_service)
         occupancy = await pose_service.get_zone_occupancy(zone_id)
         
         if occupancy is None:
@@ -219,6 +236,7 @@ async def get_zones_summary(
 ):
     """Get occupancy summary for all zones."""
     try:
+        _ensure_live_pose_surface(pose_service)
         summary = await pose_service.get_zones_summary()
         
         return {
@@ -244,6 +262,7 @@ async def get_historical_data(
 ):
     """Get historical pose estimation data."""
     try:
+        _ensure_live_pose_surface(pose_service)
         # Validate time range
         if request.end_time <= request.start_time:
             raise HTTPException(
@@ -298,6 +317,7 @@ async def get_detected_activities(
 ):
     """Get recently detected activities."""
     try:
+        _ensure_live_pose_surface(pose_service)
         activities = await pose_service.get_recent_activities(
             zone_id=zone_id,
             limit=limit
@@ -326,6 +346,7 @@ async def calibrate_pose_system(
 ):
     """Calibrate the pose estimation system."""
     try:
+        _ensure_live_pose_surface(pose_service)
         logger.info(f"Pose system calibration initiated by user: {current_user['id']}")
         
         # Check if calibration is already in progress
@@ -368,6 +389,7 @@ async def get_calibration_status(
 ):
     """Get current calibration status."""
     try:
+        _ensure_live_pose_surface(pose_service)
         status = await pose_service.get_calibration_status()
         
         return {
@@ -395,6 +417,7 @@ async def get_pose_statistics(
 ):
     """Get pose estimation statistics."""
     try:
+        _ensure_live_pose_surface(pose_service)
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=hours)
         

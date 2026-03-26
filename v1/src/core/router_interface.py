@@ -51,6 +51,8 @@ class RouterInterface:
         self.is_connected = False
         self.connection = None
         self.last_error = None
+        self.connection_backend = "mock" if mock_mode else "simulated_placeholder"
+        self.live_collection_implemented = False
         
         # Data collection state
         self.last_data_time = None
@@ -81,13 +83,16 @@ class RouterInterface:
         try:
             self.logger.info(f"Connecting to router {self.router_id} at {self.host}:{self.port}")
             
-            # In a real implementation, this would establish SSH connection
-            # For now, we'll simulate the connection
+            # Legacy path: this surface does not have a real SSH-backed collector.
+            # Keep the service bootable, but report the backend honestly in status.
             await asyncio.sleep(0.1)  # Simulate connection delay
             
             self.is_connected = True
             self.error_count = 0
-            self.logger.info(f"Connected to router {self.router_id}")
+            self.logger.warning(
+                "Router %s connected via simulated placeholder backend; live CSI collection is unavailable",
+                self.router_id,
+            )
             
         except Exception as e:
             self.last_error = str(e)
@@ -196,10 +201,13 @@ class RouterInterface:
     
     async def _collect_real_csi_data(self) -> Optional[np.ndarray]:
         """Collect real CSI data from router (placeholder implementation)."""
-        # This would implement the actual CSI data collection
-        # For now, return None to indicate no real implementation
-        self.logger.warning("Real CSI data collection not implemented")
+        self.logger.warning("Real CSI data collection is not implemented for router %s", self.router_id)
         return None
+
+    @property
+    def live_collection_available(self) -> bool:
+        """Whether this interface can collect real CSI right now."""
+        return bool(self.mock_mode or self.live_collection_implemented)
     
     async def check_health(self) -> bool:
         """Check if the router connection is healthy.
@@ -233,6 +241,9 @@ class RouterInterface:
             "router_id": self.router_id,
             "connected": self.is_connected,
             "mock_mode": self.mock_mode,
+            "connection_backend": self.connection_backend,
+            "live_collection_available": self.live_collection_available,
+            "collection_backend": "mock_generator" if self.mock_mode else "unimplemented_real_collection",
             "last_data_time": self.last_data_time.isoformat() if self.last_data_time else None,
             "error_count": self.error_count,
             "sample_count": self.sample_count,

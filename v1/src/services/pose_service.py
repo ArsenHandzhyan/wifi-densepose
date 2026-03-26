@@ -54,6 +54,9 @@ class PoseService:
         self.is_initialized = False
         self.is_running = False
         self.last_error = None
+        self.mock_only_reason = (
+            "Legacy /pose surface is not wired to live CSI runtime; REST/WebSocket pose responses would be synthetic."
+        )
         
         # Processing statistics
         self.stats = {
@@ -109,7 +112,7 @@ class PoseService:
                 self.logger.info("Using mock pose data for development")
             
             self.is_initialized = True
-            self.logger.info("Pose service initialized successfully")
+            self.logger.warning("Pose service initialized, but the public /pose surface remains mock-only")
             
         except Exception as e:
             self.last_error = str(e)
@@ -444,14 +447,28 @@ class PoseService:
         total = self.stats["total_processed"]
         current_avg = self.stats["processing_time_ms"]
         self.stats["processing_time_ms"] = (current_avg * (total - 1) + processing_time) / total
+
+    def is_mock_only_api_surface(self) -> bool:
+        """Legacy pose API is still synthetic even when ML modules import correctly."""
+        return True
+
+    def get_mock_only_reason(self) -> str:
+        return self.mock_only_reason
     
     async def get_status(self) -> Dict[str, Any]:
         """Get service status."""
+        if self.is_running and not self.last_error:
+            status = "degraded" if self.is_mock_only_api_surface() else "healthy"
+        else:
+            status = "unhealthy"
         return {
-            "status": "healthy" if self.is_running and not self.last_error else "unhealthy",
+            "status": status,
             "initialized": self.is_initialized,
             "running": self.is_running,
             "last_error": self.last_error,
+            "mock_only_api_surface": self.is_mock_only_api_surface(),
+            "live_signal_available": False,
+            "mock_only_reason": self.get_mock_only_reason(),
             "statistics": self.stats.copy(),
             "configuration": {
                 "mock_data": self.settings.mock_pose_data,
@@ -800,11 +817,18 @@ class PoseService:
     async def health_check(self):
         """Perform health check."""
         try:
-            status = "healthy" if self.is_running and not self.last_error else "unhealthy"
+            if self.is_running and not self.last_error:
+                status = "degraded" if self.is_mock_only_api_surface() else "healthy"
+            else:
+                status = "unhealthy"
             
             return {
                 "status": status,
-                "message": self.last_error if self.last_error else "Service is running normally",
+                "message": self.last_error if self.last_error else (
+                    self.get_mock_only_reason()
+                    if self.is_mock_only_api_surface()
+                    else "Service is running normally"
+                ),
                 "uptime_seconds": 0.0,  # TODO: Implement actual uptime tracking
                 "metrics": {
                     "total_processed": self.stats["total_processed"],
@@ -823,4 +847,4 @@ class PoseService:
     
     async def is_ready(self):
         """Check if service is ready."""
-        return self.is_initialized and self.is_running
+        return self.is_initialized and self.is_running and not self.is_mock_only_api_surface()

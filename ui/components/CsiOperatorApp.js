@@ -2,6 +2,7 @@ import { TabManager } from './TabManager.js?v=20260326-stabilize-01';
 import { AGENT7_OPERATOR_TRUTH } from '../data/agent7-truth.js?v=20260326-stabilize-01';
 import { getOperatorCopy, localizeOperatorToken } from '../data/operator-copy.js?v=20260326-stabilize-01';
 import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack, getGuidedCapturePackSummary } from '../data/guided-capture-packs.js?v=20260326-stabilize-01';
+import { FEWSHOT_CALIBRATION_PROTOCOLS, getFewshotCalibrationProtocol } from '../data/fewshot-calibration-protocol.js?v=20260326-fewshot-ui-01';
 import {
   MANUAL_CAPTURE_PRESETS,
   getManualCapturePreset,
@@ -141,6 +142,24 @@ function displayMaybeToken(value) {
     : raw;
 }
 
+function displayFewshotZone(value) {
+  switch (String(value || '').trim()) {
+    case 'door':
+    case 'door_passage':
+      return 'door_passage';
+    case 'center':
+      return 'center';
+    case 'mixed':
+      return 'transition';
+    case 'deep':
+      return 'deep';
+    case '':
+      return UI_LOCALE.common.noData;
+    default:
+      return String(value);
+  }
+}
+
 function normalizeSearchValue(value) {
   return String(value ?? '')
     .toLowerCase()
@@ -242,6 +261,7 @@ const FATE_GROUPS = [
   { id: 'timing_bias', label: UI_LOCALE.fateGroups.timing_bias, tone: 'warn' }
 ];
 const ACTIVE_GUIDED_STATUSES = ['cueing', 'running', 'paused', 'stopping'];
+const ACTIVE_FEWSHOT_STATUSES = ['cueing', 'running', 'paused', 'stopping'];
 
 const FATE_GROUP_HOTKEYS = {
   '1': 'all',
@@ -266,10 +286,12 @@ const DEFAULT_GARAGE_LAYOUT = {
     { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
     { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.33', xMeters: 0.00, yMeters: 3.50, zone: 'center' }
+    { nodeId: 'node05', ip: '192.168.1.105', xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.1.106', xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.1.107', xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
-const DEFAULT_VISIBLE_NODE_COUNT = Math.max(DEFAULT_GARAGE_LAYOUT.nodes.length, 5);
+const DEFAULT_VISIBLE_NODE_COUNT = Math.max(DEFAULT_GARAGE_LAYOUT.nodes.length, 7);
 const TEACHER_SOURCE_KIND = {
   PIXEL_RTSP: 'pixel_rtsp',
   MAC_CAMERA: 'mac_camera',
@@ -1631,6 +1653,25 @@ export class CsiOperatorApp {
     const freeformStopButton = event.target.closest('[data-action="freeform-stop"]');
     if (freeformStopButton) {
       void this.service.stopActiveRecording();
+      return;
+    }
+
+    const fewshotStartButton = event.target.closest('[data-action="fewshot-calibration-start"]');
+    if (fewshotStartButton) {
+      const protocolId = fewshotStartButton.getAttribute('data-protocol-id');
+      void this.service.startFewshotCalibration(protocolId || null);
+      return;
+    }
+
+    const fewshotStopButton = event.target.closest('[data-action="fewshot-calibration-stop"]');
+    if (fewshotStopButton) {
+      void this.service.stopFewshotCalibration();
+      return;
+    }
+
+    const fewshotResetButton = event.target.closest('[data-action="fewshot-calibration-reset"]');
+    if (fewshotResetButton) {
+      void this.service.resetFewshotCalibration();
       return;
     }
 
@@ -3032,10 +3073,10 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Zone Calibration (shadow-only)</div>
+          <div class="panel__eyebrow">Zone Calibration / shadow centroid</div>
           <div class="panel__headline">${escapeHtml((() => {
             const zc = this.snapshot?.live?.zoneCalibrationShadow || {};
-            if (zc.calibrated && zc.zone && zc.zone !== 'unknown') return zc.zone;
+            if (zc.calibrated && zc.zone && zc.zone !== 'unknown') return displayFewshotZone(zc.zone);
             if (zc.status === 'calibrating') return 'калибровка...';
             if (zc.status === 'rejected') return 'отклонено';
             return 'не откалибровано';
@@ -3047,9 +3088,9 @@ export class CsiOperatorApp {
                 <div class="kv"><span>Статус</span><strong>${escapeHtml(zc.status || 'not_calibrated')}</strong></div>
                 <div class="kv"><span>Режим</span><strong>shadow-only / NearestCentroid</strong></div>
                 <div class="kv"><span>Откалибровано</span><strong>${zc.calibrated ? 'да' : 'нет'}${zc.stale ? ' (устарело)' : ''}</strong></div>
-                <div class="kv"><span>Зоны</span><strong>${(zc.zonesCalibrated || []).join(', ') || 'нет'}</strong></div>
+                <div class="kv"><span>Зоны</span><strong>${(zc.zonesCalibrated || []).map((item) => displayFewshotZone(item)).join(', ') || 'нет'}</strong></div>
                 <div class="kv"><span>Качество</span><strong>${escapeHtml(zc.calibrationQuality || 'не определено')}</strong></div>
-                <div class="kv"><span>Зона (raw → smooth)</span><strong>${escapeHtml(zc.zoneRaw || 'unknown')} → ${escapeHtml(zc.zone || 'unknown')}</strong></div>
+                <div class="kv"><span>Зона (raw → smooth)</span><strong>${escapeHtml(displayFewshotZone(zc.zoneRaw || 'unknown'))} → ${escapeHtml(displayFewshotZone(zc.zone || 'unknown'))}</strong></div>
                 <div class="kv"><span>Confidence</span><strong>${zc.confidence != null ? formatNumber(zc.confidence, 2) : 'нет'}${zc.lowConfidence ? ' (низкая)' : ''}</strong></div>
                 <div class="kv"><span>Smoothing k=5</span><strong>${zc.smoothed ? 'применено' : 'не меняло решение'}</strong></div>
                 <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(zc.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
@@ -3057,7 +3098,7 @@ export class CsiOperatorApp {
               `;
             })()}
           </div>
-          <div class="panel__footer">Per-session NearestCentroid калибровка. 45 секунд (door 15с + center 15с + deep 15с). Shadow-only — никак не влияет на V5 production.</div>
+          <div class="panel__footer">Текущий runtime backend здесь остаётся shadow centroid. Новый guided few-shot flow уже пересобран под live-геометрию center + door_passage, но future storage/retrain path ещё не внедрён и production V20 не трогает.</div>
         </article>
 
         <article class="panel">
@@ -4723,6 +4764,180 @@ export class CsiOperatorApp {
     `;
   }
 
+  renderFewshotCalibrationConsole(recording) {
+    const fewshot = recording.fewshotCalibration || {};
+    const protocol = getFewshotCalibrationProtocol(fewshot.protocolId || FEWSHOT_CALIBRATION_PROTOCOLS[0]?.id);
+    const zoneShadow = this.snapshot?.live?.zoneCalibrationShadow || {};
+    const primaryRuntime = this.snapshot?.live?.primaryRuntime || {};
+    const liveNodes = Math.max(
+      Number(primaryRuntime.nodesActive) || 0,
+      Number(this.snapshot?.live?.topology?.sourceCount) || 0
+    );
+    const recordingMode = getRecordingMode(recording);
+    const fewshotActive = ACTIVE_FEWSHOT_STATUSES.includes(fewshot.status || 'idle');
+    const canStart = !fewshotActive
+      && !recordingMode
+      && Boolean(this.snapshot?.csi?.running)
+      && Boolean(this.snapshot?.csi?.model_loaded)
+      && liveNodes >= 3;
+    const blockedReasons = [];
+    if (!this.snapshot?.csi?.running) {
+      blockedReasons.push('CSI runtime не запущен.');
+    }
+    if (this.snapshot?.csi?.running && !this.snapshot?.csi?.model_loaded) {
+      blockedReasons.push('CSI runtime поднят, но модель не загружена.');
+    }
+    if (liveNodes < 3) {
+      blockedReasons.push('Нужно минимум 3 активные ноды, чтобы calibration windows были валидны.');
+    }
+    if (recordingMode === 'freeform') {
+      blockedReasons.push('Сейчас идёт freeform-запись. Few-shot calibration ждёт завершения записи.');
+    } else if (recordingMode === 'guided') {
+      blockedReasons.push('Сейчас активен legacy guided-пакет. Few-shot calibration ждёт освобождения backend.');
+    } else if (recordingMode === 'manual') {
+      blockedReasons.push('Сейчас идёт ручная запись. Few-shot calibration ждёт освобождения backend.');
+    }
+    if (recording.actionError && !blockedReasons.includes(recording.actionError)) {
+      blockedReasons.unshift(recording.actionError);
+    }
+
+    const currentStep = fewshot.currentStep || null;
+    const fitResult = fewshot.fitResult || null;
+    const runtimeWindowNote = 'Текущий shadow backend собирает окна на native cadence runtime и не гарантирует ровно 10 research-окон на шаг.';
+    const researchTransitionNote = 'Переходный шаг нужен для будущего few-shot storage path. Сейчас он идёт как guided cue и НЕ попадает в текущий centroid fit.';
+
+    return `
+      <article class="panel">
+        <div class="panel__eyebrow">Few-shot guided calibration</div>
+        <div class="panel__headline">${escapeHtml(protocol.name)}</div>
+        <div class="panel__text">Live-геометрия уже пересобрана в <strong>center</strong> и <strong>door_passage</strong>. Deep здесь не используется. Этот UI пока не меняет production `V20` и работает только как shadow calibration packet.</div>
+
+        <div class="hero-tags">
+          ${renderStatusPill('shadow-only', 'warn')}
+          ${renderStatusPill(`ожидаемая LODO BA ${formatNumber(protocol.expectedDateLodoBa, 2)}`, 'ok')}
+          ${renderStatusPill(`окна: ${formatNumber(protocol.totalWindows)}`, 'info')}
+          ${renderStatusPill(`время: ${formatDurationCompact(protocol.totalDurationSec)}`, 'info')}
+          ${fewshotActive ? renderStatusPill(`идёт ${escapeHtml(fewshot.status)}`, 'risk') : renderStatusPill('готов к старту', canStart ? 'ok' : 'warn')}
+          ${renderStatusPill(`live nodes: ${formatNumber(liveNodes)}`, liveNodes >= 3 ? 'ok' : 'warn')}
+        </div>
+
+        <div class="surface-grid surface-grid--three manual-recorder__status-grid">
+          <article class="panel">
+            <div class="panel__eyebrow">Runtime boundary</div>
+            <div class="kv-list">
+              <div class="kv"><span>Production</span><strong>V20 occupancy</strong></div>
+              <div class="kv"><span>Live geometry</span><strong>center vs door_passage</strong></div>
+              <div class="kv"><span>Research target</span><strong>${escapeHtml(formatNumber(protocol.totalWindows))} окон / ${escapeHtml(formatDurationCompact(protocol.totalDurationSec))}</strong></div>
+              <div class="kv"><span>Current runtime support</span><strong>shadow centroid only</strong></div>
+            </div>
+            <div class="panel__footer">${escapeHtml(runtimeWindowNote)}</div>
+          </article>
+
+          <article class="panel">
+            <div class="panel__eyebrow">Shadow centroid backend</div>
+            <div class="kv-list">
+              <div class="kv"><span>Статус</span><strong>${escapeHtml(zoneShadow.status || 'not_calibrated')}</strong></div>
+              <div class="kv"><span>Качество</span><strong>${escapeHtml(zoneShadow.calibrationQuality || 'not_calibrated')}</strong></div>
+              <div class="kv"><span>Center windows</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.center, 0))}</strong></div>
+              <div class="kv"><span>Door windows</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.door, 0))}</strong></div>
+              <div class="kv"><span>Последняя зона</span><strong>${escapeHtml(displayFewshotZone(zoneShadow.zone || 'unknown'))}</strong></div>
+              <div class="kv"><span>Confidence</span><strong>${zoneShadow.confidence != null ? escapeHtml(formatNumber(zoneShadow.confidence, 2)) : 'ещё нет окна'}</strong></div>
+            </div>
+            <div class="panel__footer">${escapeHtml(zoneShadow.rejectionReason || 'Текущий backend использует только явные шаги center/door и не подменяет production verdict.')}</div>
+          </article>
+
+          <article class="panel">
+            <div class="panel__eyebrow">Run state</div>
+            <div class="kv-list">
+              <div class="kv"><span>Протокол</span><strong>${escapeHtml(protocol.shortLabel)}</strong></div>
+              <div class="kv"><span>Статус</span><strong>${escapeHtml(fewshot.status || 'idle')}</strong></div>
+              <div class="kv"><span>Текущий шаг</span><strong>${escapeHtml(currentStep ? `${currentStep.index + 1}/${currentStep.totalSteps} · ${currentStep.label}` : 'не выбран')}</strong></div>
+              <div class="kv"><span>Таймер</span><strong>${escapeHtml(currentStep && fewshot.stepEndsAt ? formatCountdown(fewshot.stepEndsAt) : (fewshot.status === 'paused' ? formatCountdown(fewshot.pauseUntil) : 'не запущен'))}</strong></div>
+              <div class="kv"><span>Fit</span><strong>${escapeHtml(fitResult ? (fitResult.ok === false ? 'ошибка' : 'готово') : 'ещё нет')}</strong></div>
+              <div class="kv"><span>Last error</span><strong>${escapeHtml(fewshot.lastError || 'нет')}</strong></div>
+            </div>
+            <div class="panel__footer">${escapeHtml(fitResult?.error || (fitResult ? `zones=${(fitResult.zones_calibrated || []).join(', ') || 'n/a'}` : researchTransitionNote))}</div>
+          </article>
+        </div>
+
+        <div class="capture-console__actions manual-recorder__actions">
+          ${FEWSHOT_CALIBRATION_PROTOCOLS.map((item) => `
+            <button
+              type="button"
+              class="capture-pack__button ${(protocol.id === item.id && !fewshotActive) ? 'capture-pack__button--ghost' : 'capture-pack__button--primary'}"
+              data-action="fewshot-calibration-start"
+              data-protocol-id="${escapeHtml(item.id)}"
+              ${fewshotActive || (!canStart && protocol.id !== item.id) || (!canStart && protocol.id === item.id) ? (fewshotActive ? 'disabled' : 'disabled') : ''}
+            >
+              ${escapeHtml(`Старт ${item.shortLabel}`)}
+            </button>
+          `).join('')}
+          <button
+            type="button"
+            class="capture-pack__button capture-pack__button--ghost"
+            data-action="fewshot-calibration-stop"
+            ${fewshotActive ? '' : 'disabled'}
+          >
+            Остановить calibration
+          </button>
+          <button
+            type="button"
+            class="capture-pack__button capture-pack__button--ghost"
+            data-action="fewshot-calibration-reset"
+            ${fewshotActive ? 'disabled' : ''}
+          >
+            Сбросить shadow calibration
+          </button>
+        </div>
+
+        ${blockedReasons.length ? `
+          <div class="recording-honesty-note recording-honesty-note--warn">
+            <strong>Почему few-shot start сейчас заблокирован</strong>
+            <ul class="recording-honesty-list">
+              ${blockedReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}
+            </ul>
+          </div>
+        ` : ''}
+
+        <div class="surface-grid surface-grid--two">
+          <article class="panel">
+            <div class="panel__eyebrow">Шаги протокола</div>
+            <div class="workflow-list">
+              ${protocol.steps.map((step, index) => `
+                <div class="workflow-item">
+                  <span>${index + 1}</span>
+                  <p>
+                    <strong>${escapeHtml(step.label)}</strong><br>
+                    Зона: ${escapeHtml(displayFewshotZone(step.displayZone))} · ${escapeHtml(formatDurationCompact(step.durationSec))} · target ${escapeHtml(formatNumber(step.targetWindows))} research-окон<br>
+                    ${escapeHtml(step.instruction)}
+                    ${step.researchOnly ? '<br><em>Research-only: не идёт в текущий centroid fit.</em>' : ''}
+                  </p>
+                </div>
+              `).join('')}
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel__eyebrow">Run log</div>
+            ${fewshot.logs?.length ? `
+              <div class="capture-console__log">
+                ${fewshot.logs.map((entry, index) => `
+                  <div class="capture-console__entry">
+                    <strong>${escapeHtml(`${index + 1}. ${entry.stepLabel}`)}</strong><br>
+                    status=${escapeHtml(entry.status || 'unknown')} · zone=${escapeHtml(displayFewshotZone(entry.displayZone || entry.captureZone || 'unknown'))}${entry.researchOnly ? ' · research-only' : ''}<br>
+                    ${entry.captureStopPayload?.windows_collected != null ? `windows=${escapeHtml(formatNumber(entry.captureStopPayload.windows_collected, 0))} · ` : ''}${entry.error ? `error=${escapeHtml(entry.error)}` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            ` : `
+              <div class="empty-state">Лог пуст. После старта здесь появятся шаги и capture status.</div>
+            `}
+          </article>
+        </div>
+      </article>
+    `;
+  }
+
   renderRecordingArchive(recording) {
     const guidedOpen = this.runtimeRecordingUi.showLegacyGuided;
     const manualOpen = this.runtimeRecordingUi.showLegacyManual;
@@ -4820,6 +5035,8 @@ export class CsiOperatorApp {
       }
     };
     this.sections.runtime.innerHTML = `
+      ${this.renderFewshotCalibrationConsole(recording)}
+
       <article class="panel">
         ${this.renderFreeformRecordingConsole(recording)}
       </article>

@@ -49,6 +49,26 @@ export const API_CONFIG = {
       STATUS: '/api/v1/csi/status',
       MODELS: '/api/v1/csi/models',
       MODEL_SELECT: '/api/v1/csi/model/select',
+      ZONE: {
+        STATUS: '/api/v1/csi/zone/status',
+        START: '/api/v1/csi/zone/calibrate/start',
+        STOP: '/api/v1/csi/zone/calibrate/stop',
+        FIT: '/api/v1/csi/zone/calibrate/fit',
+        RESET: '/api/v1/csi/zone/calibrate/reset'
+      },
+      FEWSHOT: {
+        STATUS: '/api/v1/csi/fewshot/status',
+        START: '/api/v1/csi/fewshot/session/start',
+        STEP_START: '/api/v1/csi/fewshot/session/step/start',
+        STEP_COMPLETE: '/api/v1/csi/fewshot/session/step/complete',
+        FINALIZE: '/api/v1/csi/fewshot/session/finalize',
+        RESET: '/api/v1/csi/fewshot/session/reset'
+      },
+      TTS: {
+        STATUS: '/api/v1/csi/tts/status',
+        SPEAK: '/api/v1/csi/tts/speak',
+        STOP: '/api/v1/csi/tts/stop'
+      },
       RECORD: {
         PREFLIGHT: '/api/v1/csi/record/preflight',
         START: '/api/v1/csi/record/start',

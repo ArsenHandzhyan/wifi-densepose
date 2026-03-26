@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlparse
 UI_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = UI_DIR.parent
 ANALYSIS_DIR = WORKSPACE_ROOT / "temp" / "analysis"
+MANUAL_ZONE_REVIEW_DIR = WORKSPACE_ROOT / "output" / "video_curation" / "newrouter_manual_zone_review1"
+MANUAL_ZONE_REVIEW_MANIFEST = MANUAL_ZONE_REVIEW_DIR / "newrouter_manual_zone_review_manifest_v1.json"
 
 FORENSIC_KINDS = {
     "bundle": "paired_forensic_bundle",
@@ -33,6 +35,38 @@ def read_json(path: Path) -> tuple[Any | None, str | None]:
       return json.loads(path.read_text(encoding="utf-8")), None
     except Exception as exc:  # pragma: no cover - best effort local API
       return None, str(exc)
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def safe_workspace_path(relative_path: str) -> Path | None:
+    rel = (relative_path or "").lstrip("/")
+    candidate = (WORKSPACE_ROOT / rel).resolve()
+    try:
+      candidate.relative_to(WORKSPACE_ROOT.resolve())
+    except Exception:
+      return None
+    return candidate
+
+
+def load_manual_zone_manifest() -> dict[str, Any] | None:
+    payload, error = read_json(MANUAL_ZONE_REVIEW_MANIFEST)
+    if error or not isinstance(payload, dict):
+      return None
+    return payload
+
+
+def find_manual_zone_session(session_label: str) -> dict[str, Any] | None:
+    manifest = load_manual_zone_manifest()
+    if not manifest:
+      return None
+    for session in manifest.get("sessions") or []:
+      if session.get("session_label") == session_label:
+        return session
+    return None
 
 
 def detect_kind(path: Path) -> str | None:
@@ -772,6 +806,15 @@ def build_run_detail(run_id: str) -> tuple[dict[str, Any] | None, HTTPStatus]:
 
 
 class NoCacheHandler(SimpleHTTPRequestHandler):
+    def translate_path(self, path: str) -> str:
+      parsed = urlparse(path)
+      if parsed.path.startswith("/workspace/"):
+        rel = parsed.path.removeprefix("/workspace/")
+        candidate = safe_workspace_path(rel)
+        if candidate:
+          return str(candidate)
+      return super().translate_path(path)
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
@@ -817,7 +860,84 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
           return self.send_json({"error": f"Run '{run_id}' was not found"}, status)
         return self.send_json(detail, status)
 
+      if parsed.path == "/api/manual-zone-review/sessions":
+        manifest = load_manual_zone_manifest()
+        if not manifest:
+          return self.send_json(
+            {
+              "error": "manual zone review manifest not found",
+              "expected_path": str(MANUAL_ZONE_REVIEW_MANIFEST),
+            },
+            HTTPStatus.NOT_FOUND,
+          )
+        return self.send_json(manifest)
+
+      if parsed.path == "/api/manual-zone-review/labels":
+        query = parse_qs(parsed.query)
+        session_label = query.get("session_label", [None])[0]
+        if not session_label:
+          return self.send_json({"error": "session_label query parameter is required"}, HTTPStatus.BAD_REQUEST)
+        session = find_manual_zone_session(session_label)
+        if not session:
+          return self.send_json({"error": f"Unknown session_label '{session_label}'"}, HTTPStatus.NOT_FOUND)
+        label_path = safe_workspace_path(session.get("label_output_relpath") or "")
+        if not label_path or not label_path.exists():
+          return self.send_json({"ok": True, "exists": False, "session_label": session_label, "labels": None})
+        payload, error = read_json(label_path)
+        if error:
+          return self.send_json({"error": error, "session_label": session_label}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        return self.send_json({"ok": True, "exists": True, "session_label": session_label, "labels": payload})
+
       return super().do_GET()
+
+    def do_POST(self):
+      parsed = urlparse(self.path)
+
+      if parsed.path == "/api/manual-zone-review/labels":
+        try:
+          content_length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+          content_length = 0
+        try:
+          raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+          payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+          return self.send_json({"error": f"invalid json payload: {exc}"}, HTTPStatus.BAD_REQUEST)
+
+        session_label = payload.get("session_label")
+        if not isinstance(session_label, str) or not session_label:
+          return self.send_json({"error": "session_label is required"}, HTTPStatus.BAD_REQUEST)
+
+        session = find_manual_zone_session(session_label)
+        if not session:
+          return self.send_json({"error": f"Unknown session_label '{session_label}'"}, HTTPStatus.NOT_FOUND)
+
+        label_path = safe_workspace_path(session.get("label_output_relpath") or "")
+        if not label_path:
+          return self.send_json({"error": "label_output_relpath is invalid"}, HTTPStatus.BAD_REQUEST)
+
+        record = {
+          "session_label": session_label,
+          "saved_at": utc_now_iso(),
+          "schema_version": 1,
+          "window_sec": payload.get("window_sec"),
+          "duration_sec": payload.get("duration_sec"),
+          "source_video_relpath": session.get("video_relpath"),
+          "source_video_url": session.get("video_url"),
+          "labels": payload.get("labels") or [],
+          "meta": payload.get("meta") or {},
+        }
+        write_json(label_path, record)
+        return self.send_json(
+          {
+            "ok": True,
+            "session_label": session_label,
+            "saved_path": str(label_path),
+            "label_count": len(record["labels"]),
+          }
+        )
+
+      return self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK):
       body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")

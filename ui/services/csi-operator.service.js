@@ -3,6 +3,7 @@ import { NODES as CANONICAL_GARAGE_NODES } from '../config/garage-layout-v3.js';
 import { apiService } from './api.service.js';
 import { healthService } from './health.service.js';
 import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack } from '../data/guided-capture-packs.js';
+import { FEWSHOT_CALIBRATION_PROTOCOLS, getFewshotCalibrationProtocol } from '../data/fewshot-calibration-protocol.js';
 import {
   buildManualCaptureLabel,
   buildManualCaptureNotes,
@@ -10,16 +11,10 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js';
 
-const AUXILIARY_RUNTIME_NODES = [
-  { id: 'node06', ip: '192.168.1.77' }
-];
-const KNOWN_RUNTIME_NODES = [
-  ...CANONICAL_GARAGE_NODES.map((node) => ({ id: node.id, ip: node.ip })),
-  ...AUXILIARY_RUNTIME_NODES
-];
+const KNOWN_RUNTIME_NODES = CANONICAL_GARAGE_NODES.map((node) => ({ id: node.id, ip: node.ip }));
 const NODE_ORDER = KNOWN_RUNTIME_NODES.map((node) => node.id);
 const NODE_IP_TO_ID = Object.fromEntries(KNOWN_RUNTIME_NODES.map((node) => [node.ip, node.id]));
-const DEFAULT_VISIBLE_NODE_COUNT = Math.max(CANONICAL_GARAGE_NODES.length, 5);
+const DEFAULT_VISIBLE_NODE_COUNT = Math.max(CANONICAL_GARAGE_NODES.length, 7);
 const DEFAULT_GARAGE_LAYOUT = {
   // Garage Planner v3 (2026-03-26): 3×7m, single door 2.4m at bottom.
   // Backend uses center-based X: x ∈ [-1.5, +1.5]. Y: 0=door, 7=deep end.
@@ -36,13 +31,30 @@ const DEFAULT_GARAGE_LAYOUT = {
     { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
     { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.33', xMeters: 0.00, yMeters: 3.50, zone: 'center' }
+    { nodeId: 'node05', ip: '192.168.1.105', xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.1.106', xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.1.107', xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
 const CSI_ENDPOINTS = API_CONFIG?.ENDPOINTS?.CSI || {};
 const CSI_STATUS_ENDPOINT = CSI_ENDPOINTS.STATUS || '/api/v1/csi/status';
 const CSI_MODELS_ENDPOINT = CSI_ENDPOINTS.MODELS || '/api/v1/csi/models';
 const CSI_MODEL_SELECT_ENDPOINT = CSI_ENDPOINTS.MODEL_SELECT || '/api/v1/csi/model/select';
+const CSI_ZONE_ENDPOINTS = CSI_ENDPOINTS.ZONE || {
+  STATUS: '/api/v1/csi/zone/status',
+  START: '/api/v1/csi/zone/calibrate/start',
+  STOP: '/api/v1/csi/zone/calibrate/stop',
+  FIT: '/api/v1/csi/zone/calibrate/fit',
+  RESET: '/api/v1/csi/zone/calibrate/reset'
+};
+const CSI_FEWSHOT_ENDPOINTS = CSI_ENDPOINTS.FEWSHOT || {
+  STATUS: '/api/v1/csi/fewshot/status',
+  START: '/api/v1/csi/fewshot/session/start',
+  STEP_START: '/api/v1/csi/fewshot/session/step/start',
+  STEP_COMPLETE: '/api/v1/csi/fewshot/session/step/complete',
+  FINALIZE: '/api/v1/csi/fewshot/session/finalize',
+  RESET: '/api/v1/csi/fewshot/session/reset'
+};
 const CSI_TTS_ENDPOINTS = CSI_ENDPOINTS.TTS || {
   STATUS: '/api/v1/csi/tts/status',
   SPEAK: '/api/v1/csi/tts/speak',
@@ -420,6 +432,7 @@ function applyManualCapturePreset(manual, { resetVariant = false } = {}) {
 
 function buildRecordingState() {
   const defaultPack = GUIDED_CAPTURE_PACKS[0] || null;
+  const defaultFewshotProtocol = FEWSHOT_CALIBRATION_PROTOCOLS[0] || null;
   return {
     status: null,
     activeMode: null,
@@ -471,6 +484,27 @@ function buildRecordingState() {
       logs: [],
       completedAt: null,
       lastError: null
+    },
+    fewshotCalibration: {
+      protocolId: defaultFewshotProtocol?.id || null,
+      runToken: 0,
+      packetSessionId: null,
+      packetStoragePath: null,
+      packetStatus: 'idle',
+      status: 'idle',
+      sequencePhase: null,
+      countdownValue: null,
+      stepIndex: -1,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      pauseUntil: null,
+      currentStep: null,
+      voiceEnabled: true,
+      logs: [],
+      completedAt: null,
+      lastError: null,
+      fitResult: null,
+      storageStatus: null
     }
   };
 }
@@ -501,6 +535,36 @@ function updateGuidedLogEntry(logs, recordingLabel, patch) {
     ...patch
   };
   return nextLogs;
+}
+
+function buildFewshotProtocolSessionPayload(protocol) {
+  return {
+    protocol_id: protocol.id,
+    protocol_name: protocol.name,
+    zone_scheme: protocol.zoneScheme || null,
+    total_windows: Number(protocol.totalWindows || 0),
+    window_duration_sec: Number(protocol.windowDurationSec || 0),
+    metadata: {
+      source: 'csi_operator_ui',
+      mode: 'guided_fewshot_calibration',
+      live_geometry: protocol.zoneScheme || null,
+      expected_date_lodo_ba: safeNumber(protocol.expectedDateLodoBa),
+      expected_inside_recall: safeNumber(protocol.expectedInsideRecall),
+      expected_door_recall: safeNumber(protocol.expectedDoorRecall),
+      notes: asArray(protocol.notes)
+    },
+    steps: asArray(protocol.steps).map((step, index) => ({
+      id: step.id,
+      label: step.label,
+      display_zone: step.displayZone || null,
+      capture_zone: step.captureZone || null,
+      activity: step.activity || null,
+      research_only: Boolean(step.researchOnly),
+      duration_sec: Number(step.durationSec || 0),
+      target_windows: Number(step.targetWindows || 0),
+      index
+    }))
+  };
 }
 
 function parseTopologySignature(signature) {
@@ -1582,6 +1646,19 @@ function normalizeSnapshot(state, service = null) {
       guided: {
         ...state.recording.guided,
         logs: [...state.recording.guided.logs]
+      },
+      fewshotCalibration: {
+        ...state.recording.fewshotCalibration,
+        logs: [...state.recording.fewshotCalibration.logs],
+        currentStep: state.recording.fewshotCalibration.currentStep
+          ? { ...state.recording.fewshotCalibration.currentStep }
+          : null,
+        fitResult: state.recording.fewshotCalibration.fitResult
+          ? { ...state.recording.fewshotCalibration.fitResult }
+          : null,
+        storageStatus: state.recording.fewshotCalibration.storageStatus
+          ? { ...state.recording.fewshotCalibration.storageStatus }
+          : null
       }
     },
     runtimeModels: buildRuntimeModelsState(state),
@@ -1726,6 +1803,8 @@ export class CsiOperatorService {
     this.running = false;
     this.guidedStepTimer = null;
     this.guidedPauseTimer = null;
+    this.fewshotStepTimer = null;
+    this.fewshotPauseTimer = null;
     this.forensicDetailCache = new Map();
     this.forensicDetailRequests = new Map();
     this.forensicDetailRevision = 0;
@@ -1765,6 +1844,18 @@ export class CsiOperatorService {
     if (this.guidedPauseTimer) {
       clearTimeout(this.guidedPauseTimer);
       this.guidedPauseTimer = null;
+    }
+    this.cancelGuidedSpeech();
+  }
+
+  clearFewshotCalibrationTimers() {
+    if (this.fewshotStepTimer) {
+      clearTimeout(this.fewshotStepTimer);
+      this.fewshotStepTimer = null;
+    }
+    if (this.fewshotPauseTimer) {
+      clearTimeout(this.fewshotPauseTimer);
+      this.fewshotPauseTimer = null;
     }
     this.cancelGuidedSpeech();
   }
@@ -2088,6 +2179,7 @@ export class CsiOperatorService {
     this.timers.forEach((timerId) => clearInterval(timerId));
     this.timers.clear();
     this.clearGuidedTimers();
+    this.clearFewshotCalibrationTimers();
   }
 
   schedule(key, intervalMs, task) {
@@ -2249,6 +2341,465 @@ export class CsiOperatorService {
       guided.withVideo = pack.withVideo !== false;
     }
     this.emit();
+  }
+
+  selectFewshotCalibrationProtocol(protocolId) {
+    const protocol = getFewshotCalibrationProtocol(protocolId);
+    if (!protocol) {
+      return;
+    }
+    this.state.recording.fewshotCalibration.protocolId = protocol.id;
+    if (!['cueing', 'running', 'paused', 'stopping'].includes(this.state.recording.fewshotCalibration.status)) {
+      this.state.recording.fewshotCalibration.currentStep = null;
+      this.state.recording.fewshotCalibration.stepIndex = -1;
+      this.state.recording.fewshotCalibration.fitResult = null;
+    }
+    this.emit();
+  }
+
+  async runFewshotCalibrationStartSequence(protocol, step, stepIndex, runToken) {
+    const fewshot = this.state.recording.fewshotCalibration;
+    if (fewshot.runToken !== runToken) {
+      return false;
+    }
+
+    fewshot.status = 'cueing';
+    fewshot.sequencePhase = 'prompt';
+    fewshot.countdownValue = null;
+    this.emit();
+
+    await this.speakGuidedPrompt(
+      step.voiceInstruction || `Шаг ${stepIndex + 1}. ${step.label}. ${step.instruction}`,
+      { forceSilence: fewshot.voiceEnabled === false }
+    );
+    if (fewshot.runToken !== runToken) {
+      return false;
+    }
+
+    for (let countdown = 4; countdown >= 1; countdown -= 1) {
+      fewshot.status = 'cueing';
+      fewshot.sequencePhase = 'countdown';
+      fewshot.countdownValue = countdown;
+      this.emit();
+      await delay(1000);
+      if (fewshot.runToken !== runToken) {
+        return false;
+      }
+    }
+
+    fewshot.status = 'cueing';
+    fewshot.sequencePhase = 'start_cue';
+    fewshot.countdownValue = 0;
+    this.emit();
+    await this.speakGuidedPrompt('Старт', { forceSilence: fewshot.voiceEnabled === false });
+    return fewshot.runToken === runToken;
+  }
+
+  async startFewshotCalibration(protocolId = null) {
+    const recording = this.state.recording;
+    const fewshot = recording.fewshotCalibration;
+    const protocol = getFewshotCalibrationProtocol(protocolId || fewshot.protocolId);
+    const activeMode = inferActiveRecordingMode(recording) || recording.activeMode;
+
+    if (['cueing', 'running', 'paused', 'stopping'].includes(fewshot.status)) {
+      recording.actionError = 'Few-shot calibration уже активна.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (activeMode || recording.status?.recording) {
+      recording.actionError = 'Сначала заверши активную запись или legacy guided/manual branch.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if (!this.state.csi?.running || !this.state.csi?.model_loaded) {
+      recording.actionError = 'CSI runtime не готов. Сначала подними live runtime.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    if ((safeNumber(this.state.csi?.nodes_active, 0) || 0) < 3) {
+      recording.actionError = 'Для guided calibration нужно минимум 3 активные ноды.';
+      this.emit();
+      return { ok: false, error: recording.actionError };
+    }
+
+    this.clearFewshotCalibrationTimers();
+    recording.actionError = null;
+    const runToken = fewshot.runToken + 1;
+    recording.fewshotCalibration = {
+      protocolId: protocol.id,
+      runToken,
+      packetSessionId: null,
+      packetStoragePath: null,
+      packetStatus: 'idle',
+      status: 'idle',
+      sequencePhase: null,
+      countdownValue: null,
+      stepIndex: -1,
+      stepStartedAt: null,
+      stepEndsAt: null,
+      pauseUntil: null,
+      currentStep: null,
+      voiceEnabled: true,
+      logs: [],
+      completedAt: null,
+      lastError: null,
+      fitResult: null,
+      storageStatus: null
+    };
+    this.emit();
+
+    try {
+      await apiService.post(CSI_ZONE_ENDPOINTS.RESET, {});
+      const storageSession = await apiService.post(
+        CSI_FEWSHOT_ENDPOINTS.START,
+        buildFewshotProtocolSessionPayload(protocol)
+      );
+      recording.fewshotCalibration.packetSessionId = storageSession?.session_id || null;
+      recording.fewshotCalibration.packetStoragePath = storageSession?.storage_path || null;
+      recording.fewshotCalibration.packetStatus = storageSession?.status || 'active';
+      recording.fewshotCalibration.storageStatus = storageSession || null;
+      await this.refreshCsi(true);
+    } catch (error) {
+      recording.fewshotCalibration.status = 'error';
+      recording.fewshotCalibration.lastError = error.message;
+      recording.actionError = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+
+    return this.runFewshotCalibrationStep(protocol.id, 0, runToken);
+  }
+
+  async runFewshotCalibrationStep(protocolId, stepIndex, runToken) {
+    const protocol = getFewshotCalibrationProtocol(protocolId);
+    const recording = this.state.recording;
+    const fewshot = recording.fewshotCalibration;
+    const step = protocol?.steps?.[stepIndex];
+
+    if (!protocol || !step || fewshot.runToken !== runToken) {
+      return { ok: false, error: 'Few-shot calibration step устарел.' };
+    }
+
+    fewshot.status = 'cueing';
+    fewshot.sequencePhase = 'prompt';
+    fewshot.countdownValue = null;
+    fewshot.stepIndex = stepIndex;
+    fewshot.stepStartedAt = null;
+    fewshot.stepEndsAt = null;
+    fewshot.pauseUntil = null;
+    fewshot.currentStep = {
+      ...step,
+      index: stepIndex,
+      totalSteps: protocol.steps.length
+    };
+    fewshot.logs = [
+      ...fewshot.logs,
+      {
+        stepId: step.id,
+        stepLabel: step.label,
+        captureZone: step.captureZone || null,
+        displayZone: step.displayZone || 'unknown',
+        researchOnly: Boolean(step.researchOnly),
+        status: 'cueing',
+        startedAt: null,
+        expectedDurationSec: step.durationSec
+      }
+    ];
+    this.emit();
+
+    try {
+      const sequenceReady = await this.runFewshotCalibrationStartSequence(protocol, step, stepIndex, runToken);
+      if (!sequenceReady || fewshot.runToken !== runToken) {
+        return { ok: false, error: 'Few-shot calibration start sequence interrupted.' };
+      }
+
+      let captureStartPayload = null;
+      if (step.captureZone) {
+        captureStartPayload = await apiService.post(CSI_ZONE_ENDPOINTS.START, {
+          zone: step.captureZone,
+          duration_sec: Number(step.durationSec || 50)
+        });
+      }
+
+      const storageStepStart = await apiService.post(CSI_FEWSHOT_ENDPOINTS.STEP_START, {
+        step_id: step.id,
+        started_at: nowIso(),
+        metadata: {
+          label: step.label,
+          display_zone: step.displayZone || null,
+          capture_zone: step.captureZone || null,
+          activity: step.activity || null,
+          research_only: Boolean(step.researchOnly),
+          target_windows: Number(step.targetWindows || 0),
+          duration_sec: Number(step.durationSec || 0),
+          capture_start_payload: captureStartPayload
+        }
+      });
+
+      const startedAt = nowIso();
+      fewshot.status = 'running';
+      fewshot.sequencePhase = null;
+      fewshot.countdownValue = null;
+      fewshot.stepStartedAt = startedAt;
+      fewshot.stepEndsAt = new Date(Date.now() + Number(step.durationSec || 0) * 1000).toISOString();
+      const lastIndex = fewshot.logs.length - 1;
+      fewshot.logs[lastIndex] = {
+        ...fewshot.logs[lastIndex],
+        status: 'running',
+        startedAt,
+        captureStartPayload,
+        storageStepStart
+      };
+      this.emit();
+      this.fewshotStepTimer = setTimeout(() => {
+        void this.completeFewshotCalibrationStep(protocol.id, stepIndex, runToken);
+      }, Number(step.durationSec || 0) * 1000);
+      return { ok: true };
+    } catch (error) {
+      fewshot.status = 'error';
+      fewshot.lastError = error.message;
+      fewshot.completedAt = nowIso();
+      recording.actionError = error.message;
+      const lastIndex = fewshot.logs.length - 1;
+      if (lastIndex >= 0) {
+        fewshot.logs[lastIndex] = {
+          ...fewshot.logs[lastIndex],
+          status: 'error',
+          finishedAt: nowIso(),
+          error: error.message
+        };
+      }
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async completeFewshotCalibrationStep(protocolId, stepIndex, runToken) {
+    const protocol = getFewshotCalibrationProtocol(protocolId);
+    const recording = this.state.recording;
+    const fewshot = recording.fewshotCalibration;
+    const step = protocol?.steps?.[stepIndex];
+
+    if (!protocol || !step || fewshot.runToken !== runToken) {
+      return;
+    }
+
+    fewshot.status = 'stopping';
+    fewshot.sequencePhase = null;
+    fewshot.countdownValue = null;
+    this.emit();
+
+    let captureStopPayload = null;
+    try {
+      if (step.captureZone) {
+        captureStopPayload = await apiService.post(CSI_ZONE_ENDPOINTS.STOP, {});
+      }
+      const storageStepComplete = await apiService.post(CSI_FEWSHOT_ENDPOINTS.STEP_COMPLETE, {
+        step_id: step.id,
+        completed_at: nowIso(),
+        metadata: {
+          label: step.label,
+          display_zone: step.displayZone || null,
+          capture_zone: step.captureZone || null,
+          activity: step.activity || null,
+          research_only: Boolean(step.researchOnly),
+          capture_stop_payload: captureStopPayload
+        }
+      });
+      fewshot.storageStatus = storageStepComplete || fewshot.storageStatus;
+    } catch (error) {
+      fewshot.status = 'error';
+      fewshot.lastError = error.message;
+      fewshot.completedAt = nowIso();
+      recording.actionError = error.message;
+      const lastIndex = fewshot.logs.length - 1;
+      if (lastIndex >= 0) {
+        fewshot.logs[lastIndex] = {
+          ...fewshot.logs[lastIndex],
+          status: 'error',
+          finishedAt: nowIso(),
+          error: error.message
+        };
+      }
+      this.emit();
+      return;
+    }
+
+    const lastIndex = fewshot.logs.length - 1;
+    if (lastIndex >= 0) {
+        fewshot.logs[lastIndex] = {
+          ...fewshot.logs[lastIndex],
+          status: 'completed',
+          finishedAt: nowIso(),
+          captureStopPayload
+        };
+    }
+
+    const nextStepIndex = stepIndex + 1;
+    if (nextStepIndex >= protocol.steps.length) {
+      try {
+        const fitResult = await apiService.post(CSI_ZONE_ENDPOINTS.FIT, {});
+        const finalizePayload = await apiService.post(CSI_FEWSHOT_ENDPOINTS.FINALIZE, {
+          fit_result: fitResult,
+          completed_at: nowIso(),
+          status: 'completed',
+          metadata: {
+            ui_status: 'completed',
+            packet_status: 'ready_for_shadow_adaptation'
+          }
+        });
+        fewshot.fitResult = fitResult;
+        fewshot.storageStatus = finalizePayload || fewshot.storageStatus;
+        fewshot.packetStatus = finalizePayload?.status || 'completed';
+        fewshot.packetStoragePath = finalizePayload?.storage_path || fewshot.packetStoragePath;
+        fewshot.status = 'completed';
+        fewshot.completedAt = nowIso();
+        fewshot.currentStep = null;
+        fewshot.stepStartedAt = null;
+        fewshot.stepEndsAt = null;
+        fewshot.pauseUntil = null;
+        recording.actionError = null;
+      } catch (error) {
+        try {
+          const finalizePayload = await apiService.post(CSI_FEWSHOT_ENDPOINTS.FINALIZE, {
+            fit_result: { ok: false, error: error.message },
+            completed_at: nowIso(),
+            status: 'error',
+            metadata: {
+              ui_status: 'fit_error'
+            }
+          });
+          fewshot.storageStatus = finalizePayload || fewshot.storageStatus;
+          fewshot.packetStatus = finalizePayload?.status || 'error';
+          fewshot.packetStoragePath = finalizePayload?.storage_path || fewshot.packetStoragePath;
+        } catch (storageError) {
+          fewshot.storageStatus = { ok: false, error: storageError.message };
+        }
+        fewshot.status = 'error';
+        fewshot.lastError = error.message;
+        fewshot.completedAt = nowIso();
+        fewshot.fitResult = { ok: false, error: error.message };
+        recording.actionError = error.message;
+      } finally {
+        await this.refreshCsi(true);
+        this.emit();
+      }
+      return;
+    }
+
+    const pauseBetweenStepsSec = Number(protocol.pauseBetweenStepsSec || 0);
+    fewshot.status = pauseBetweenStepsSec > 0 ? 'paused' : 'idle';
+    fewshot.sequencePhase = null;
+    fewshot.countdownValue = null;
+    fewshot.currentStep = null;
+    fewshot.stepStartedAt = null;
+    fewshot.stepEndsAt = null;
+    fewshot.pauseUntil = pauseBetweenStepsSec > 0
+      ? new Date(Date.now() + pauseBetweenStepsSec * 1000).toISOString()
+      : null;
+    this.emit();
+
+    if (pauseBetweenStepsSec > 0) {
+      this.fewshotPauseTimer = setTimeout(() => {
+        void this.runFewshotCalibrationStep(protocol.id, nextStepIndex, runToken);
+      }, pauseBetweenStepsSec * 1000);
+      return;
+    }
+
+    void this.runFewshotCalibrationStep(protocol.id, nextStepIndex, runToken);
+  }
+
+  async stopFewshotCalibration() {
+    const recording = this.state.recording;
+    const fewshot = recording.fewshotCalibration;
+
+    if (!fewshot.protocolId || !['cueing', 'running', 'paused', 'stopping'].includes(fewshot.status)) {
+      return { ok: false, error: 'Few-shot calibration не активна.' };
+    }
+
+    this.clearFewshotCalibrationTimers();
+    const currentStep = fewshot.currentStep;
+    fewshot.runToken += 1;
+    fewshot.status = 'stopping';
+    fewshot.sequencePhase = null;
+    fewshot.countdownValue = null;
+    this.emit();
+
+    try {
+      if (currentStep?.captureZone) {
+        await apiService.post(CSI_ZONE_ENDPOINTS.STOP, {});
+      }
+      const storageReset = await apiService.post(CSI_FEWSHOT_ENDPOINTS.RESET, {});
+      fewshot.storageStatus = storageReset || fewshot.storageStatus;
+      fewshot.packetStatus = storageReset?.status || 'cancelled';
+      fewshot.packetStoragePath = storageReset?.storage_path || fewshot.packetStoragePath;
+    } catch (error) {
+      if (!/No zone capture in progress/i.test(error.message || '')) {
+        fewshot.status = 'error';
+        fewshot.lastError = error.message;
+        fewshot.completedAt = nowIso();
+        recording.actionError = error.message;
+        this.emit();
+        return { ok: false, error: error.message };
+      }
+    }
+
+    fewshot.status = 'cancelled';
+    fewshot.completedAt = nowIso();
+    fewshot.currentStep = null;
+    fewshot.stepStartedAt = null;
+    fewshot.stepEndsAt = null;
+    fewshot.pauseUntil = null;
+    await this.refreshCsi(true);
+    this.emit();
+    return { ok: true };
+  }
+
+  async resetFewshotCalibration() {
+    const recording = this.state.recording;
+    const fewshot = recording.fewshotCalibration;
+    const protocolId = fewshot.protocolId || FEWSHOT_CALIBRATION_PROTOCOLS[0]?.id || null;
+
+    if (['cueing', 'running', 'paused', 'stopping'].includes(fewshot.status)) {
+      await this.stopFewshotCalibration();
+    }
+
+    try {
+      await apiService.post(CSI_ZONE_ENDPOINTS.RESET, {});
+      const storageReset = await apiService.post(CSI_FEWSHOT_ENDPOINTS.RESET, {});
+      recording.fewshotCalibration = {
+        protocolId,
+        runToken: 0,
+        packetSessionId: null,
+        packetStoragePath: null,
+        packetStatus: storageReset?.status || 'idle',
+        status: 'idle',
+        sequencePhase: null,
+        countdownValue: null,
+        stepIndex: -1,
+        stepStartedAt: null,
+        stepEndsAt: null,
+        pauseUntil: null,
+        currentStep: null,
+        voiceEnabled: true,
+        logs: [],
+        completedAt: null,
+        lastError: null,
+        fitResult: null,
+        storageStatus: storageReset || null
+      };
+      recording.actionError = null;
+      await this.refreshCsi(true);
+      this.emit();
+      return { ok: true };
+    } catch (error) {
+      recording.actionError = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
+    }
   }
 
   async runRecordingPreflight({ packId = null, force = true, checkVideoOverride = null } = {}) {

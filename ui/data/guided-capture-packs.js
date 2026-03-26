@@ -305,6 +305,109 @@ export const GUIDED_CAPTURE_PACKS = [
         notes: 'step=center_phone_hold_60, zone=CENTER, pose=phone_hold'
       }
     ]
+  },
+  {
+    id: 's7_static_expansion',
+    code: 'S7',
+    name: 'S7 STATIC Expansion',
+    shortLabel: 'static diversity gaps',
+    description: '12 клипов для расширения STATIC training (7.3% → ~8.3%). Покрывает gaps: multi-person, door-open, orientation, height, distance.',
+    motionType: 'static_hold',
+    personCount: 1,
+    withVideo: true,
+    voiceEnabledByDefault: true,
+    preflightCheckVideo: true,
+    countdownSec: 5,
+    pauseBetweenStepsSec: 5,
+    labelPrefix: 'train',
+    sessionSlug: 'static_expansion_s7',
+    notesPrefix: 'Session S7 static diversity expansion, video-backed',
+    steps: [
+      {
+        id: 's7_2person_center_stand',
+        label: '2 человека стоят в центре',
+        durationSec: 90,
+        instruction: 'Два человека стоят неподвижно в центре, примерно 1 метр друг от друга. Лицом к камере. Не двигаться 90 секунд.',
+        notes: 'step=2person_center_stand, zone=CENTER, pose=standing, person_count=2'
+      },
+      {
+        id: 's7_2person_center_seated',
+        label: '2 человека сидят в центре',
+        durationSec: 90,
+        instruction: 'Два человека сидят на стульях в центре. Не двигаться 90 секунд.',
+        notes: 'step=2person_center_seated, zone=CENTER, pose=seated, person_count=2'
+      },
+      {
+        id: 's7_door_open_stand',
+        label: 'Стоять у открытых ворот',
+        durationSec: 90,
+        instruction: 'Открой гаражные ворота. Встань рядом с воротами внутри гаража. Стой неподвижно 90 секунд. Ворота открыты.',
+        notes: 'step=door_open_stand, zone=DOOR, pose=standing, door_state=open'
+      },
+      {
+        id: 's7_back_to_camera',
+        label: 'Спиной к камере',
+        durationSec: 60,
+        instruction: 'Встань в центр гаража. Повернись спиной к камере. Стой неподвижно 60 секунд.',
+        notes: 'step=back_to_camera, zone=CENTER, pose=standing_back'
+      },
+      {
+        id: 's7_lying_down',
+        label: 'Лёжа на полу',
+        durationSec: 60,
+        instruction: 'Ляг на пол в центре гаража. Лежи неподвижно 60 секунд.',
+        notes: 'step=lying_down, zone=CENTER, pose=lying'
+      },
+      {
+        id: 's7_deep_corner',
+        label: 'Дальний угол',
+        durationSec: 60,
+        instruction: 'Встань в самый дальний угол гаража. Максимальное расстояние от всех нод. Стой неподвижно 60 секунд.',
+        notes: 'step=deep_corner, zone=DEEP_CORNER, pose=standing'
+      },
+      {
+        id: 's7_passage_between_nodes',
+        label: 'Между нодами (проход)',
+        durationSec: 60,
+        instruction: 'Встань в узком проходе между нодами n02 и n04 (правая стена). Стой неподвижно 60 секунд.',
+        notes: 'step=passage_between_nodes, zone=PASSAGE, pose=standing'
+      },
+      {
+        id: 's7_holding_object',
+        label: 'С большим предметом',
+        durationSec: 60,
+        instruction: 'Возьми большую коробку или сумку. Встань в центр. Держи предмет и стой неподвижно 60 секунд.',
+        notes: 'step=holding_object, zone=CENTER, pose=standing_with_object'
+      },
+      {
+        id: 's7_arms_raised',
+        label: 'Руки вверх',
+        durationSec: 45,
+        instruction: 'Встань в центр. Подними обе руки вверх над головой. Держи позу 45 секунд.',
+        notes: 'step=arms_raised, zone=CENTER, pose=arms_up'
+      },
+      {
+        id: 's7_door_threshold',
+        label: 'На пороге ворот',
+        durationSec: 60,
+        instruction: 'Открой ворота. Встань ровно на пороге — одна нога внутри, одна снаружи. Стой неподвижно 60 секунд.',
+        notes: 'step=door_threshold, zone=DOOR_THRESHOLD, pose=standing, door_state=open'
+      },
+      {
+        id: 's7_3person_cluster',
+        label: '3 человека в центре',
+        durationSec: 90,
+        instruction: 'Три человека стоят неподвижно в центре, примерно 1 метр друг от друга. Не двигаться 90 секунд.',
+        notes: 'step=3person_cluster, zone=CENTER, pose=standing, person_count=3'
+      },
+      {
+        id: 's7_daylight_stand',
+        label: 'Дневной свет, центр',
+        durationSec: 90,
+        instruction: 'Гаражные ворота полностью открыты. Дневное время. Встань в центр. Стой неподвижно 90 секунд.',
+        notes: 'step=daylight_stand, zone=CENTER, pose=standing, door_state=open, lighting=daylight'
+      }
+    ]
   }
 ];
 

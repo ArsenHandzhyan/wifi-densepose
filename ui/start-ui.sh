@@ -3,6 +3,9 @@
 # WiFi DensePose UI Startup Script
 # This script starts the UI on port 3000 to avoid conflicts with the FastAPI backend on port 8000
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CANONICAL_BACKEND_CMD="uvicorn src.app:app --app-dir ${PROJECT_ROOT}/v1 --host 127.0.0.1 --port 8000"
+
 echo "🚀 Starting WiFi DensePose UI..."
 echo ""
 echo "📋 Configuration:"
@@ -10,7 +13,7 @@ echo "   - CSI Operator UI: http://127.0.0.1:3000/csi-operator.html"
 echo "   - CSI Live Console: http://127.0.0.1:3000/csi-live.html"
 echo "   - UI Server Root: http://127.0.0.1:3000"
 echo "   - Canonical Backend API: http://127.0.0.1:8000"
-echo "   - Canonical backend launch: uvicorn src.app:app --app-dir /Users/arsen/Desktop/wifi-densepose/v1 --host 127.0.0.1 --port 8000"
+echo "   - Canonical backend launch: ${CANONICAL_BACKEND_CMD}"
 echo "   - Test Runner: http://localhost:3000/tests/test-runner.html"
 echo "   - Integration Tests: http://localhost:3000/tests/integration-test.html"
 echo ""
@@ -32,24 +35,24 @@ if [ "${BACKEND_COUNT}" -gt 1 ]; then
     ps -p ${BACKEND_PIDS} -o pid=,command=
     echo ""
     echo "Оставь только канонический backend:"
-    echo "   uvicorn src.app:app --app-dir /Users/arsen/Desktop/wifi-densepose/v1 --host 127.0.0.1 --port 8000"
+    echo "   ${CANONICAL_BACKEND_CMD}"
     exit 1
 elif [ "${BACKEND_COUNT}" -eq 1 ]; then
     BACKEND_CMD=$(ps -p ${BACKEND_PIDS} -o command=)
-    if echo "${BACKEND_CMD}" | grep -q "src.app:app --app-dir /Users/arsen/Desktop/wifi-densepose/v1 --host 127.0.0.1 --port 8000"; then
+    if echo "${BACKEND_CMD}" | grep -q "src.app:app --app-dir ${PROJECT_ROOT}/v1 --host 127.0.0.1 --port 8000"; then
         echo "✅ Канонический FastAPI backend detected on port 8000"
     else
         echo "❌ На :8000 найден неканонический backend target:"
         echo "   ${BACKEND_CMD}"
         echo ""
         echo "Нужен launch path:"
-        echo "   uvicorn src.app:app --app-dir /Users/arsen/Desktop/wifi-densepose/v1 --host 127.0.0.1 --port 8000"
+        echo "   ${CANONICAL_BACKEND_CMD}"
         exit 1
     fi
 else
     echo "⚠️  FastAPI backend not detected on port 8000"
     echo "   Start canonical runtime with:"
-    echo "   uvicorn src.app:app --app-dir /Users/arsen/Desktop/wifi-densepose/v1 --host 127.0.0.1 --port 8000"
+    echo "   ${CANONICAL_BACKEND_CMD}"
     echo ""
     echo "   The UI will still work with the mock server for testing."
 fi

@@ -44,40 +44,45 @@ Only change needed: `MODEL_PATH` now points to `frozen_twostage_runtime_v1.pkl`.
 | Combined 3-class BalAcc | 0.655 | Two-stage composition CV |
 | Binary with smoothing | 0.856 | Post-prediction temporal smoothing k=7 |
 
+## Primary runtime contract (updated 2026-03-19)
+
+**PRIMARY OUTPUT: motion_state**
+- `MOTION_DETECTED` — active movement in room (S/M BalAcc 0.706, drift-resistant)
+- `NO_MOTION` — no active movement detected (may be empty OR stationary person)
+
+**SECONDARY/EXPERIMENTAL (internal telemetry only, not product claims):**
+- `binary`: empty/occupied — unreliable cross-session (SNR < 0.3, 49-100% FP on empty)
+- `coarse`: empty/static/motion — internal state, not validated cross-session
+
 ## Telemetry contract
 
 Every prediction is logged to `temp/runtime_telemetry.ndjson`:
 
 ```json
-{"ts": 1773900000.0, "window_t": 15.0, "binary": "occupied", "binary_conf": 0.823, "coarse": "motion", "coarse_conf": 0.712, "nodes": 4, "pps": 88.4, "zone": "center"}
+{"ts": 1773900000.0, "window_t": 15.0, "motion_state": "MOTION_DETECTED", "motion_conf": 0.712, "binary": "occupied", "binary_conf": 0.823, "coarse": "motion", "coarse_conf": 0.712, "nodes": 4, "pps": 88.4, "zone": "center"}
 ```
 
-**Fields logged**:
-- `ts`: wall-clock timestamp (Unix epoch)
-- `window_t`: window end time (seconds since capture start)
-- `binary`: Stage 1 prediction (empty/occupied)
-- `binary_conf`: Stage 1 confidence (0-1)
-- `coarse`: Stage 2 prediction (empty/static/motion)
-- `coarse_conf`: Stage 2 confidence (0-1)
-- `nodes`: active CSI nodes count
-- `pps`: packets per second
-- `zone`: position zone (empty/door/center/deep)
+**Primary fields:**
+- `motion_state`: MOTION_DETECTED / NO_MOTION (only reliable cross-session output)
+- `motion_conf`: confidence (0-1)
 
-**Failure analysis**: grep telemetry for `binary_conf < 0.6` to find uncertain predictions. These are candidates for manual review.
+**Secondary/debug fields:**
+- `binary`: Stage 1 (empty/occupied) — experimental, not primary
+- `coarse`: Stage 2 (empty/static/motion) — internal
+- `nodes`, `pps`, `zone`: diagnostics
 
 ## Allowed runtime claims
 
-- Binary presence detection (EMPTY/OCCUPIED) — 0.749 BalAcc, 0.856 with smoothing
-- 3-class state (EMPTY/STATIC/MOTION) — 0.655 BalAcc, experimental
-- Zone-level position (door/center/deep) — heuristic, not validated
+- Motion detection (MOTION_DETECTED / NO_MOTION) — 0.706 BalAcc, drift-resistant
+- Zone-level position (door/center/deep) — heuristic, approximate
 
 ## Prohibited runtime claims
 
-- Person counting beyond 1 (not validated)
-- Activity recognition beyond motion/static
+- Binary EMPTY/OCCUPIED as primary reliable output (SNR < 0.3, not cross-session stable)
+- Static person detection as reliable feature (CSI physics limit)
+- Person counting beyond 1
 - Sub-meter localization
-- Multi-room detection
-- Breathing/pulse detection (not in this model)
+- Breathing/pulse detection
 
 ## Expected failure modes
 

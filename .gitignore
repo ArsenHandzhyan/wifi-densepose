@@ -348,6 +348,9 @@ scripts/stress_check_*.py
 scripts/sub64_*.py
 scripts/summarize_*.py
 scripts/test_track_b_*.py
+!scripts/mac_video_teacher_host.py
+!scripts/pixel_video_teacher_host.py
+!scripts/record.sh
 scripts/train_tcn_*.py
 scripts/train_v*.py
 

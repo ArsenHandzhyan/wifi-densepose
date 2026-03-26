@@ -27,6 +27,43 @@ Why this was added:
 Canonical guardrail reference:
 - `docs/AGENTCLOUD_VIDEO_REVIEW_GUARDRAILS_20260321.md`
 
+## Current Canonical State (2026-03-22)
+
+This document describes the original video curation pipeline mechanics.
+It is no longer sufficient by itself to describe the current canonical offline training surface.
+
+As of 2026-03-22, the project has moved to a stricter data policy:
+
+- only `new-router` data is allowed in the main training/eval surface
+- `video` remains the primary source of scenario truth
+- raw `CSI` is used as a secondary contamination filter
+- `old-router` data is quarantined from the main line
+- static clips are ingested only through approved usable-core intervals and purified manifests
+
+The canonical high-level state document is now:
+
+- `docs/AGENTCLOUD_DATASET_STATE_AND_PURIFICATION_20260322.md`
+
+The canonical purification report for the next offline calculation is:
+
+- `docs/AGENTCLOUD_DATASET_PURIFY1_REPORT.md`
+
+The canonical purified evaluation report is:
+
+- `docs/AGENTCLOUD_PURIFIED_SEQ_EVAL1_REPORT.md`
+
+The canonical manifest inputs for the next calculation are:
+
+- `output/video_curation/dataset_purify1_scope_v1.json`
+- `output/video_curation/dataset_purify1_allowed_intervals_v1.json`
+- `output/video_curation/dataset_purify1_excluded_intervals_v1.json`
+- `output/video_curation/dataset_purify1_next_calc_manifest_v1.json`
+
+Practical implication:
+
+- this file should be read as the historical and mechanical description of the curation pipeline
+- the active training surface must be interpreted through the purification layer documented above
+
 ### Problem Statement
 
 - YOLO is unreliable in the dark garage (18% miss rate, 8% phantom detections)

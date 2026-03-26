@@ -1,13 +1,13 @@
-import { TabManager } from './TabManager.js?v=20260321-track-b-shadow-ui-02';
-import { AGENT7_OPERATOR_TRUTH } from '../data/agent7-truth.js?v=20260321-track-b-shadow-ui-02';
-import { getOperatorCopy, localizeOperatorToken } from '../data/operator-copy.js?v=20260321-track-b-shadow-ui-02';
-import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack, getGuidedCapturePackSummary } from '../data/guided-capture-packs.js?v=20260321-track-b-shadow-ui-02';
+import { TabManager } from './TabManager.js?v=20260326-stabilize-01';
+import { AGENT7_OPERATOR_TRUTH } from '../data/agent7-truth.js?v=20260326-stabilize-01';
+import { getOperatorCopy, localizeOperatorToken } from '../data/operator-copy.js?v=20260326-stabilize-01';
+import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack, getGuidedCapturePackSummary } from '../data/guided-capture-packs.js?v=20260326-stabilize-01';
 import {
   MANUAL_CAPTURE_PRESETS,
   getManualCapturePreset,
   getManualCapturePresetVariant
-} from '../data/manual-capture-presets.js?v=20260321-track-b-shadow-ui-02';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260321-track-b-shadow-ui-02';
+} from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260326-stabilize-01';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
 
@@ -25,6 +25,14 @@ function formatNumber(value, digits = 0) {
     return UI_LOCALE.common.noData;
   }
   return Number(value).toFixed(digits);
+}
+
+function safeNumber(value, fallback = null) {
+  if (value == null || value === '') {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function formatNumberWithUnit(value, { digits = 0, unit = '', missing = UI_LOCALE.common.noData } = {}) {
@@ -244,13 +252,24 @@ const FATE_GROUP_HOTKEYS = {
 };
 const FORENSIC_SEARCH_PREFETCH_DELAY_MS = 180;
 const DEFAULT_GARAGE_LAYOUT = {
-  widthMeters: 4.3,
-  heightMeters: 7.5,
+  // Garage Planner v3 (2026-03-26): 3×7m, single door 2.4m at bottom.
+  // Backend center-based X: x ∈ [-1.5, +1.5]. Y: 0=door, 7=deep end.
+  widthMeters: 3.0,
+  heightMeters: 7.0,
+  door: { xMeters: 0.0, yMeters: 0.0 },
   zones: {
-    doorMaxY: 1.5,
+    doorMaxY: 3.5,
     deepMinY: 5.0
-  }
+  },
+  nodes: [
+    { nodeId: 'node01', ip: '192.168.1.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
+    { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
+    { nodeId: 'node05', ip: '192.168.1.33', xMeters: 0.00, yMeters: 3.50, zone: 'center' }
+  ]
 };
+const DEFAULT_VISIBLE_NODE_COUNT = Math.max(DEFAULT_GARAGE_LAYOUT.nodes.length, 5);
 const TEACHER_SOURCE_KIND = {
   PIXEL_RTSP: 'pixel_rtsp',
   MAC_CAMERA: 'mac_camera',
@@ -261,15 +280,24 @@ const DEFAULT_PIXEL_RTSP_NAME = 'Pixel 8 Pro';
 const UI_RUNTIME_VIEW_STORAGE_KEY = 'agent7.csiOperator.runtimeView';
 const UI_RUNTIME_VIEW_OPTIONS = {
   TRACK_A: 'track_a',
-  TRACK_B: 'track_b'
+  TRACK_B: 'track_b',
+  V15: 'v15',
+  GARAGE_V2: 'garage_v2'
 };
 
 function readUiRuntimeViewSelection() {
   try {
     const raw = window.localStorage?.getItem(UI_RUNTIME_VIEW_STORAGE_KEY);
-    return raw === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-      ? UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-      : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
+    if (raw === UI_RUNTIME_VIEW_OPTIONS.TRACK_B) {
+      return UI_RUNTIME_VIEW_OPTIONS.TRACK_B;
+    }
+    if (raw === UI_RUNTIME_VIEW_OPTIONS.V15) {
+      return UI_RUNTIME_VIEW_OPTIONS.V15;
+    }
+    if (raw === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2) {
+      return UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2;
+    }
+    return UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
   } catch (_error) {
     return UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
   }
@@ -292,7 +320,25 @@ function getTrackBShadowConfidence(trackBShadow) {
   return candidates.length ? Math.max(...candidates) : null;
 }
 
-function buildRuntimeView(primaryRuntime, trackBShadow, selectedView) {
+function getShadowConfidence(shadow) {
+  const candidates = [
+    Number(shadow?.emptyProbability),
+    Number(shadow?.staticProbability),
+    Number(shadow?.motionProbability)
+  ].filter((value) => Number.isFinite(value));
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+function getGarageRatioV2Confidence(shadow) {
+  const candidates = [
+    Number(shadow?.doorProbability),
+    Number(shadow?.centerProbability),
+    Number(shadow?.deepProbability)
+  ].filter((value) => Number.isFinite(value));
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, selectedView) {
   if (selectedView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B) {
     const headline = trackBShadow?.predictedClass || trackBShadow?.status || 'unknown';
     return {
@@ -306,6 +352,7 @@ function buildRuntimeView(primaryRuntime, trackBShadow, selectedView) {
       running: Boolean(trackBShadow?.loaded),
       modelLoaded: Boolean(trackBShadow?.loaded),
       nodesActive: Number(trackBShadow?.nodesWithData) || 0,
+      totalNodes: Number(primaryRuntime?.totalNodes) || DEFAULT_VISIBLE_NODE_COUNT,
       packetsInWindow: primaryRuntime?.packetsInWindow,
       packetsPerSecond: primaryRuntime?.packetsPerSecond,
       windowAgeSec: primaryRuntime?.windowAgeSec,
@@ -317,17 +364,75 @@ function buildRuntimeView(primaryRuntime, trackBShadow, selectedView) {
     };
   }
 
+  if (selectedView === UI_RUNTIME_VIEW_OPTIONS.V15) {
+    const headline = v15Shadow?.predictedClass || v15Shadow?.status || 'unknown';
+    return {
+      id: UI_RUNTIME_VIEW_OPTIONS.V15,
+      label: 'V8 F2-spectral canonical candidate',
+      routeLabel: 'shadow-only',
+      state: headline,
+      confidence: getShadowConfidence(v15Shadow),
+      modelVersion: 'v8_f2spectral_canonical',
+      modelId: 'v8_f2spectral_canonical_candidate.pkl',
+      running: Boolean(v15Shadow?.loaded),
+      modelLoaded: Boolean(v15Shadow?.loaded),
+      nodesActive: primaryRuntime?.nodesActive,
+      totalNodes: Number(primaryRuntime?.totalNodes) || DEFAULT_VISIBLE_NODE_COUNT,
+      packetsInWindow: primaryRuntime?.packetsInWindow,
+      packetsPerSecond: primaryRuntime?.packetsPerSecond,
+      windowAgeSec: primaryRuntime?.windowAgeSec,
+      targetZone: v15Shadow?.predictedClass || 'unknown',
+      targetX: null,
+      targetY: null,
+      inferenceMs: v15Shadow?.inferenceMs,
+      bufferDepth: v15Shadow?.bufferDepth,
+      warmupRemaining: v15Shadow?.warmupRemaining,
+      summary: 'UI показывает V8 как test-only shadow candidate с буфером 7 окон; production routing остаётся на Track A.'
+    };
+  }
+
+  if (selectedView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2) {
+    const headline = garageRatioV2Shadow?.predictedZone || garageRatioV2Shadow?.status || 'unknown';
+    return {
+      id: UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2,
+      label: 'Garage Ratio V3 candidate',
+      routeLabel: 'shadow-only',
+      state: headline,
+      confidence: getGarageRatioV2Confidence(garageRatioV2Shadow),
+      modelVersion: garageRatioV2Shadow?.candidateName || 'GARAGE_RATIO_LAYER_V3_CANDIDATE',
+      modelId: 'garage_ratio_layer_v3_candidate.pkl',
+      running: Boolean(garageRatioV2Shadow?.loaded),
+      modelLoaded: Boolean(garageRatioV2Shadow?.loaded),
+      nodesActive: Number(garageRatioV2Shadow?.activeNodes || garageRatioV2Shadow?.nodesWithRatio) || 0,
+      totalNodes: Number(primaryRuntime?.totalNodes) || DEFAULT_VISIBLE_NODE_COUNT,
+      packetsInWindow: garageRatioV2Shadow?.packetsInWindow ?? primaryRuntime?.packetsInWindow,
+      packetsPerSecond: primaryRuntime?.packetsPerSecond,
+      windowAgeSec: primaryRuntime?.windowAgeSec,
+      targetZone: garageRatioV2Shadow?.targetZone || 'unknown',
+      targetX: null,
+      targetY: null,
+      inferenceMs: garageRatioV2Shadow?.inferenceMs,
+      summary: 'UI показывает гаражный V3 ratio-layer как shadow candidate; production routing остаётся на Track A.'
+    };
+  }
+
+  // When production binary is confidently empty, show "empty" as primary state
+  const trackAState = (primaryRuntime?.binary === 'empty' && (primaryRuntime?.binaryConfidence || 0) > 0.75)
+    ? 'empty'
+    : primaryRuntime?.state || 'unknown';
+
   return {
     id: UI_RUNTIME_VIEW_OPTIONS.TRACK_A,
     label: 'Track A production',
     routeLabel: 'production',
-    state: primaryRuntime?.state || 'unknown',
+    state: trackAState,
     confidence: primaryRuntime?.confidence,
     modelVersion: primaryRuntime?.modelVersion,
     modelId: primaryRuntime?.modelId,
     running: Boolean(primaryRuntime?.running),
     modelLoaded: Boolean(primaryRuntime?.modelLoaded),
     nodesActive: primaryRuntime?.nodesActive,
+    totalNodes: Number(primaryRuntime?.totalNodes) || DEFAULT_VISIBLE_NODE_COUNT,
     packetsInWindow: primaryRuntime?.packetsInWindow,
     packetsPerSecond: primaryRuntime?.packetsPerSecond,
     windowAgeSec: primaryRuntime?.windowAgeSec,
@@ -393,7 +498,8 @@ function getAggregateNodeNote(nodes, primaryRuntime) {
   if (hasPerNodeTelemetry(nodes) || activeNodes <= 0) {
     return null;
   }
-  return `Motion-runtime видит ${activeNodes}/4 источника, но по пакетам доступен только сводный уровень.`;
+  const totalNodes = Math.max(Number(primaryRuntime?.totalNodes) || 0, nodes.length || 0, DEFAULT_VISIBLE_NODE_COUNT, activeNodes);
+  return `Motion-runtime видит ${activeNodes}/${totalNodes} источника, но по пакетам доступен только сводный уровень.`;
 }
 
 function getNodeValueText(node) {
@@ -526,6 +632,94 @@ function getLastChunkText(recordingStatus, { duringRecording = 'текущий �
     return duringRecording;
   }
   return whenIdle;
+}
+
+function getStartupSignalGuard(recording) {
+  const status = recording?.status || {};
+  const fallbackGuard = status?.startup_signal_guard || {};
+  const guard = recording?.startupSignalGuard || fallbackGuard;
+  const lastStopResult = recording?.lastStopResult || {};
+  const stopReason = guard?.stopReason || guard?.stop_reason || lastStopResult?.stopReason || lastStopResult?.stop_reason || null;
+  const deadOnStart = Boolean(
+    guard?.verdict === 'csi_dead_on_start'
+    || guard?.failed
+    || guard?.status === 'failed'
+    || stopReason === 'csi_dead_on_start'
+    || recording?.stopFailure?.code === 'csi_dead_on_start'
+  );
+  const passed = Boolean(guard?.passed || guard?.status === 'passed');
+  const thresholds = guard?.thresholds || {
+    graceSec: 6,
+    minActiveCoreNodes: 3,
+    minPackets: 20,
+    minPps: 5
+  };
+  const metrics = guard?.metrics || {
+    activeCoreNodes: status?.nodes_active ?? null,
+    packets: status?.chunk_packets ?? null,
+    pps: status?.chunk_pps ?? null,
+    elapsedSec: status?.elapsed_sec ?? null,
+    windowAgeSec: status?.window_age_sec ?? null
+  };
+
+  return {
+    label: guard?.label || 'startup_signal_guard',
+    passed,
+    deadOnStart,
+    stopReason,
+    status: guard?.status || (deadOnStart ? 'failed' : (passed ? 'passed' : 'unknown')),
+    verdict: guard?.verdict || (deadOnStart ? 'csi_dead_on_start' : (passed ? 'passed' : 'pending')),
+    reason: guard?.reason || guard?.note || (deadOnStart
+      ? 'CSI сигнал не пошёл. Запись остановлена.'
+      : passed
+        ? 'startup guard passed'
+        : 'startup guard pending'),
+    thresholds,
+    metrics,
+    note: guard?.note || (deadOnStart ? 'Auto-stop по startup_signal_guard' : 'startup guard waiting'),
+    raw: guard
+  };
+}
+
+function getStartupSignalGuardTone(guard) {
+  if (!guard) {
+    return 'neutral';
+  }
+  if (guard.deadOnStart || guard.verdict === 'csi_dead_on_start') {
+    return 'risk';
+  }
+  if (guard.passed) {
+    return 'ok';
+  }
+  return 'warn';
+}
+
+function getStartupSignalGuardLabel(guard) {
+  if (!guard) {
+    return 'startup_signal_guard: нет данных';
+  }
+  if (guard.deadOnStart || guard.verdict === 'csi_dead_on_start') {
+    return 'startup_signal_guard: csi_dead_on_start';
+  }
+  if (guard.passed) {
+    return 'startup_signal_guard: passed';
+  }
+  return `startup_signal_guard: ${displayToken(guard.status || 'unknown')}`;
+}
+
+function getRecordingStopResult(recording) {
+  const stopResult = recording?.lastStopResult || null;
+  if (!stopResult) {
+    return null;
+  }
+  return {
+    ...stopResult,
+    deadOnStart: Boolean(stopResult.deadOnStart || stopResult.stopReason === 'csi_dead_on_start'),
+    stopReason: stopResult.stopReason || stopResult.stop_reason || stopResult.reason || null,
+    message: stopResult.message || (stopResult.stopReason === 'csi_dead_on_start'
+      ? 'CSI сигнал не пошёл. Запись остановлена.'
+      : 'Запись остановлена.')
+  };
 }
 
 function getGuidedLastChunkText(guided, recordingStatus) {
@@ -758,7 +952,7 @@ function getCanonicalRecordingState(snapshot) {
         tone: 'risk',
         summary: trust.label === 'offline'
           ? 'Live runtime ушёл в offline во время teacher-сессии.'
-          : `Live coverage просела до ${liveSourceCount}/4 активных источников.`
+          : `Live coverage просела до ${liveSourceCount}/${Math.max(liveSourceCount, readyNodes, DEFAULT_VISIBLE_NODE_COUNT)} активных источников.`
       };
     } else if (trust.label === 'degraded' || trust.tone === 'warn' || truthInvalidationReason) {
       truth = {
@@ -772,7 +966,7 @@ function getCanonicalRecordingState(snapshot) {
       truth = {
         label: 'video-backed',
         tone: 'ok',
-        summary: `Teacher-session остаётся video-backed; live trust ${displayToken(trust.label || 'ready')} и ${Math.max(liveSourceCount, readyNodes)}/4 источников активны.`
+        summary: `Teacher-session остаётся video-backed; live trust ${displayToken(trust.label || 'ready')} и ${Math.max(liveSourceCount, readyNodes)}/${Math.max(liveSourceCount, readyNodes, DEFAULT_VISIBLE_NODE_COUNT)} источников активны.`
       };
     }
   } else if (preflight.ok && videoAvailable) {
@@ -1019,6 +1213,43 @@ function getGarageZoneBands(garage) {
   ];
 }
 
+function buildMultiTargetDiagnosticCoordinates(centerCoordinate, garage, personCount) {
+  const count = Math.max(2, Math.min(4, Number(personCount) || 2));
+  const patterns = {
+    2: [
+      { dx: -0.45, dy: 0 },
+      { dx: 0.45, dy: 0 }
+    ],
+    3: [
+      { dx: -0.52, dy: -0.18 },
+      { dx: 0, dy: 0.26 },
+      { dx: 0.52, dy: -0.18 }
+    ],
+    4: [
+      { dx: -0.56, dy: -0.24 },
+      { dx: 0.56, dy: -0.24 },
+      { dx: -0.56, dy: 0.24 },
+      { dx: 0.56, dy: 0.24 }
+    ]
+  };
+
+  const base = clampGarageCoordinate(centerCoordinate, garage);
+  if (!base) {
+    return [];
+  }
+
+  return (patterns[count] || patterns[4]).map((offset, index) => {
+    const candidate = clampGarageCoordinate({
+      xMeters: base.xMeters + offset.dx,
+      yMeters: base.yMeters + offset.dy
+    }, garage);
+    return candidate ? {
+      ...candidate,
+      id: `cand_${index + 1}`
+    } : null;
+  }).filter(Boolean);
+}
+
 function formatMarkerSummary(marker) {
   if (!marker || typeof marker !== 'object') {
     return 'маркер не передан';
@@ -1243,7 +1474,11 @@ export class CsiOperatorApp {
   selectUiRuntimeView(nextView) {
     const resolved = nextView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
       ? UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-      : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
+      : nextView === UI_RUNTIME_VIEW_OPTIONS.V15
+        ? UI_RUNTIME_VIEW_OPTIONS.V15
+        : nextView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
+          ? UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
+        : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
     if (this.runtimeViewSelection === resolved) {
       return;
     }
@@ -1258,24 +1493,60 @@ export class CsiOperatorApp {
     const target = clampGarageCoordinate(coordinate, garage);
     if (!target) {
       this.signalCoordinateState = null;
+      this.signalCoordinateHistory = [];
       return null;
     }
 
-    const previous = this.signalCoordinateState;
-    if (!previous) {
-      this.signalCoordinateState = { ...target };
-      return target;
+    // Initialize history buffer on first call
+    if (!this.signalCoordinateHistory) {
+      this.signalCoordinateHistory = [];
     }
 
-    const distance = Math.hypot(target.xMeters - previous.xMeters, target.yMeters - previous.yMeters);
-    const alpha = distance > 1.8 ? 0.76 : distance > 0.85 ? 0.54 : 0.34;
+    // Keep a sliding window of recent raw samples for averaging
+    this.signalCoordinateHistory.push({ x: target.xMeters, y: target.yMeters });
+    if (this.signalCoordinateHistory.length > 5) {
+      this.signalCoordinateHistory.shift();
+    }
+
+    // Compute median of recent samples (robust against outlier spikes)
+    const sortedX = this.signalCoordinateHistory.map(p => p.x).sort((a, b) => a - b);
+    const sortedY = this.signalCoordinateHistory.map(p => p.y).sort((a, b) => a - b);
+    const mid = Math.floor(sortedX.length / 2);
+    const medianX = sortedX.length % 2 ? sortedX[mid] : (sortedX[mid - 1] + sortedX[mid]) / 2;
+    const medianY = sortedY.length % 2 ? sortedY[mid] : (sortedY[mid - 1] + sortedY[mid]) / 2;
+
+    const previous = this.signalCoordinateState;
+    if (!previous) {
+      this.signalCoordinateState = { xMeters: medianX, yMeters: medianY, vx: 0, vy: 0 };
+      return { xMeters: medianX, yMeters: medianY };
+    }
+
+    const dx = medianX - previous.xMeters;
+    const dy = medianY - previous.yMeters;
+    const distance = Math.hypot(dx, dy);
+
+    // Dead-zone: ignore jitter below 8cm
+    if (distance < 0.08) {
+      return { xMeters: previous.xMeters, yMeters: previous.yMeters };
+    }
+
+    // Adaptive alpha: very gentle for small/medium moves, faster for large jumps
+    const alpha = distance > 2.0 ? 0.50 : distance > 1.0 ? 0.25 : distance > 0.3 ? 0.15 : 0.10;
+
+    // Velocity damping: blend toward target with momentum
+    const velocityDamping = 0.6;
+    const vx = (previous.vx || 0) * velocityDamping + dx * alpha;
+    const vy = (previous.vy || 0) * velocityDamping + dy * alpha;
+
     const smoothed = {
-      xMeters: previous.xMeters + (target.xMeters - previous.xMeters) * alpha,
-      yMeters: previous.yMeters + (target.yMeters - previous.yMeters) * alpha
+      xMeters: previous.xMeters + vx,
+      yMeters: previous.yMeters + vy,
+      vx: vx,
+      vy: vy
     };
 
     this.signalCoordinateState = smoothed;
-    return smoothed;
+    return { xMeters: smoothed.xMeters, yMeters: smoothed.yMeters };
   }
 
   handleRootClick(event) {
@@ -1966,7 +2237,9 @@ export class CsiOperatorApp {
     const topology = snapshot?.live?.topology || {};
     const primaryRuntime = snapshot?.live?.primaryRuntime || {};
     const trackBShadow = snapshot?.live?.trackBShadow || {};
-    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, this.runtimeViewSelection);
+    const v15Shadow = snapshot?.live?.v8Shadow || snapshot?.live?.v7Shadow || snapshot?.live?.v15Shadow || {};
+    const garageRatioV2Shadow = snapshot?.live?.garageRatioV2Shadow || {};
+    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, this.runtimeViewSelection);
     const topologyLabel = getTopologyHeadline(topology, primaryRuntime);
     const sessionId = getRuntimeSessionText(snapshot);
 
@@ -2022,7 +2295,12 @@ export class CsiOperatorApp {
     const primaryRuntime = snapshot.live.primaryRuntime || {};
     const secondaryRuntime = snapshot.live.secondaryRuntime || {};
     const trackBShadow = snapshot.live.trackBShadow || {};
-    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, this.runtimeViewSelection);
+    const v15Shadow = snapshot.live.v8Shadow || snapshot.live.v7Shadow || snapshot.live.v15Shadow || {};
+    const garageRatioV2Shadow = snapshot.live.garageRatioV2Shadow || {};
+    const v19Shadow = snapshot.live.v19Shadow || {};
+    const baselineStatus = snapshot.live.baselineStatus || {};
+    const signalQuality = snapshot.live.signalQuality || {};
+    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, this.runtimeViewSelection);
     const support = snapshot.live.supportPath;
     const trust = snapshot.live.trust;
     const failureSignal = snapshot.live.failureSignal;
@@ -2041,6 +2319,26 @@ export class CsiOperatorApp {
       ['EMPTY', trackBShadow.emptyProbability],
       ['STATIC', trackBShadow.staticProbability],
       ['MOTION', trackBShadow.motionProbability]
+    ].filter(([, value]) => value != null);
+    const v15StatusToken = String(
+      v15Shadow.predictedClass
+        ? v15Shadow.predictedClass.toLowerCase()
+        : (v15Shadow.status || 'unknown')
+    );
+    const v15Probabilities = [
+      ['EMPTY', v15Shadow.emptyProbability],
+      ['STATIC', v15Shadow.staticProbability],
+      ['MOTION', v15Shadow.motionProbability]
+    ].filter(([, value]) => value != null);
+    const v19StatusToken = String(
+      v19Shadow.predictedClass
+        ? v19Shadow.predictedClass.toLowerCase()
+        : (v19Shadow.status || 'unknown')
+    );
+    const v19Probabilities = [
+      ['EMPTY', v19Shadow.emptyProbability],
+      ['STATIC', v19Shadow.staticProbability],
+      ['MOTION', v19Shadow.motionProbability]
     ].filter(([, value]) => value != null);
 
     this.sections.live.innerHTML = `
@@ -2069,7 +2367,7 @@ export class CsiOperatorApp {
           <div class="hero-stat">
             <span>${escapeHtml(runtimeView.label)} / окно</span>
             <strong>${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong>
-            <small>${escapeHtml(formatNumber(runtimeView.nodesActive))}/4 узлов / ${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} pps</small>
+            <small>${escapeHtml(formatNumber(runtimeView.nodesActive))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} узлов / ${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} pps</small>
           </div>
           <div class="hero-stat">
             <span>Поза failure-family</span>
@@ -2087,10 +2385,11 @@ export class CsiOperatorApp {
             <div class="kv"><span>Источник</span><strong>${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)}</strong></div>
             <div class="kv"><span>Основная уверенность</span><strong>${escapeHtml(formatPercent(runtimeView.confidence, 0))}</strong></div>
             <div class="kv"><span>Статус runtime</span><strong>${escapeHtml(runtimeView.running ? UI_LOCALE.common.running : 'offline')} / ${escapeHtml(runtimeView.modelLoaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
-            <div class="kv"><span>Узлы / packets</span><strong>${escapeHtml(formatNumber(runtimeView.nodesActive))}/4 / ${escapeHtml(formatNumber(runtimeView.packetsInWindow))}</strong></div>
+            <div class="kv"><span>Узлы / packets</span><strong>${escapeHtml(formatNumber(runtimeView.nodesActive))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatNumber(runtimeView.packetsInWindow))}</strong></div>
             <div class="kv"><span>PPS / возраст окна</span><strong>${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} / ${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong></div>
             <div class="kv"><span>Класс / координата</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))} / ${escapeHtml(formatNumber(runtimeView.targetX, 1))}, ${escapeHtml(formatNumber(runtimeView.targetY, 1))}</strong></div>
             ${runtimeView.inferenceMs != null ? `<div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(runtimeView.inferenceMs, { digits: 2, unit: ' ms' }))}</strong></div>` : ''}
+            ${runtimeView.bufferDepth != null ? `<div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(runtimeView.bufferDepth))}/7 / ${escapeHtml(formatNumber(runtimeView.warmupRemaining))} до ready</strong></div>` : ''}
           </div>
           <div class="panel__footer">${escapeHtml(runtimeView.summary)}</div>
         </article>
@@ -2101,7 +2400,7 @@ export class CsiOperatorApp {
           <div class="kv-list">
             <div class="kv"><span>Роль</span><strong>${escapeHtml(displayToken(trackBShadow.track || 'B_v1'))}</strong></div>
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(trackBShadow.status || 'unknown'))} / ${escapeHtml(trackBShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
-            <div class="kv"><span>Узлы / окно</span><strong>${escapeHtml(formatNumber(trackBShadow.nodesWithData))}/4 / ${escapeHtml(formatRelativeTime(primaryRuntime.windowAgeSec))}</strong></div>
+            <div class="kv"><span>Узлы / окно</span><strong>${escapeHtml(formatNumber(trackBShadow.nodesWithData))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatRelativeTime(primaryRuntime.windowAgeSec))}</strong></div>
             <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
             <div class="kv"><span>Production routing</span><strong>shadow-only / Track A остаётся боевым</strong></div>
           </div>
@@ -2111,6 +2410,44 @@ export class CsiOperatorApp {
               : '<div class="muted">Track B ещё не прислал вероятности.</div>'}
           </div>
           <div class="panel__footer">Этот блок нужен только для тестов: Track B считает параллельно и не подменяет production verdict.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">V8 F2-spectral canonical candidate</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(v15StatusToken))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Роль</span><strong>V8 shadow / test-only</strong></div>
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v15Shadow.status || 'unknown'))} / ${escapeHtml(v15Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v15Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v15Shadow.warmupRemaining))} до ready</strong></div>
+            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+            <div class="kv"><span>Agreement vs V5</span><strong>${escapeHtml(v15Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v15Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v15Shadow.agreeBinary == null ? 'binary n/a' : (v15Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
+          </div>
+          <div class="metric-bars">
+            ${v15Probabilities.length
+              ? v15Probabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
+              : '<div class="muted">V8 ещё греет буфер и не отдал coarse probabilities.</div>'}
+          </div>
+          <div class="panel__footer">Это текущий strongest frozen candidate. UI показывает его отдельно как shadow-view, без смены production routing с V5.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">V19 V23-features shadow</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(v19StatusToken))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Роль</span><strong>V19 shadow / V23 phase+baseline+quality</strong></div>
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v19Shadow.status || 'unknown'))} / ${escapeHtml(v19Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v19Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v19Shadow.warmupRemaining))} до ready</strong></div>
+            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v19Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+            <div class="kv"><span>Agreement vs V5</span><strong>${escapeHtml(v19Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v19Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v19Shadow.agreeBinary == null ? 'binary n/a' : (v19Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
+            <div class="kv"><span>Empty gate</span><strong style="color: ${v19Shadow.emptyGateState ? '#f0c040' : '#6c8'};">${v19Shadow.emptyGateState ? 'ON → EMPTY' + (v19Shadow.rawPredictedClass ? ' (raw: ' + escapeHtml(v19Shadow.rawPredictedClass) + ')' : '') : 'OFF'} [${v19Shadow.gateConsecBelow}↓ ${v19Shadow.gateConsecAbove}↑ / N=4]</strong></div>
+            <div class="kv"><span>Baseline deviation</span><strong>amp=${escapeHtml(formatNumber(v19Shadow.blAmpDevMax, 2))}σ / sc=${escapeHtml(formatNumber(v19Shadow.blScVarDevMax, 2))}σ (thr: 1.2/1.3)</strong></div>
+          </div>
+          <div class="metric-bars">
+            ${v19Probabilities.length
+              ? v19Probabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
+              : '<div class="muted">V19 ещё греет буфер и не отдал coarse probabilities.</div>'}
+          </div>
+          <div class="panel__footer">V23 features: enhanced phase, baseline deviation, signal quality gates. Macro F1=0.9467, STATIC F1=0.8657. Shadow-only, production остаётся на V5.</div>
         </article>
 
         <article class="panel">
@@ -2142,6 +2479,33 @@ export class CsiOperatorApp {
             </div>
           </div>
           <div class="panel__footer">Binary / coarse остаются только экспериментальной диагностикой: ${escapeHtml(displayToken(secondaryRuntime.binary || 'unknown'))} / ${escapeHtml(displayToken(secondaryRuntime.coarse || 'unknown'))}.</div>
+        </article>
+      </div>
+
+      <div class="surface-grid surface-grid--two">
+        <article class="panel">
+          <div class="panel__eyebrow">V23: Качество сигнала</div>
+          <div class="panel__headline">${signalQuality.available ? 'OK' : 'нет данных'}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Phase jump max</span><strong>${escapeHtml(formatNumber(signalQuality.phaseJumpMax, 3))} ${signalQuality.phaseJumpMax != null && signalQuality.phaseJumpMax > 0.30 ? '/ GATE' : '/ ok'}</strong></div>
+            <div class="kv"><span>Dead SC max</span><strong>${escapeHtml(formatNumber(signalQuality.deadScMax, 3))} ${signalQuality.deadScMax != null && signalQuality.deadScMax > 0.40 ? '/ GATE' : '/ ok'}</strong></div>
+            <div class="kv"><span>Amp drift max</span><strong>${escapeHtml(formatNumber(signalQuality.ampDriftMax, 3))} ${signalQuality.ampDriftMax != null && signalQuality.ampDriftMax > 2.0 ? '/ GATE' : '/ ok'}</strong></div>
+            <div class="kv"><span>Phase coherence mean</span><strong>${escapeHtml(formatNumber(signalQuality.phaseCoherenceMean, 3))}</strong></div>
+          </div>
+          <div class="panel__footer">V23 quality gates: phase noise &gt;0.30, dead SC &gt;0.40, amp drift &gt;2.0 подавляют occupied-предсказание.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">V23: Empty baseline калибрация</div>
+          <div class="panel__headline">${baselineStatus.calibrated ? 'Откалибровано' : (baselineStatus.captureActive ? 'Захват...' : 'Не откалибровано')}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(baselineStatus.calibrated ? 'calibrated' : (baselineStatus.captureActive ? 'capturing' : 'not_calibrated'))}</strong></div>
+            <div class="kv"><span>Откалибровано</span><strong>${escapeHtml(baselineStatus.calibratedAt || 'never')}</strong></div>
+            <div class="kv"><span>Окон / узел</span><strong>${escapeHtml(formatNumber(baselineStatus.windowsPerNode))}</strong></div>
+            <div class="kv"><span>Узлов</span><strong>${escapeHtml(formatNumber(baselineStatus.nodeCount))}</strong></div>
+            ${baselineStatus.roomDimensions ? `<div class="kv"><span>Комната</span><strong>${escapeHtml(baselineStatus.roomDimensions)}</strong></div>` : ''}
+          </div>
+          <div class="panel__footer">Baseline профили используются для deviation-features (отклонение от пустой комнаты) в V19/V23 pipeline.</div>
         </article>
       </div>
 
@@ -2230,11 +2594,15 @@ export class CsiOperatorApp {
 
   renderSignal() {
     const snapshot = this.snapshot;
+    const recording = snapshot.recording || {};
+    const recordingStatus = recording.status || {};
     const topology = snapshot.live.topology;
     const motion = snapshot.live.motion;
     const live = snapshot.live;
     const primaryRuntime = snapshot.live.primaryRuntime || {};
     const secondaryRuntime = snapshot.live.secondaryRuntime || {};
+    const trackBShadow = snapshot.live.trackBShadow || {};
+    const v8Shadow = snapshot.live.v8Shadow || snapshot.live.v7Shadow || snapshot.live.v15Shadow || {};
     const fingerprint = snapshot.live.fingerprint;
     const coordinate = snapshot.live.coordinate;
     const operatorPresence = snapshot.live.operatorPresence || {};
@@ -2245,12 +2613,56 @@ export class CsiOperatorApp {
       yMeters: coordinate.operatorYMeters ?? coordinate.yMeters,
       targetZone: coordinate.operatorTargetZone || coordinate.targetZone
     } : null;
+    const diagnosticShadowCoordinate = !ambiguity.active
+      && !activeCoordinate
+      && safeNumber(coordinate?.shadowXMeters) != null
+      && safeNumber(coordinate?.shadowYMeters) != null
+      ? {
+          xMeters: coordinate.shadowXMeters,
+          yMeters: coordinate.shadowYMeters,
+          targetZone: coordinate.shadowTargetZone || v8Shadow.targetZone || 'unknown',
+          source: coordinate.shadowSource || v8Shadow.coordinateSource || 'v8_shadow_diagnostic'
+        }
+      : null;
+    const activeRecordingPersonCount = Boolean(recordingStatus.recording)
+      ? Math.max(0, Number(recordingStatus.person_count || 0) || 0)
+      : 0;
+    const mpEstimate = snapshot.live.multiPersonEstimate || {};
+    const mpState = mpEstimate.state || 'single';
+    const mpTracks = Array.isArray(mpEstimate.diagnosticTracks) ? mpEstimate.diagnosticTracks : [];
+    const mpConfidence = mpEstimate.confidence || 0;
+    // Multi-target diagnostic only when production is NOT confidently empty.
+    // Prevents showing "2 people" in empty garage from shadow disagreement.
+    const prodBinaryEmpty = primaryRuntime.binary === 'empty'
+      && (primaryRuntime.binaryConfidence || 0) > 0.75;
+    const multiTargetDiagnosticActive = !ambiguity.active
+      && !activeCoordinate
+      && !prodBinaryEmpty
+      && (mpState === 'multi' || mpState === 'unresolved')
+      && mpTracks.length > 1;
+    const displayCoordinate = activeCoordinate || (prodBinaryEmpty ? null : diagnosticShadowCoordinate);
     const garage = getGarageLayout(live);
-    const smoothedCoordinate = this.getSmoothedSignalCoordinate(activeCoordinate, garage);
+    const smoothedCoordinate = this.getSmoothedSignalCoordinate(displayCoordinate, garage);
     const currentPoint = mapGarageCoordinateToPercent(smoothedCoordinate, garage);
+    const multiTargetDiagnosticCoordinates = multiTargetDiagnosticActive
+      ? mpTracks.map((track) => {
+          const clamped = clampGarageCoordinate({ xMeters: track.x, yMeters: track.y }, garage);
+          return clamped ? { ...clamped, id: track.id, source: track.source, trackClass: track.class, trackConfidence: track.confidence } : null;
+        }).filter(Boolean)
+      : (
+        // Fallback: if runtime estimator not available yet but recording hint exists
+        !ambiguity.active && !activeCoordinate && activeRecordingPersonCount > 1 && Boolean(diagnosticShadowCoordinate)
+          ? buildMultiTargetDiagnosticCoordinates(smoothedCoordinate || diagnosticShadowCoordinate, garage, activeRecordingPersonCount)
+          : []
+      );
+    const multiTargetDiagnosticPoints = multiTargetDiagnosticCoordinates
+      .map((candidate) => mapGarageCoordinateToPercent(candidate, garage))
+      .filter(Boolean);
     const garagePath = ambiguity.active
       ? null
-      : buildGarageTrackPolyline(buildGarageTrackPoints(coordinate.motionHistory, smoothedCoordinate, garage));
+      : activeCoordinate
+        ? buildGarageTrackPolyline(buildGarageTrackPoints(coordinate.motionHistory, smoothedCoordinate, garage))
+        : null;
     const garageDoor = mapGarageCoordinateToPercent(garage?.door, garage);
     const garageZones = getGarageZoneBands(garage);
     const ambiguityZone = garageZones.find((zone) => zone.id === ambiguity.targetZone) || null;
@@ -2265,15 +2677,68 @@ export class CsiOperatorApp {
       ? 'ambiguity safe-mode'
       : activeCoordinate
         ? 'single-target safe'
+        : multiTargetDiagnosticActive
+          ? (mpState === 'multi'
+            ? `multi-person diagnostic (${mpEstimate.personCountEstimate || '?'} est, ${Math.round(mpConfidence * 100)}%)`
+            : `multi-person unresolved (${Math.round(mpConfidence * 100)}%)`)
+        : diagnosticShadowCoordinate
+          ? 'shadow-diagnostic'
         : 'suppressed';
+    const v8PredictedClass = typeof v8Shadow.predictedClass === 'string' ? String(v8Shadow.predictedClass) : null;
+    const trackBPredictedClass = typeof trackBShadow.predictedClass === 'string' ? String(trackBShadow.predictedClass) : null;
+    // Shadow presence only counts when production is NOT confidently empty.
+    // If production says empty with >0.80 confidence, shadow signals are likely
+    // false positives (Track B warmup noise, V8 calibration drift).
+    const productionConfidentlyEmpty = primaryRuntime.binary === 'empty'
+      && (primaryRuntime.binaryConfidence || 0) > 0.80;
+    const shadowPresenceDetected = !ambiguity.active && !activeCoordinate
+      && !productionConfidentlyEmpty
+      && (
+        v8Shadow.binary === 'occupied'
+        || v8PredictedClass === 'STATIC'
+        || v8PredictedClass === 'MOTION'
+        || trackBPredictedClass === 'STATIC'
+        || trackBPredictedClass === 'MOTION'
+      );
+    const shadowConsensusBits = [
+      v8PredictedClass ? `V8=${v8PredictedClass}` : null,
+      trackBPredictedClass ? `Track B=${trackBPredictedClass}` : null
+    ].filter(Boolean);
+    const shadowPresenceHeadline = shadowPresenceDetected
+      ? (v8PredictedClass === 'STATIC'
+        ? 'V8 видит статичное присутствие'
+        : v8PredictedClass === 'MOTION'
+          ? 'V8 видит движение'
+          : trackBPredictedClass === 'MOTION'
+            ? 'Track B видит движение'
+            : 'Shadow-модель видит присутствие')
+      : null;
+    const shadowPresenceDetail = shadowPresenceDetected
+      ? `Production motion-runtime пока не выдал движение, поэтому объект на карте скрыт. ${shadowConsensusBits.join(' / ') || 'shadow verdict активен.'}`
+      : null;
     const signalMapZoneLabel = ambiguity.active
       ? ambiguity.targetZone || coordinate?.ambiguityTargetZone || 'unknown'
-      : activeCoordinate?.targetZone || 'no_active_motion';
+      : multiTargetDiagnosticActive
+        ? `${mpEstimate.personCountEstimate || mpTracks.length} diagnostic tracks (${mpState})`
+      : displayCoordinate?.targetZone || (shadowPresenceDetected ? 'shadow presence detected' : 'no_active_motion');
     const smoothingLabel = ambiguity.active
       ? 'отключено в ambiguity safe-mode'
       : activeCoordinate
         ? 'по motion-history и runtime-геометрии'
-        : 'отключено без active motion';
+        : multiTargetDiagnosticActive
+          ? `runtime estimator (${mpState}, ${mpTracks.length} tracks)`
+        : diagnosticShadowCoordinate
+          ? 'мягкое диагностическое сглаживание V8 shadow'
+          : (shadowPresenceDetected ? 'сглаживание отключено; доступен только shadow-presence' : 'отключено без active motion');
+    const displayCoordinateXcm = displayCoordinate?.xMeters != null ? displayCoordinate.xMeters * 100 : coordinate.xCm;
+    const displayCoordinateYcm = displayCoordinate?.yMeters != null ? displayCoordinate.yMeters * 100 : coordinate.yCm;
+    const displayCoordinateSource = activeCoordinate
+      ? getCoordinateSourceText(coordinate)
+      : multiTargetDiagnosticActive
+        ? `runtime multi-person estimator (${mpState}, conf=${Math.round(mpConfidence * 100)}%)`
+      : diagnosticShadowCoordinate
+        ? 'V8 shadow diagnostic target'
+        : (shadowPresenceDetected ? 'V8 shadow diagnostics (без active motion)' : getCoordinateSourceText(coordinate));
 
     const motionProbabilities = Object.entries(motion.probabilities || {});
 
@@ -2347,29 +2812,62 @@ export class CsiOperatorApp {
                   </div>
                 `;
               }).join('')}
+              ${multiTargetDiagnosticActive ? multiTargetDiagnosticPoints.map((point, index) => {
+                const track = multiTargetDiagnosticCoordinates[index] || {};
+                const trackLabel = track.source === 'production' ? 'prod' : (track.source || `#${index + 1}`);
+                const trackConf = track.trackConfidence != null ? `${Math.round(track.trackConfidence * 100)}%` : '';
+                return `
+                <div class="garage-map__candidate-target garage-map__candidate-target--${track.source === 'production' ? 'prod' : 'shadow'}" style="left:${point.left}%;top:${point.top}%" title="${escapeHtml(track.id || '')} ${escapeHtml(track.trackClass || '')} ${trackConf}">
+                  <span class="garage-map__candidate-core"></span>
+                  <small>${escapeHtml(trackLabel)}</small>
+                </div>`;
+              }).join('') : ''}
               ${ambiguity.active ? `
                 <div class="garage-map__ambiguity-card">
                   <strong>${escapeHtml(ambiguity.headline || 'несколько людей / позиция неоднозначна')}</strong>
                   <span>${escapeHtml(ambiguity.detail || 'single-target marker скрыт, raw координата остаётся только диагностикой')}</span>
                 </div>
+              ` : multiTargetDiagnosticActive ? `
+                <div class="garage-map__presence-card garage-map__presence-card--mp-estimator">
+                  <strong>${escapeHtml(mpState === 'multi'
+                    ? `${mpEstimate.personCountEstimate || mpTracks.length} диагностические цели (runtime estimator)`
+                    : `multi-person unresolved — точное разделение невозможно`)}</strong>
+                  <span>${escapeHtml(mpState === 'multi'
+                    ? `Runtime estimator оценил ${mpEstimate.personCountEstimate || '?'} человек (уверенность ${Math.round(mpConfidence * 100)}%). Это диагностические candidate-цели из runtime signals, не confirmed targets.`
+                    : `Есть признаки нескольких людей (${Math.round(mpConfidence * 100)}%), но exact separation не resolved. ${mpEstimate.estimatorReasons?.join(', ') || ''}`)}</span>
+                </div>
               ` : currentPoint ? `
-                <div class="garage-map__object" style="left:${currentPoint.left}%;top:${currentPoint.top}%">
+                <div class="garage-map__object ${activeCoordinate ? '' : 'garage-map__object--diagnostic'}" style="left:${currentPoint.left}%;top:${currentPoint.top}%">
                   <span class="garage-map__object-core"></span>
                 </div>
-              ` : '<div class="garage-map__empty">Motion-runtime сейчас не видит свежего движения. Диагностическая static-координата не показывается как live-объект.</div>'}
+                ${shadowPresenceDetected ? `
+                  <div class="garage-map__presence-card">
+                    <strong>${escapeHtml(shadowPresenceHeadline)}</strong>
+                    <span>${escapeHtml(shadowPresenceDetail)}</span>
+                  </div>
+                ` : ''}
+              ` : `
+                <div class="garage-map__empty">Motion-runtime сейчас не видит свежего движения. Диагностическая static-координата не показывается как live-объект.</div>
+                ${shadowPresenceDetected ? `
+                  <div class="garage-map__presence-card">
+                    <strong>${escapeHtml(shadowPresenceHeadline)}</strong>
+                    <span>${escapeHtml(shadowPresenceDetail)}</span>
+                  </div>
+                ` : ''}
+              `}
             </div>
             <div class="garage-map__summary">
               <div class="garage-map__metric">
                 <span>Текущая зона</span>
-                <strong>${escapeHtml(displayToken(signalMapZoneLabel))}</strong>
+                <strong>${escapeHtml(displayMaybeToken(signalMapZoneLabel))}</strong>
               </div>
               <div class="garage-map__metric">
                 <span>Координата</span>
-                <strong>${escapeHtml(formatNumber(coordinate.xCm, 1))} / ${escapeHtml(formatNumber(coordinate.yCm, 1))} см</strong>
+                <strong>${escapeHtml(formatNumber(displayCoordinateXcm, 1))} / ${escapeHtml(formatNumber(displayCoordinateYcm, 1))} см</strong>
               </div>
               <div class="garage-map__metric">
                 <span>Источник</span>
-                <strong>${escapeHtml(getCoordinateSourceText(coordinate))}</strong>
+                <strong>${escapeHtml(displayCoordinateSource)}</strong>
               </div>
               <div class="garage-map__metric">
                 <span>Режим карты</span>
@@ -2396,6 +2894,32 @@ export class CsiOperatorApp {
             `).join('')}
           </div>
         </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Multi-person runtime estimator</div>
+          <div class="panel__headline mp-estimator-state mp-estimator-state--${mpState}">${escapeHtml(mpState === 'single' ? 'один человек' : mpState === 'multi' ? `${mpEstimate.personCountEstimate || '?'} человек (diagnostic)` : 'multi-person unresolved')}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Состояние</span><strong>${escapeHtml(mpState)}</strong></div>
+            <div class="kv"><span>Уверенность</span><strong>${escapeHtml(String(Math.round(mpConfidence * 100)))}%</strong></div>
+            <div class="kv"><span>Оценка кол-ва</span><strong>${escapeHtml(String(mpEstimate.personCountEstimate || 1))}</strong></div>
+            <div class="kv"><span>Треков</span><strong>${escapeHtml(String(mpTracks.length))}</strong></div>
+            <div class="kv"><span>Источник</span><strong>${escapeHtml(mpEstimate.estimatorSource || 'unknown')}</strong></div>
+            <div class="kv"><span>Причины</span><strong>${escapeHtml((mpEstimate.estimatorReasons || []).join(', ') || 'нет')}</strong></div>
+            <div class="kv"><span>Recording hint</span><strong>${escapeHtml(String(mpEstimate.recordingHint || 0))}</strong></div>
+          </div>
+          ${mpTracks.length > 0 ? `
+            <div class="diagnostic-grid" style="margin-top: 8px">
+              ${mpTracks.map((track) => `
+                <div class="diagnostic-card ${track.source === 'production' ? 'tone-ok' : 'tone-info'}">
+                  <span>${escapeHtml(track.id)}</span>
+                  <strong>${escapeHtml(track.class || 'unknown')} (${escapeHtml(track.source)})</strong>
+                  <small>x=${escapeHtml(String(track.x))} y=${escapeHtml(String(track.y))} zone=${escapeHtml(track.zone)} conf=${escapeHtml(String(Math.round((track.confidence || 0) * 100)))}%</small>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          <div class="panel__footer">Это диагностический runtime estimator. Использует координатный spread, class disagreement между production и shadow, и motion confidence. Это не confirmed targets — не заменяет production single-target path.</div>
+        </article>
       </div>
 
       <article class="panel">
@@ -2420,15 +2944,27 @@ export class CsiOperatorApp {
     const truth = AGENT7_OPERATOR_TRUTH;
     const primaryRuntime = this.snapshot?.live?.primaryRuntime || {};
     const trackBShadow = this.snapshot?.live?.trackBShadow || {};
+    const v15Shadow = this.snapshot?.live?.v8Shadow || this.snapshot?.live?.v7Shadow || this.snapshot?.live?.v15Shadow || {};
+    const garageRatioV2Shadow = this.snapshot?.live?.garageRatioV2Shadow || {};
     const runtimeModels = this.snapshot?.runtimeModels || {};
     const models = Array.isArray(runtimeModels.items) ? runtimeModels.items : [];
     const trackAConnected = Boolean(primaryRuntime.running && primaryRuntime.modelLoaded);
     const selectedRuntimeView = this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
       ? UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-      : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
+      : this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.V15
+        ? UI_RUNTIME_VIEW_OPTIONS.V15
+        : this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
+          ? UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
+        : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
     const trackBHeadline = trackBShadow.predictedClass
       ? String(trackBShadow.predictedClass).toLowerCase()
       : (trackBShadow.status || 'unknown');
+    const v15Headline = v15Shadow.predictedClass
+      ? String(v15Shadow.predictedClass).toLowerCase()
+      : (v15Shadow.status || 'unknown');
+    const garageV2Headline = garageRatioV2Shadow.predictedZone
+      ? String(garageRatioV2Shadow.predictedZone).toLowerCase()
+      : (garageRatioV2Shadow.status || 'unknown');
     const catalogSummary = runtimeModels.loading
       ? UI_LOCALE.models.loading
       : (runtimeModels.actionError || runtimeModels.error)
@@ -2462,6 +2998,66 @@ export class CsiOperatorApp {
             <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
           </div>
           <div class="panel__footer">Этот кандидат уже подключён в runtime для тестов, но не участвует в production routing и не появляется в selector каталога Track A-моделей.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">V8 canonical candidate</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(v15Headline))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v15Shadow.status || 'unknown'))} / ${escapeHtml(v15Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Режим</span><strong>shadow-only / test view</strong></div>
+            <div class="kv"><span>Архитектура</span><strong>warehouse-bound HGB + F2 spectral, seq_len=7</strong></div>
+            <div class="kv"><span>Последний класс</span><strong>${escapeHtml(displayMaybeToken(v15Headline))}</strong></div>
+            <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v15Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v15Shadow.warmupRemaining))} до ready</strong></div>
+            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+          </div>
+          <div class="panel__footer">Именно этот кандидат сейчас нужен для полевого теста. Он уже живёт в runtime shadow и показывается в UI отдельно от Track A selector.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Garage Ratio V3 candidate</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(garageV2Headline))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(garageRatioV2Shadow.status || 'unknown'))} / ${escapeHtml(garageRatioV2Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Режим</span><strong>shadow-only / garage zoning</strong></div>
+            <div class="kv"><span>Архитектура</span><strong>ratio RF-500 + V5 door rescue + causal smooth k=7</strong></div>
+            <div class="kv"><span>Последняя зона</span><strong>${escapeHtml(displayMaybeToken(garageV2Headline))}</strong></div>
+            <div class="kv"><span>Raw → final</span><strong>${escapeHtml(displayMaybeToken(garageRatioV2Shadow.rawPredictedZone || 'unknown'))} → ${escapeHtml(displayMaybeToken(garageV2Headline))}</strong></div>
+            <div class="kv"><span>Door / Center / Deep</span><strong>${escapeHtml(formatPercent(garageRatioV2Shadow.doorProbability, 0))} / ${escapeHtml(formatPercent(garageRatioV2Shadow.centerProbability, 0))} / ${escapeHtml(formatPercent(garageRatioV2Shadow.deepProbability, 0))}</strong></div>
+            <div class="kv"><span>Door rescue</span><strong>${garageRatioV2Shadow.doorRescueApplied ? 'сработал' : 'нет'}</strong></div>
+            <div class="kv"><span>Smoothing</span><strong>${garageRatioV2Shadow.smoothingApplied ? 'применено' : 'не меняло решение'} / ${escapeHtml(formatNumber(garageRatioV2Shadow.smoothingCount))} из ${escapeHtml(formatNumber(garageRatioV2Shadow.smoothingWindow))}</strong></div>
+            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(garageRatioV2Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+          </div>
+          <div class="panel__footer">Это текущий лучший гаражный shadow-кандидат. В рантайме он сглаживается только causal-majority по последним окнам и не меняет production routing Track A / V5.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Zone Calibration (shadow-only)</div>
+          <div class="panel__headline">${escapeHtml((() => {
+            const zc = this.snapshot?.live?.zoneCalibrationShadow || {};
+            if (zc.calibrated && zc.zone && zc.zone !== 'unknown') return zc.zone;
+            if (zc.status === 'calibrating') return 'калибровка...';
+            if (zc.status === 'rejected') return 'отклонено';
+            return 'не откалибровано';
+          })())}</div>
+          <div class="kv-list">
+            ${(() => {
+              const zc = this.snapshot?.live?.zoneCalibrationShadow || {};
+              return `
+                <div class="kv"><span>Статус</span><strong>${escapeHtml(zc.status || 'not_calibrated')}</strong></div>
+                <div class="kv"><span>Режим</span><strong>shadow-only / NearestCentroid</strong></div>
+                <div class="kv"><span>Откалибровано</span><strong>${zc.calibrated ? 'да' : 'нет'}${zc.stale ? ' (устарело)' : ''}</strong></div>
+                <div class="kv"><span>Зоны</span><strong>${(zc.zonesCalibrated || []).join(', ') || 'нет'}</strong></div>
+                <div class="kv"><span>Качество</span><strong>${escapeHtml(zc.calibrationQuality || 'не определено')}</strong></div>
+                <div class="kv"><span>Зона (raw → smooth)</span><strong>${escapeHtml(zc.zoneRaw || 'unknown')} → ${escapeHtml(zc.zone || 'unknown')}</strong></div>
+                <div class="kv"><span>Confidence</span><strong>${zc.confidence != null ? formatNumber(zc.confidence, 2) : 'нет'}${zc.lowConfidence ? ' (низкая)' : ''}</strong></div>
+                <div class="kv"><span>Smoothing k=5</span><strong>${zc.smoothed ? 'применено' : 'не меняло решение'}</strong></div>
+                <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(zc.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+                ${zc.rejectionReason ? `<div class="kv"><span>Причина отклонения</span><strong>${escapeHtml(zc.rejectionReason)}</strong></div>` : ''}
+              `;
+            })()}
+          </div>
+          <div class="panel__footer">Per-session NearestCentroid калибровка. 45 секунд (door 15с + center 15с + deep 15с). Shadow-only — никак не влияет на V5 production.</div>
         </article>
 
         <article class="panel">
@@ -2514,9 +3110,33 @@ export class CsiOperatorApp {
           >
             Track B / test
           </button>
+          <button
+            type="button"
+            class="capture-pack__button ${selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V15 ? 'capture-pack__button--primary' : 'capture-pack__button--ghost'}"
+            data-action="select-ui-runtime-view"
+            data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.V15}"
+          >
+            V8 / test
+          </button>
+          <button
+            type="button"
+            class="capture-pack__button ${selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2 ? 'capture-pack__button--primary' : 'capture-pack__button--ghost'}"
+            data-action="select-ui-runtime-view"
+            data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2}"
+          >
+            Garage V3 / test
+          </button>
         </div>
         <div class="panel__footer">
-          Сейчас выбран <strong>${escapeHtml(selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B ? 'Track B v1 candidate' : 'Track A production')}</strong>.
+          Сейчас выбран <strong>${escapeHtml(
+            selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
+              ? 'Track B v1 candidate'
+              : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V15
+                ? 'V8 F2-spectral canonical candidate'
+                : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
+                  ? 'Garage Ratio V3 candidate'
+                : 'Track A production'
+          )}</strong>.
           Это меняет только UI runtime-view для теста; backend production routing остаётся на Track A v5.
         </div>
       </article>
@@ -2557,7 +3177,7 @@ export class CsiOperatorApp {
             ${escapeHtml(UI_LOCALE.models.refresh)}
           </button>
         </div>
-        <div class="panel__footer">${escapeHtml(catalogSummary)} Track B v1 сюда не входит: этот selector управляет только Track A-compatible runtime bundles.</div>
+        <div class="panel__footer">${escapeHtml(catalogSummary)} Track B и V8 сюда не входят: этот selector управляет только Track A-compatible runtime bundles и не должен подменять shadow/test candidates.</div>
         ${models.length ? `
           <div class="runtime-model-grid">
             ${models.map((item) => {
@@ -3487,6 +4107,7 @@ export class CsiOperatorApp {
     const manual = recording.manual || {};
     const teacherSource = getTeacherSourceSelection(recording);
     const preflight = recording.preflight || {};
+    const startupSignalGuard = getStartupSignalGuard(recording);
     const nodeEntries = Array.isArray(preflight.nodes)
       ? preflight.nodes
       : Object.entries(preflight.nodes || {}).map(([name, item]) => ({
@@ -3679,6 +4300,7 @@ export class CsiOperatorApp {
           ${manualActive ? renderStatusPill(UI_LOCALE.capture.manualActive, 'risk') : ''}
           ${guidedActive ? renderStatusPill('guided-пакет активен', 'warn') : ''}
           ${freeformActive ? renderStatusPill('freeform-режим активен', 'warn') : ''}
+          ${renderStatusPill(getStartupSignalGuardLabel(startupSignalGuard), getStartupSignalGuardTone(startupSignalGuard))}
           ${recording.preflightLoading ? renderStatusPill(UI_LOCALE.capture.preflightRunning, 'info') : ''}
           ${recording.preflightError ? renderStatusPill(recording.preflightError, 'risk') : ''}
           ${preflight.ok ? renderStatusPill(UI_LOCALE.capture.preflightReady, 'ok') : ''}
@@ -3723,6 +4345,8 @@ export class CsiOperatorApp {
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.videoReady)}</span><strong>${escapeHtml(videoChecked ? formatBoolean(videoReady) : UI_LOCALE.common.optional)}</strong></div>
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.operationalReady)}</span><strong>${escapeHtml(formatBoolean(preflight.ok))}</strong></div>
               <div class="kv"><span>PPS</span><strong>${escapeHtml(manualActive ? `${formatNumber(status.chunk_pps, 1)} pps` : 'ещё не пишет')}</strong></div>
+              <div class="kv"><span>Guard</span><strong>${escapeHtml(getStartupSignalGuardLabel(startupSignalGuard))}</strong></div>
+              <div class="kv"><span>Guard fact</span><strong>${escapeHtml(`${formatNumber(startupSignalGuard.metrics.activeCoreNodes ?? 0)} nodes / ${formatNumber(startupSignalGuard.metrics.packets ?? 0)} packets / ${formatNumber(startupSignalGuard.metrics.pps, 1)} pps`)}</strong></div>
             </div>
           </article>
         </div>
@@ -3734,6 +4358,8 @@ export class CsiOperatorApp {
     const freeform = recording.freeform || {};
     const teacherSource = getTeacherSourceSelection(recording);
     const lastSummary = freeform.lastSummary || null;
+    const startupSignalGuard = getStartupSignalGuard(recording);
+    const stopResult = getRecordingStopResult(recording);
     const canonical = getCanonicalRecordingState(this.snapshot);
     const preflight = canonical.preflight || {};
     const status = recording.status || {};
@@ -3796,6 +4422,15 @@ export class CsiOperatorApp {
     const blockReasons = recording.actionError
       ? [recording.actionError, ...canonical.blockReasons.filter((item) => item !== recording.actionError)]
       : canonical.blockReasons;
+    const deadOnStartBanner = stopResult?.deadOnStart
+      ? `
+        <div class="empty-state empty-state--error">
+          <strong>csi_dead_on_start</strong><br>
+          ${escapeHtml(stopResult.message || 'CSI сигнал не пошёл. Запись остановлена.')}<br>
+          Guard: ${escapeHtml(getStartupSignalGuardLabel(startupSignalGuard))}
+        </div>
+      `
+      : '';
 
     return `
       <div class="manual-recorder freeform-recorder canonical-recorder">
@@ -3814,6 +4449,7 @@ export class CsiOperatorApp {
           ${legacyFreeformActive ? renderStatusPill('legacy freeform без video', 'risk') : ''}
           ${guidedActive ? renderStatusPill('legacy guided активен', 'warn') : ''}
           ${manualActive && !legacyFreeformActive ? renderStatusPill('ручной режим активен', 'warn') : ''}
+          ${renderStatusPill(getStartupSignalGuardLabel(startupSignalGuard), getStartupSignalGuardTone(startupSignalGuard))}
           ${recording.preflightLoading ? renderStatusPill(UI_LOCALE.capture.preflightRunning, 'info') : ''}
         </div>
 
@@ -3836,7 +4472,7 @@ export class CsiOperatorApp {
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.nodesReady)}</span><strong>${escapeHtml(`${canonical.readyNodes}/${canonical.totalNodes}`)}</strong></div>
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.videoReady)}</span><strong>${escapeHtml(canonical.videoChecked ? formatBoolean(canonical.videoAvailable) : 'ожидает явную проверку')}</strong></div>
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.operationalReady)}</span><strong>${escapeHtml(canonical.videoChecked ? formatBoolean(Boolean(preflight.ok && canonical.videoAvailable)) : 'нет')}</strong></div>
-              <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.freeformNodesActive)}</span><strong>${escapeHtml(freeformActive ? `${activeNodes}/4` : `${canonical.readyNodes}/${canonical.totalNodes}`)}</strong></div>
+              <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.freeformNodesActive)}</span><strong>${escapeHtml(freeformActive ? `${activeNodes}/${Math.max(activeNodes, DEFAULT_VISIBLE_NODE_COUNT)}` : `${canonical.readyNodes}/${canonical.totalNodes}`)}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(recording.preflightError || preflight.error || (preflight.ok ? 'Preflight подтвердил узлы и video-backed teacher source.' : 'Без preflight start остаётся заблокирован.'))}</div>
           </article>
@@ -3847,7 +4483,7 @@ export class CsiOperatorApp {
               <div class="kv"><span>Статус</span><strong>${escapeHtml(truthStateText)}</strong></div>
               <div class="kv"><span>Live trust</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.trust?.label || 'unknown'))}</strong></div>
               <div class="kv"><span>Support context</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.supportPath?.contextValidity || 'unknown'))}</strong></div>
-              <div class="kv"><span>Активные источники</span><strong>${escapeHtml(`${Math.max(Number(this.snapshot?.live?.topology?.sourceCount) || 0, freeformActive ? activeNodes : canonical.readyNodes)}/4`)}</strong></div>
+              <div class="kv"><span>Активные источники</span><strong>${escapeHtml(`${Math.max(Number(this.snapshot?.live?.topology?.sourceCount) || 0, freeformActive ? activeNodes : canonical.readyNodes)}/${Math.max(Number(this.snapshot?.live?.topology?.sourceCount) || 0, freeformActive ? activeNodes : canonical.readyNodes, DEFAULT_VISIBLE_NODE_COUNT)}`)}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(canonical.truth.summary)}</div>
           </article>
@@ -3862,7 +4498,22 @@ export class CsiOperatorApp {
             </div>
             <div class="panel__footer">${escapeHtml(freeformActive ? 'Во время active session truth-layer отслеживается отдельно и больше не считается автоматически валидным.' : 'Канонический start открывается только после честного preflight и teacher source check.')}</div>
           </article>
+
+          <article class="panel">
+            <div class="panel__eyebrow">Post-start CSI guard</div>
+            <div class="kv-list">
+              <div class="kv"><span>Статус</span><strong>${escapeHtml(getStartupSignalGuardLabel(startupSignalGuard))}</strong></div>
+              <div class="kv"><span>Grace</span><strong>${escapeHtml(formatDurationCompact(startupSignalGuard.thresholds.graceSec))}</strong></div>
+              <div class="kv"><span>Min nodes</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minActiveCoreNodes))}</strong></div>
+              <div class="kv"><span>Min packets</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPackets))}</strong></div>
+              <div class="kv"><span>Min pps</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPps, 1))} pps</strong></div>
+              <div class="kv"><span>Факт</span><strong>${escapeHtml(`${formatNumber(startupSignalGuard.metrics.activeCoreNodes ?? 0)} nodes / ${formatNumber(startupSignalGuard.metrics.packets ?? 0)} packets / ${formatNumber(startupSignalGuard.metrics.pps, 1)} pps`)}</strong></div>
+            </div>
+            <div class="panel__footer">${escapeHtml(startupSignalGuard.reason)}</div>
+          </article>
         </div>
+
+        ${deadOnStartBanner}
 
         <div class="manual-recorder__grid">
           <label class="manual-recorder__field">
@@ -4112,7 +4763,7 @@ export class CsiOperatorApp {
                 <div class="capture-pack-grid">
                   ${GUIDED_CAPTURE_PACKS.map((pack) => this.renderGuidedCapturePackCard(pack, recording)).join('')}
                 </div>
-                ${recording.actionError ? `<div class="empty-state empty-state--error">${escapeHtml(recording.actionError)}</div>` : ''}
+        ${recording.actionError ? `<div class="empty-state empty-state--error">${escapeHtml(recording.actionError)}</div>` : ''}
               </article>
 
               <article class="panel panel--capture">

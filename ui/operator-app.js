@@ -1,4 +1,4 @@
-import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260321-track-b-shadow-ui-03';
+import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260326-stabilize-01';
 
 let appInstance = null;
 let hashListener = null;

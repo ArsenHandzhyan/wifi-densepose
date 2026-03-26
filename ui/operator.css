@@ -683,7 +683,7 @@ body.operator-body {
   position: relative;
   width: min(100%, 520px);
   min-height: 360px;
-  aspect-ratio: 4.3 / 7.5;
+  aspect-ratio: 3 / 7;
   margin: 0 auto;
   border-radius: 28px;
   border: 1px solid rgba(83, 212, 255, 0.18);
@@ -796,9 +796,16 @@ body.operator-body {
 
 .garage-map__door,
 .garage-map__sensor,
+.garage-map__candidate-target {
+  position: absolute;
+  transform: translate(-50%, -50%);
+}
+
 .garage-map__object {
   position: absolute;
   transform: translate(-50%, -50%);
+  transition: left 0.85s cubic-bezier(0.25, 0.1, 0.25, 1), top 0.85s cubic-bezier(0.25, 0.1, 0.25, 1);
+  will-change: left, top;
 }
 
 .garage-map__door {
@@ -840,6 +847,11 @@ body.operator-body {
   box-shadow: 0 0 0 10px rgba(83, 212, 255, 0.08);
 }
 
+.garage-map__object--diagnostic {
+  background: rgba(var(--color-warning-rgb), 0.16);
+  box-shadow: 0 0 0 10px rgba(var(--color-warning-rgb), 0.08);
+}
+
 .garage-map__object-core {
   display: block;
   width: 12px;
@@ -849,6 +861,64 @@ body.operator-body {
   background: var(--operator-accent);
   box-shadow: 0 0 18px rgba(83, 212, 255, 0.8);
 }
+
+.garage-map__object--diagnostic .garage-map__object-core {
+  background: var(--color-warning);
+  box-shadow: 0 0 18px rgba(var(--color-warning-rgb), 0.72);
+}
+
+.garage-map__candidate-target {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 196, 118, 0.16);
+  box-shadow: 0 0 0 8px rgba(255, 196, 118, 0.08);
+  transition: left 0.85s cubic-bezier(0.25, 0.1, 0.25, 1), top 0.85s cubic-bezier(0.25, 0.1, 0.25, 1);
+  will-change: left, top;
+}
+
+.garage-map__candidate-core {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 5px;
+  border-radius: 50%;
+  background: #ffd287;
+  box-shadow: 0 0 14px rgba(255, 210, 135, 0.7);
+}
+
+.garage-map__candidate-target small {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  transform: translateX(-50%);
+  color: #ffd287;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.garage-map__candidate-target--prod .garage-map__candidate-core {
+  background: var(--color-accent, #53d4ff);
+  box-shadow: 0 0 14px rgba(83, 212, 255, 0.7);
+}
+.garage-map__candidate-target--prod small {
+  color: var(--color-accent, #53d4ff);
+}
+
+.garage-map__candidate-target--shadow .garage-map__candidate-core {
+  background: #ffd287;
+  box-shadow: 0 0 14px rgba(255, 210, 135, 0.7);
+}
+
+.garage-map__presence-card--mp-estimator {
+  border-left: 3px solid var(--color-warning, #ffc476);
+}
+
+.mp-estimator-state { font-size: 1.15em; }
+.mp-estimator-state--single { color: var(--color-success, #56f39a); }
+.mp-estimator-state--multi { color: var(--color-warning, #ffc476); }
+.mp-estimator-state--unresolved { color: var(--color-danger, #ff6b6b); }
 
 .garage-map__empty {
   position: absolute;
@@ -890,6 +960,38 @@ body.operator-body {
   margin-top: 8px;
   color: var(--operator-text-muted);
   font-size: 13px;
+}
+
+.garage-map__presence-card {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  right: 8px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--color-warning-rgb), 0.30);
+  background: rgba(18, 26, 35, 0.82);
+  backdrop-filter: blur(6px);
+  color: var(--operator-text);
+  line-height: 1.3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  z-index: 5;
+  pointer-events: none;
+}
+
+.garage-map__presence-card strong {
+  display: inline;
+  color: var(--color-warning);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.garage-map__presence-card span {
+  display: inline;
+  margin-left: 6px;
+  color: var(--operator-text-muted);
+  font-size: 11px;
 }
 
 .garage-map__summary {

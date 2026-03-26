@@ -1,4 +1,5 @@
 import { API_CONFIG } from '../config/api.config.js';
+import { NODES as CANONICAL_GARAGE_NODES } from '../config/garage-layout-v3.js';
 import { apiService } from './api.service.js';
 import { healthService } from './health.service.js';
 import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack } from '../data/guided-capture-packs.js';
@@ -9,32 +10,44 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js';
 
-const NODE_ORDER = ['node01', 'node02', 'node03', 'node04'];
-const NODE_IP_TO_ID = {
-  '192.168.1.137': 'node01',
-  '192.168.1.117': 'node02',
-  '192.168.1.101': 'node03',
-  '192.168.1.125': 'node04'
-};
+const AUXILIARY_RUNTIME_NODES = [
+  { id: 'node06', ip: '192.168.1.77' }
+];
+const KNOWN_RUNTIME_NODES = [
+  ...CANONICAL_GARAGE_NODES.map((node) => ({ id: node.id, ip: node.ip })),
+  ...AUXILIARY_RUNTIME_NODES
+];
+const NODE_ORDER = KNOWN_RUNTIME_NODES.map((node) => node.id);
+const NODE_IP_TO_ID = Object.fromEntries(KNOWN_RUNTIME_NODES.map((node) => [node.ip, node.id]));
+const DEFAULT_VISIBLE_NODE_COUNT = Math.max(CANONICAL_GARAGE_NODES.length, 5);
 const DEFAULT_GARAGE_LAYOUT = {
-  widthMeters: 4.3,
-  heightMeters: 7.5,
-  door: { xMeters: 1.5, yMeters: 0.0 },
+  // Garage Planner v3 (2026-03-26): 3×7m, single door 2.4m at bottom.
+  // Backend uses center-based X: x ∈ [-1.5, +1.5]. Y: 0=door, 7=deep end.
+  widthMeters: 3.0,
+  heightMeters: 7.0,
+  door: { xMeters: 0.0, yMeters: 0.0 },
   zones: {
-    doorMaxY: 1.5,
+    doorMaxY: 3.5,
     deepMinY: 5.0
   },
   nodes: [
-    { nodeId: 'node01', ip: '192.168.1.137', xMeters: 1.05, yMeters: 0.15, zone: 'door' },
-    { nodeId: 'node02', ip: '192.168.1.117', xMeters: -1.0, yMeters: 0.15, zone: 'door' },
-    { nodeId: 'node03', ip: '192.168.1.101', xMeters: 1.1, yMeters: 3.25, zone: 'center' },
-    { nodeId: 'node04', ip: '192.168.1.125', xMeters: -1.05, yMeters: 3.25, zone: 'center' }
+    // Center-based coords (matching backend): x = planner_x - 1.5
+    { nodeId: 'node01', ip: '192.168.1.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
+    { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
+    { nodeId: 'node05', ip: '192.168.1.33', xMeters: 0.00, yMeters: 3.50, zone: 'center' }
   ]
 };
 const CSI_ENDPOINTS = API_CONFIG?.ENDPOINTS?.CSI || {};
 const CSI_STATUS_ENDPOINT = CSI_ENDPOINTS.STATUS || '/api/v1/csi/status';
 const CSI_MODELS_ENDPOINT = CSI_ENDPOINTS.MODELS || '/api/v1/csi/models';
 const CSI_MODEL_SELECT_ENDPOINT = CSI_ENDPOINTS.MODEL_SELECT || '/api/v1/csi/model/select';
+const CSI_TTS_ENDPOINTS = CSI_ENDPOINTS.TTS || {
+  STATUS: '/api/v1/csi/tts/status',
+  SPEAK: '/api/v1/csi/tts/speak',
+  STOP: '/api/v1/csi/tts/stop'
+};
 const CSI_RECORD_ENDPOINTS = CSI_ENDPOINTS.RECORD || {
   PREFLIGHT: '/api/v1/csi/record/preflight',
   START: '/api/v1/csi/record/start',
@@ -50,6 +63,12 @@ const DEFAULT_POLLING = {
   runtimeModels: 60000,
   forensicRuns: 30000,
   recording: 2000
+};
+const STARTUP_SIGNAL_GUARD_DEFAULTS = {
+  graceSec: 6,
+  minActiveCoreNodes: 3,
+  minPackets: 20,
+  minPps: 5
 };
 const OPERATOR_PRESENCE_GATE = {
   confirmMotionWindows: 3,
@@ -71,6 +90,11 @@ const DEFAULT_PIXEL_RTSP_NAME = 'Pixel 8 Pro';
 const DEFAULT_MAC_CAMERA_DEVICE = '0';
 const DEFAULT_MAC_CAMERA_DEVICE_NAME = 'Mac Camera (device 0)';
 const DEFAULT_TEACHER_INPUT_PIXEL_FORMAT = 'nv12';
+
+function nodeOrderIndex(nodeId) {
+  const index = NODE_ORDER.indexOf(nodeId);
+  return index === -1 ? NODE_ORDER.length + 100 : index;
+}
 
 function isLocalHostname(hostname) {
   return ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
@@ -154,6 +178,90 @@ function buildFreeformStopSummary(result, recording) {
     personCount: Math.max(1, Number(status.person_count || freeform.personCount) || 1),
     motionType: status.motion_type || 'free_motion',
     stoppedAt: nowIso()
+  };
+}
+
+function normalizeStartupSignalGuard(rawGuard, recordingStatus = null, lastStopResult = null) {
+  const guard = rawGuard && typeof rawGuard === 'object' ? rawGuard : {};
+  const stopReason = lastStopResult?.stopReason
+    || lastStopResult?.stop_reason
+    || lastStopResult?.reason
+    || recordingStatus?.stop_reason
+    || guard.stop_reason
+    || null;
+  const status = String(guard.status || guard.verdict || '').trim().toLowerCase();
+  const passed = Boolean(
+    guard.passed
+    || status === 'passed'
+    || status === 'pass'
+    || status === 'ready'
+    || guard.ok
+  );
+  const deadOnStart = stopReason === 'csi_dead_on_start'
+    || status === 'failed'
+    || Boolean(guard.failed);
+
+  return {
+    label: 'startup_signal_guard',
+    status: passed ? 'passed' : (deadOnStart ? 'failed' : (status || 'unknown')),
+    passed,
+    failed: deadOnStart || status === 'failed' || Boolean(guard.failed),
+    verdict: deadOnStart ? 'csi_dead_on_start' : (passed ? 'passed' : (status || 'pending')),
+    stopReason,
+    reason: guard.reason
+      || guard.message
+      || (deadOnStart
+        ? 'CSI сигнал не пошёл. Запись остановлена.'
+        : passed
+          ? 'startup guard passed'
+          : 'startup guard pending'),
+    thresholds: {
+      graceSec: safeNumber(guard.grace_sec, safeNumber(guard.graceSec, STARTUP_SIGNAL_GUARD_DEFAULTS.graceSec)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.graceSec,
+      minActiveCoreNodes: safeNumber(guard.min_active_core_nodes, safeNumber(guard.minActiveCoreNodes, STARTUP_SIGNAL_GUARD_DEFAULTS.minActiveCoreNodes)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.minActiveCoreNodes,
+      minPackets: safeNumber(guard.min_packets, safeNumber(guard.minPackets, STARTUP_SIGNAL_GUARD_DEFAULTS.minPackets)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.minPackets,
+      minPps: safeNumber(guard.min_pps, safeNumber(guard.minPps, STARTUP_SIGNAL_GUARD_DEFAULTS.minPps)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.minPps
+    },
+    metrics: {
+      activeCoreNodes: safeNumber(guard.active_core_nodes, safeNumber(guard.nodes_active, safeNumber(recordingStatus?.nodes_active))) ?? null,
+      packets: safeNumber(guard.packets, safeNumber(guard.total_packets, safeNumber(recordingStatus?.chunk_packets))) ?? null,
+      pps: safeNumber(guard.pps, safeNumber(recordingStatus?.chunk_pps)) ?? null,
+      elapsedSec: safeNumber(guard.elapsed_sec, safeNumber(recordingStatus?.elapsed_sec)) ?? null,
+      windowAgeSec: safeNumber(guard.window_age_sec, safeNumber(recordingStatus?.window_age_sec)) ?? null
+    },
+    note: guard.note
+      || guard.summary
+      || (deadOnStart
+        ? 'Auto-stop по startup_signal_guard: CSI dead on start.'
+        : passed
+          ? 'startup guard passed'
+          : 'startup guard waiting'),
+    raw: guard
+  };
+}
+
+function normalizeRecordingStopResult(result, recordingStatus = null) {
+  if (!result) {
+    return null;
+  }
+
+  const stopReason = result.stopReason
+    || result.stop_reason
+    || result.reason
+    || recordingStatus?.stop_reason
+    || null;
+  const deadOnStart = stopReason === 'csi_dead_on_start'
+    || result.session_status === 'failed'
+    || result.status === 'failed';
+
+  return {
+    ...result,
+    stopReason,
+    deadOnStart,
+    message: result.message
+      || (deadOnStart
+        ? 'CSI сигнал не пошёл. Запись остановлена.'
+        : 'Запись остановлена.'),
+    summary: result.summary || result.note || null
   };
 }
 
@@ -316,6 +424,8 @@ function buildRecordingState() {
     status: null,
     activeMode: null,
     lastStopResult: null,
+    startupSignalGuard: null,
+    stopFailure: null,
     preflight: null,
     preflightLoading: false,
     preflightError: null,
@@ -402,12 +512,9 @@ function parseTopologySignature(signature) {
 
 function normalizeGarageLayout(csiPayload) {
   const garage = csiPayload?.garage || {};
-  const widthMeters = safeNumber(garage?.width, DEFAULT_GARAGE_LAYOUT.widthMeters) || DEFAULT_GARAGE_LAYOUT.widthMeters;
-  const heightMeters = safeNumber(garage?.height, DEFAULT_GARAGE_LAYOUT.heightMeters) || DEFAULT_GARAGE_LAYOUT.heightMeters;
-  const door = {
-    xMeters: safeNumber(garage?.door?.x, DEFAULT_GARAGE_LAYOUT.door.xMeters) || DEFAULT_GARAGE_LAYOUT.door.xMeters,
-    yMeters: safeNumber(garage?.door?.y, DEFAULT_GARAGE_LAYOUT.door.yMeters) || DEFAULT_GARAGE_LAYOUT.door.yMeters
-  };
+  const widthMeters = DEFAULT_GARAGE_LAYOUT.widthMeters;
+  const heightMeters = DEFAULT_GARAGE_LAYOUT.heightMeters;
+  const door = { ...DEFAULT_GARAGE_LAYOUT.door };
   const rawNodes = Object.entries(garage?.nodes || {})
     .map(([ip, node]) => ({
       nodeId: NODE_IP_TO_ID[ip] || ip,
@@ -426,6 +533,14 @@ function normalizeGarageLayout(csiPayload) {
 
   const nodeById = new Map(DEFAULT_GARAGE_LAYOUT.nodes.map((node) => [node.nodeId, { ...node }]));
   rawNodes.forEach((node) => {
+    const canonicalNode = nodeById.get(node.nodeId);
+    if (canonicalNode) {
+      nodeById.set(node.nodeId, {
+        ...canonicalNode,
+        ip: node.ip || canonicalNode.ip
+      });
+      return;
+    }
     nodeById.set(node.nodeId, { ...node });
   });
 
@@ -434,7 +549,7 @@ function normalizeGarageLayout(csiPayload) {
     heightMeters,
     door,
     zones: { ...DEFAULT_GARAGE_LAYOUT.zones },
-    nodes: Array.from(nodeById.values()).sort((left, right) => NODE_ORDER.indexOf(left.nodeId) - NODE_ORDER.indexOf(right.nodeId))
+    nodes: Array.from(nodeById.values()).sort((left, right) => nodeOrderIndex(left.nodeId) - nodeOrderIndex(right.nodeId))
   };
 }
 
@@ -468,6 +583,7 @@ function buildOperatorPresenceEntries(csiPayload) {
     .map((entry) => ({
       t: safeNumber(entry?.t),
       motionState: entry?.motion_state || 'unknown',
+      binary: entry?.binary || 'unknown',
       xMeters: safeNumber(entry?.target_x),
       yMeters: safeNumber(entry?.target_y),
       zone: entry?.zone || 'unknown',
@@ -493,6 +609,7 @@ function buildOperatorPresenceEntries(csiPayload) {
   return [{
     t: 0,
     motionState: csiPayload?.motion_state || 'unknown',
+    binary: csiPayload?.binary || 'unknown',
     xMeters: safeNumber(csiPayload?.target_x),
     yMeters: safeNumber(csiPayload?.target_y),
     zone: csiPayload?.target_zone || 'unknown',
@@ -503,10 +620,12 @@ function buildOperatorPresenceEntries(csiPayload) {
 }
 
 function isEligibleOperatorMotion(entry) {
-  return entry?.motionState === 'MOTION_DETECTED'
-    && (safeNumber(entry?.nodesActive, 0) || 0) >= OPERATOR_PRESENCE_GATE.minNodesActive
-    && safeNumber(entry?.xMeters) != null
-    && safeNumber(entry?.yMeters) != null;
+  const hasMinNodes = (safeNumber(entry?.nodesActive, 0) || 0) >= OPERATOR_PRESENCE_GATE.minNodesActive;
+  const hasCoordinates = safeNumber(entry?.xMeters) != null && safeNumber(entry?.yMeters) != null;
+  const motionDetected = entry?.motionState === 'MOTION_DETECTED';
+  // Also accept binary=occupied (static presence) so stationary people show on map
+  const binaryOccupied = entry?.binary === 'occupied';
+  return (motionDetected || binaryOccupied) && hasMinNodes && hasCoordinates;
 }
 
 function countTrailingState(entries, state) {
@@ -542,6 +661,7 @@ function evaluateOperatorPresenceGate(csiPayload) {
   const consecutiveMotion = countTrailingState(entries, 'MOTION_DETECTED');
   const consecutiveNoMotion = countTrailingState(entries, 'NO_MOTION');
 
+  // Path 1: classic motion-based confirmation
   let confirmedRun = [];
   if (consecutiveMotion >= OPERATOR_PRESENCE_GATE.confirmMotionWindows) {
     confirmedRun = getTrailingMotionRun(entries, entries.length - 1);
@@ -549,8 +669,31 @@ function evaluateOperatorPresenceGate(csiPayload) {
     confirmedRun = getTrailingMotionRun(entries, entries.length - 2);
   }
 
-  const confirmed = confirmedRun.length >= OPERATOR_PRESENCE_GATE.confirmMotionWindows;
-  const lastConfirmedEntry = confirmed ? confirmedRun.at(-1) : null;
+  const motionConfirmed = confirmedRun.length >= OPERATOR_PRESENCE_GATE.confirmMotionWindows;
+  const lastMotionEntry = motionConfirmed ? confirmedRun.at(-1) : null;
+
+  // Path 2: binary=occupied confirmation (static presence without motion)
+  // If the model says occupied with valid coordinates, trust it after 3 consecutive windows
+  const binaryOccupied = csiPayload?.binary === 'occupied';
+  const hasCoordinates = safeNumber(csiPayload?.target_x) != null && safeNumber(csiPayload?.target_y) != null;
+  const hasMinNodes = (safeNumber(csiPayload?.nodes_active, 0) || 0) >= OPERATOR_PRESENCE_GATE.minNodesActive;
+  let consecutiveOccupied = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]?.binary === 'occupied') {
+      consecutiveOccupied++;
+    } else {
+      break;
+    }
+  }
+  const binaryConfirmed = binaryOccupied && hasCoordinates && hasMinNodes
+    && consecutiveOccupied >= OPERATOR_PRESENCE_GATE.confirmMotionWindows;
+
+  const confirmed = motionConfirmed || binaryConfirmed;
+  const lastConfirmedEntry = motionConfirmed
+    ? lastMotionEntry
+    : binaryConfirmed
+      ? entries.at(-1)
+      : null;
 
   const activeForOperator = Boolean(
     csiPayload?.running
@@ -560,12 +703,15 @@ function evaluateOperatorPresenceGate(csiPayload) {
     && lastConfirmedEntry
   );
 
+  const confirmSource = motionConfirmed ? 'motion' : binaryConfirmed ? 'binary_occupied' : 'none';
   const note = activeForOperator
-    ? `operator presence подтверждён: >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED`
-    : `operator presence скрыт до >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED`;
+    ? (confirmSource === 'motion'
+      ? `operator presence подтверждён: >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED`
+      : `operator presence подтверждён: >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд binary=occupied (static presence)`)
+    : `operator presence скрыт до >=${OPERATOR_PRESENCE_GATE.confirmMotionWindows} подряд MOTION_DETECTED или binary=occupied`;
 
   return {
-    source: 'confirmed_motion_gate',
+    source: confirmSource === 'none' ? 'confirmed_motion_gate' : `confirmed_${confirmSource}_gate`,
     confirmed: activeForOperator,
     payloadFresh,
     rawMotionState: csiPayload?.motion_state || 'unknown',
@@ -573,6 +719,7 @@ function evaluateOperatorPresenceGate(csiPayload) {
     rawCoarse: csiPayload?.coarse || 'unknown',
     consecutiveMotion,
     consecutiveNoMotion,
+    consecutiveOccupied,
     confirmThreshold: OPERATOR_PRESENCE_GATE.confirmMotionWindows,
     clearThreshold: OPERATOR_PRESENCE_GATE.clearNoMotionWindows,
     windowAgeSec: payloadWindowAgeSec,
@@ -608,6 +755,7 @@ function buildMotionRuntime(csiPayload, posePayload) {
     running: Boolean(csiPayload?.running),
     modelLoaded: Boolean(csiPayload?.model_loaded),
     nodesActive: safeNumber(csiPayload?.nodes_active),
+    totalNodes: Math.max(garage.nodes.length, DEFAULT_VISIBLE_NODE_COUNT),
     packetsInWindow: safeNumber(csiPayload?.packets_in_window),
     packetsPerSecond: safeNumber(csiPayload?.pps),
     windowAgeSec: safeNumber(csiPayload?.window_age_sec),
@@ -619,6 +767,8 @@ function buildMotionRuntime(csiPayload, posePayload) {
     modelKind: csiPayload?.model_kind || 'unknown',
     modelDefault: Boolean(csiPayload?.model_default),
     binaryThreshold: safeNumber(csiPayload?.binary_threshold),
+    binary: csiPayload?.binary || 'unknown',
+    binaryConfidence: safeNumber(csiPayload?.binary_confidence),
     history: asArray(csiPayload?.history),
     garage
   };
@@ -659,6 +809,188 @@ function buildTrackBShadowRuntime(csiPayload) {
     inferenceMs: safeNumber(shadow?.inference_ms),
     nodesWithData: safeNumber(shadow?.nodes_with_data),
     windowT: safeNumber(shadow?.t)
+  };
+}
+
+function buildV15ShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.v8_shadow || csiPayload?.v7_shadow || csiPayload?.v15_shadow || {};
+  const probabilities = shadow?.probabilities || {};
+  const predictedClass = typeof shadow?.predicted_class === 'string'
+    ? shadow.predicted_class
+    : null;
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(predictedClass);
+  const status = shadow?.status
+    || (predictedClass ? 'shadow_live' : (loaded ? 'warmup' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.v8_shadow || csiPayload?.v7_shadow || csiPayload?.v15_shadow),
+    track: shadow?.track || 'V8_shadow',
+    loaded,
+    status,
+    predictedClass,
+    binary: shadow?.binary || null,
+    probabilities,
+    emptyProbability: safeNumber(probabilities?.EMPTY),
+    staticProbability: safeNumber(probabilities?.STATIC),
+    motionProbability: safeNumber(probabilities?.MOTION),
+    binaryProbability: safeNumber(shadow?.binary_proba),
+    inferenceMs: safeNumber(shadow?.inference_ms),
+    bufferDepth: safeNumber(shadow?.buffer_depth),
+    warmupRemaining: safeNumber(shadow?.warmup_remaining),
+    warmupWindowsSeen: safeNumber(shadow?.warmup_windows_seen),
+    agreeCoarse: shadow?.agree_coarse ?? null,
+    agreeBinary: shadow?.agree_binary ?? null,
+    targetX: safeNumber(shadow?.target_x),
+    targetY: safeNumber(shadow?.target_y),
+    targetZone: shadow?.target_zone || 'unknown',
+    coordinateSource: shadow?.coordinate_source || null,
+    windowT: safeNumber(shadow?.t)
+  };
+}
+
+function buildV19ShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.v19_shadow || {};
+  const probabilities = shadow?.probabilities || {};
+  const predictedClass = typeof shadow?.predicted_class === 'string'
+    ? shadow.predicted_class
+    : null;
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(predictedClass);
+  const status = shadow?.status
+    || (predictedClass ? 'shadow_live' : (loaded ? 'warmup' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.v19_shadow),
+    track: shadow?.track || 'V19_shadow',
+    loaded,
+    status,
+    predictedClass,
+    binary: shadow?.binary || null,
+    probabilities,
+    emptyProbability: safeNumber(probabilities?.EMPTY),
+    staticProbability: safeNumber(probabilities?.STATIC),
+    motionProbability: safeNumber(probabilities?.MOTION),
+    binaryProbability: safeNumber(shadow?.binary_proba),
+    inferenceMs: safeNumber(shadow?.inference_ms),
+    bufferDepth: safeNumber(shadow?.buffer_depth),
+    warmupRemaining: safeNumber(shadow?.warmup_remaining),
+    warmupWindowsSeen: safeNumber(shadow?.warmup_windows_seen),
+    agreeCoarse: shadow?.agree_coarse ?? null,
+    agreeBinary: shadow?.agree_binary ?? null,
+    windowT: safeNumber(shadow?.t),
+    emptyGateFired: Boolean(shadow?.empty_gate_fired),
+    emptyGateState: Boolean(shadow?.empty_gate_state),
+    rawPredictedClass: shadow?.raw_predicted_class || null,
+    blAmpDevMax: safeNumber(shadow?.bl_amp_dev_max),
+    blScVarDevMax: safeNumber(shadow?.bl_sc_var_dev_max),
+    gateConsecBelow: shadow?.gate_consec_below ?? 0,
+    gateConsecAbove: shadow?.gate_consec_above ?? 0,
+  };
+}
+
+function buildGarageRatioV2ShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.garage_ratio_v3_shadow || csiPayload?.garage_ratio_v2_shadow || {};
+  const probabilities = shadow?.probabilities || {};
+  const predictedZone = typeof shadow?.target_zone === 'string'
+    ? shadow.target_zone
+    : (typeof shadow?.predicted_zone === 'string' ? shadow.predicted_zone : null);
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(predictedZone || shadow?.candidate_name);
+  const status = shadow?.status
+    || (predictedZone ? 'shadow_live' : (loaded ? 'awaiting_first_window' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.garage_ratio_v3_shadow || csiPayload?.garage_ratio_v2_shadow),
+    track: shadow?.track || 'GARAGE_RATIO_LAYER_V3_CANDIDATE',
+    candidateName: shadow?.candidate_name || 'GARAGE_RATIO_LAYER_V3_CANDIDATE',
+    loaded,
+    status,
+    predictedZone,
+    targetZone: predictedZone || 'unknown',
+    predictedIdx: safeNumber(shadow?.predicted_idx),
+    probabilities,
+    doorProbability: safeNumber(probabilities?.door),
+    centerProbability: safeNumber(probabilities?.center),
+    deepProbability: safeNumber(probabilities?.deep),
+    adjustedScores: shadow?.adjusted_scores || {},
+    inferenceMs: safeNumber(shadow?.inference_ms),
+    activeNodes: safeNumber(shadow?.active_nodes),
+    nodesWithRatio: safeNumber(shadow?.nodes_with_ratio),
+    packetsInWindow: safeNumber(shadow?.packets_in_window),
+    binary: shadow?.binary || null,
+    productionZone: shadow?.production_zone || 'unknown',
+    doorRescueApplied: Boolean(shadow?.door_rescue_applied),
+    rawPredictedZone: shadow?.raw_predicted_zone || null,
+    thresholds: shadow?.thresholds || {},
+    rescuePolicy: shadow?.v5_door_rescue || {},
+    runtimeSmoothing: shadow?.runtime_smoothing || {},
+    smoothing: shadow?.smoothing || {},
+    smoothingApplied: Boolean(shadow?.smoothing?.applied),
+    smoothingReady: Boolean(shadow?.smoothing?.ready),
+    smoothingWindow: safeNumber(shadow?.smoothing?.window),
+    smoothingCount: safeNumber(shadow?.smoothing?.count),
+    smoothingCounts: shadow?.smoothing?.counts || {},
+    topFeatures: shadow?.top_features || {},
+    nodePackets: shadow?.node_packets || {},
+    windowT: safeNumber(shadow?.t)
+  };
+}
+
+function buildZoneCalibrationShadow(csiPayload) {
+  const zc = csiPayload?.zone_calibration_shadow || {};
+  const lastPred = zc?.last_prediction || {};
+  return {
+    available: Boolean(csiPayload?.zone_calibration_shadow),
+    calibrated: Boolean(zc?.calibrated),
+    status: zc?.status || 'not_calibrated',
+    calibratingZone: zc?.calibrating_zone || null,
+    calibratedAt: zc?.calibrated_at || null,
+    calibrationQuality: zc?.calibration_quality || 'not_calibrated',
+    zonesCalibrated: Array.isArray(zc?.zones_calibrated) ? zc.zones_calibrated : [],
+    nCalWindows: zc?.n_cal_windows || {},
+    stale: Boolean(zc?.stale),
+    rejectionReason: zc?.rejection_reason || null,
+    predictionHistoryLen: safeNumber(zc?.prediction_history_len, 0),
+    // Last prediction
+    zone: lastPred?.zone || 'unknown',
+    zoneRaw: lastPred?.zone_raw || 'unknown',
+    confidence: safeNumber(lastPred?.confidence),
+    lowConfidence: Boolean(lastPred?.low_confidence),
+    distances: lastPred?.distances || {},
+    smoothed: Boolean(lastPred?.smoothed),
+    smoothingMeta: lastPred?.smoothing_meta || {},
+    inferenceMs: safeNumber(lastPred?.inference_ms),
+    calibrationStatus: lastPred?.calibration_status || zc?.status || 'not_calibrated',
+  };
+}
+
+function buildBaselineStatus(csiPayload) {
+  const bl = csiPayload?.empty_baseline || {};
+  const profiles = bl?.profiles || {};
+  const profileEntries = Object.values(profiles);
+  const firstProfile = profileEntries[0] || {};
+  return {
+    calibrated: Boolean(bl?.calibrated),
+    captureActive: Boolean(bl?.capturing),
+    calibratedAt: firstProfile?.captured_at || null,
+    windowsPerNode: safeNumber(firstProfile?.window_count),
+    nodeCount: profileEntries.length || 0,
+    nodeIps: Object.keys(profiles)
+  };
+}
+
+function buildSignalQuality(csiPayload) {
+  const sq = csiPayload?.signal_quality || {};
+  return {
+    available: Boolean(csiPayload?.signal_quality),
+    phaseJumpMax: safeNumber(sq?.phase_jump_max),
+    deadScMax: safeNumber(sq?.dead_sc_max),
+    ampDriftMax: safeNumber(sq?.amp_drift_max),
+    phaseCoherenceMean: safeNumber(sq?.phase_coherence_mean)
   };
 }
 
@@ -840,11 +1172,7 @@ function buildNodeSummary(csiPayload, posePayload, statusPayload) {
 
   return Array.from(union)
     .filter(Boolean)
-    .sort((left, right) => {
-      const leftIndex = NODE_ORDER.indexOf(left);
-      const rightIndex = NODE_ORDER.indexOf(right);
-      return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
-    })
+    .sort((left, right) => nodeOrderIndex(left) - nodeOrderIndex(right))
     .map((nodeId) => {
       if (!breakdownAvailable && aggregateNodesActive > 0) {
         const allKnownNodesActive = aggregateNodesActive >= union.size && union.size > 0;
@@ -1064,7 +1392,7 @@ function deriveTrust(csiPayload, support) {
   };
 }
 
-function buildRuntimePaths(csiPayload, metadata, support, trackBShadow) {
+function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shadow) {
   const experimentalAvailable = csiPayload && (
     (csiPayload.binary && csiPayload.binary !== 'unknown')
     || (csiPayload.coarse && csiPayload.coarse !== 'unknown')
@@ -1108,6 +1436,16 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow) {
       role: 'support_path'
     },
     {
+      label: 'V19 V23-features shadow',
+      status: v19Shadow?.loaded
+        ? (v19Shadow?.predictedClass ? 'healthy' : 'inactive')
+        : (v19Shadow?.status === 'not_loaded' ? 'failed' : 'inactive'),
+      mode: v19Shadow?.predictedClass
+        ? `shadow_${String(v19Shadow.predictedClass).toLowerCase()}`
+        : (v19Shadow?.status || 'unknown'),
+      role: 'shadow_candidate'
+    },
+    {
       label: 'Риск схлопывания',
       status: metadata?.collapse_risk_runtime_status || 'unknown',
       mode: metadata?.multi_person_collapse_risk_flag ? 'risk' : 'clear',
@@ -1116,18 +1454,24 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow) {
   ];
 }
 
-async function requestUiJson(path) {
+async function requestUiJson(path, { method = 'GET', body = null } = {}) {
   const location = typeof window !== 'undefined' ? window.location : null;
   const shouldUseLocalUiOrigin = path.startsWith('/api/agent7/')
     && location
     && isLocalHostname(location.hostname)
     && location.port !== '3000';
   const baseUrl = shouldUseLocalUiOrigin ? API_CONFIG.LOCAL_UI_URL : '';
+  const headers = {
+    Accept: 'application/json'
+  };
+  if (body !== null) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      Accept: 'application/json'
-    }
+    method,
+    headers,
+    body: body === null ? undefined : JSON.stringify(body)
   });
 
   if (!response.ok) {
@@ -1149,6 +1493,32 @@ async function requestUiJson(path) {
   return response.json();
 }
 
+function buildMultiPersonEstimate(csiPayload) {
+  const mpe = csiPayload?.multi_person_estimate || {};
+  const tracks = Array.isArray(mpe.diagnostic_tracks) ? mpe.diagnostic_tracks : [];
+  return {
+    personCountEstimate: Number(mpe.person_count_estimate) || 1,
+    state: mpe.multi_person_state || 'single',
+    confidence: safeNumber(mpe.multi_person_confidence) ?? 0,
+    diagnosticTracks: tracks.map((t) => ({
+      id: t.id || 'unknown',
+      source: t.source || 'unknown',
+      x: safeNumber(t.x) ?? 0,
+      y: safeNumber(t.y) ?? 0,
+      zone: t.zone || 'unknown',
+      class: t.class || 'unknown',
+      confidence: safeNumber(t.confidence) ?? 0
+    })),
+    clusterCenter: mpe.diagnostic_cluster_center
+      ? { x: safeNumber(mpe.diagnostic_cluster_center.x) ?? 0, y: safeNumber(mpe.diagnostic_cluster_center.y) ?? 0 }
+      : null,
+    clusterRadius: safeNumber(mpe.diagnostic_cluster_radius) ?? 0,
+    estimatorSource: mpe.estimator_source || 'unknown',
+    estimatorReasons: Array.isArray(mpe.estimator_reasons) ? mpe.estimator_reasons : [],
+    recordingHint: Number(mpe.recording_hint) || 0
+  };
+}
+
 function normalizeSnapshot(state, service = null) {
   const csi = state.csi;
   const pose = state.pose;
@@ -1158,9 +1528,22 @@ function normalizeSnapshot(state, service = null) {
   const garageLayout = primaryRuntime.garage || normalizeGarageLayout(csi);
   const secondaryRuntime = buildExperimentalRuntime(csi);
   const trackBShadow = buildTrackBShadowRuntime(csi);
+  const v15Shadow = buildV15ShadowRuntime(csi);
+  const v19Shadow = buildV19ShadowRuntime(csi);
+  const garageRatioV2Shadow = buildGarageRatioV2ShadowRuntime(csi);
+  const zoneCalibrationShadow = buildZoneCalibrationShadow(csi);
+  const baselineStatus = buildBaselineStatus(csi);
+  const signalQuality = buildSignalQuality(csi);
   const operatorPresence = evaluateOperatorPresenceGate(csi);
   const ambiguity = deriveAmbiguityMode(csi, pose, support, operatorPresence);
   const lastMeaningfulEvent = deriveLastMeaningfulEvent(csi, pose, support, operatorPresence, ambiguity);
+  const recordingStatus = state.recording.status || {};
+  const lastStopResult = normalizeRecordingStopResult(state.recording.lastStopResult, recordingStatus);
+  const startupSignalGuard = normalizeStartupSignalGuard(
+    recordingStatus.startup_signal_guard,
+    recordingStatus,
+    lastStopResult
+  );
   const cachedRunIds = service ? Array.from(service.forensicDetailCache.keys()) : [];
   const inflightRunIds = service ? Array.from(service.forensicDetailRequests.keys()) : [];
 
@@ -1174,6 +1557,16 @@ function normalizeSnapshot(state, service = null) {
     pose,
     recording: {
       ...state.recording,
+      lastStopResult,
+      startupSignalGuard,
+      stopFailure: lastStopResult?.deadOnStart
+        ? {
+            code: 'csi_dead_on_start',
+            message: lastStopResult.message,
+            stopReason: lastStopResult.stopReason,
+            guard: startupSignalGuard
+          }
+        : null,
       teacherSource: {
         ...(state.recording.teacherSource || buildTeacherSourceState())
       },
@@ -1207,6 +1600,11 @@ function normalizeSnapshot(state, service = null) {
       primaryRuntime,
       secondaryRuntime,
       trackBShadow,
+      v7Shadow: v15Shadow,
+      v15Shadow,
+      v8Shadow: v15Shadow,
+      garageRatioV2Shadow,
+      zoneCalibrationShadow,
       operatorPresence,
       ambiguity,
       supportPath: {
@@ -1274,11 +1672,19 @@ function normalizeSnapshot(state, service = null) {
         source: metadata?.coordinate_model_source || 'unknown',
         history: buildCoordinateHistory(csi, garageLayout),
         motionHistory: buildCoordinateHistory(csi, garageLayout, { motionOnly: true }),
-        activeForMap: Boolean(operatorPresence.confirmed && ambiguity.singleTargetAllowed)
+        activeForMap: Boolean(operatorPresence.confirmed && ambiguity.singleTargetAllowed),
+        shadowXMeters: v15Shadow.targetX,
+        shadowYMeters: v15Shadow.targetY,
+        shadowTargetZone: v15Shadow.targetZone || 'unknown',
+        shadowSource: v15Shadow.coordinateSource || null
       },
       garage: garageLayout,
+      v19Shadow,
+      baselineStatus,
+      signalQuality,
       shadowDiagnostics: buildShadowDiagnostics(metadata),
-      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow)
+      multiPersonEstimate: buildMultiPersonEstimate(csi),
+      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow)
     }
   };
 }
@@ -1366,6 +1772,7 @@ export class CsiOperatorService {
   cancelGuidedSpeech() {
     this.guidedSpeechToken += 1;
     this.guidedUtterance = null;
+    this.stopServerSpeech();
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       try {
         window.speechSynthesis.cancel();
@@ -1378,12 +1785,38 @@ export class CsiOperatorService {
   cancelOperatorCue() {
     this.operatorCueToken += 1;
     this.operatorCueUtterance = null;
+    this.stopServerSpeech();
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       try {
         window.speechSynthesis.cancel();
       } catch (error) {
         console.warn('Failed to cancel operator cue:', error);
       }
+    }
+  }
+
+  stopServerSpeech() {
+    requestUiJson(CSI_TTS_ENDPOINTS.STOP, { method: 'POST' }).catch((error) => {
+      console.warn('Failed to stop server TTS:', error);
+    });
+  }
+
+  async speakServerPrompt(text) {
+    if (!text) {
+      return false;
+    }
+    try {
+      const payload = await requestUiJson(CSI_TTS_ENDPOINTS.SPEAK, {
+        method: 'POST',
+        body: {
+          text,
+          block: true
+        }
+      });
+      return payload?.ok === true && payload?.backend === 'elevenlabs';
+    } catch (error) {
+      console.warn('Server TTS failed, falling back to browser voice:', error);
+      return false;
     }
   }
 
@@ -1398,12 +1831,20 @@ export class CsiOperatorService {
   }
 
   async speakOperatorCue(text) {
-    if (!text || typeof window === 'undefined' || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') {
+    if (!text) {
       return false;
     }
 
     this.cancelOperatorCue();
     const token = ++this.operatorCueToken;
+
+    if (await this.speakServerPrompt(text)) {
+      return this.operatorCueToken === token;
+    }
+
+    if (typeof window === 'undefined' || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') {
+      return false;
+    }
 
     return new Promise((resolve) => {
       try {
@@ -1441,12 +1882,17 @@ export class CsiOperatorService {
     if (forceSilence || !text) {
       return;
     }
-    if (typeof window === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) {
-      return;
-    }
 
     this.cancelGuidedSpeech();
     const token = this.guidedSpeechToken;
+
+    if (await this.speakServerPrompt(text)) {
+      return;
+    }
+
+    if (typeof window === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined' || !window.speechSynthesis) {
+      return;
+    }
 
     await new Promise((resolve) => {
       const utterance = new window.SpeechSynthesisUtterance(text);
@@ -1862,6 +2308,25 @@ export class CsiOperatorService {
         force ? { _: Date.now() } : {}
       );
       this.state.recording.activeMode = inferActiveRecordingMode(this.state.recording);
+      const normalizedStopResult = normalizeRecordingStopResult(
+        this.state.recording.lastStopResult,
+        this.state.recording.status
+      );
+      this.state.recording.startupSignalGuard = normalizeStartupSignalGuard(
+        this.state.recording.status?.startup_signal_guard,
+        this.state.recording.status,
+        normalizedStopResult
+      );
+      this.state.recording.stopFailure = normalizedStopResult?.deadOnStart
+        ? {
+            code: 'csi_dead_on_start',
+            message: normalizedStopResult.message,
+            stopReason: normalizedStopResult.stopReason
+          }
+        : null;
+      if (normalizedStopResult?.deadOnStart) {
+        this.state.recording.actionError = normalizedStopResult.message;
+      }
       delete this.state.errors.recording;
     } catch (error) {
       this.state.errors.recording = error.message;
@@ -1913,20 +2378,38 @@ export class CsiOperatorService {
     const activeMode = inferActiveRecordingMode(recording) || recording.activeMode;
     const shouldSpeakFreeformStop = activeMode === 'freeform' && recording.freeform?.voiceCue !== false;
     const result = await apiService.post(CSI_RECORD_ENDPOINTS.STOP, {});
+    const normalizedStopResult = normalizeRecordingStopResult(result, this.state.recording.status);
+    const deadOnStart = Boolean(normalizedStopResult?.deadOnStart);
     this.state.recording.status = {
       recording: false,
-      preflight: this.state.recording.preflight
+      preflight: this.state.recording.preflight,
+      startup_signal_guard: this.state.recording.status?.startup_signal_guard || null
     };
     this.state.recording.activeMode = null;
-    this.state.recording.lastStopResult = result;
+    this.state.recording.lastStopResult = normalizedStopResult;
+    this.state.recording.startupSignalGuard = normalizeStartupSignalGuard(
+      this.state.recording.status.startup_signal_guard,
+      this.state.recording.status,
+      normalizedStopResult
+    );
+    this.state.recording.stopFailure = deadOnStart
+      ? {
+          code: 'csi_dead_on_start',
+          message: normalizedStopResult.message,
+          stopReason: normalizedStopResult.stopReason
+        }
+      : null;
+    this.state.recording.actionError = deadOnStart ? normalizedStopResult.message : null;
     if (activeMode === 'freeform') {
-      this.state.recording.freeform.lastSummary = buildFreeformStopSummary(result, recording);
+      this.state.recording.freeform.lastSummary = buildFreeformStopSummary(normalizedStopResult, recording);
     }
     this.emit();
-    if (shouldSpeakFreeformStop) {
+    if (deadOnStart) {
+      void this.speakOperatorCue(normalizedStopResult.message || 'CSI сигнал не пошёл. Запись остановлена.');
+    } else if (shouldSpeakFreeformStop) {
       void this.speakOperatorCue('Запись остановлена');
     }
-    return result;
+    return normalizedStopResult;
   }
 
   async startManualRecording() {
@@ -1995,6 +2478,8 @@ export class CsiOperatorService {
       recording.manual.notes = notes;
       recording.activeMode = 'manual';
       recording.lastStopResult = null;
+      recording.stopFailure = null;
+      recording.startupSignalGuard = null;
       await this.refreshRecordingStatus(true);
       return { ok: true, payload };
     } catch (error) {
@@ -2078,6 +2563,8 @@ export class CsiOperatorService {
       recording.freeform.lastSummary = null;
       recording.activeMode = 'freeform';
       recording.lastStopResult = null;
+      recording.stopFailure = null;
+      recording.startupSignalGuard = null;
       await this.refreshRecordingStatus(true);
       if (freeform.voiceCue !== false) {
         void this.speakOperatorCue('Запись началась');

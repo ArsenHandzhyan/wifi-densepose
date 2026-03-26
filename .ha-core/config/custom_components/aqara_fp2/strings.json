@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Aqara FP2 Cloud",
+        "description": "Enter your Aqara developer credentials and device ID",
+        "data": {
+          "region": "Region",
+          "access_token": "Access Token",
+          "refresh_token": "Refresh Token (optional)",
+          "device_id": "Device ID (did)"
+        }
+      }
+    },
+    "error": {
+      "access_token_required": "Access token is required",
+      "device_id_required": "Device ID is required"
+    },
+    "abort": {
+      "already_configured": "This device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Aqara FP2 Options",
+        "data": {
+          "region": "Region",
+          "access_token": "Access Token (leave empty to keep current)",
+          "refresh_token": "Refresh Token (leave empty to keep current)"
+        }
+      }
+    }
+  }
+}

@@ -73,7 +73,7 @@ const CSI_RECORD_ENDPOINTS = CSI_ENDPOINTS.RECORD || {
   STATUS: '/api/v1/csi/record/status'
 };
 const DEFAULT_POLLING = {
-  csi: 1000,
+  csi: 500,
   pose: 1000,
   status: 15000,
   metrics: 10000,
@@ -125,6 +125,30 @@ function asArray(value) {
 
 function safeNumber(value, fallback = null) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function getTopProbability(probabilities) {
+  if (!probabilities || typeof probabilities !== 'object') {
+    return { label: null, confidence: null };
+  }
+
+  let topLabel = null;
+  let topConfidence = null;
+  for (const [label, value] of Object.entries(probabilities)) {
+    const confidence = safeNumber(value);
+    if (confidence == null) {
+      continue;
+    }
+    if (topConfidence == null || confidence > topConfidence) {
+      topLabel = label;
+      topConfidence = confidence;
+    }
+  }
+
+  return {
+    label: topLabel,
+    confidence: topConfidence
+  };
 }
 
 function clamp(value, min, max) {
@@ -842,6 +866,8 @@ function buildServiceCards(statusPayload) {
 
 function buildMotionRuntime(csiPayload, posePayload) {
   const garage = normalizeGarageLayout(csiPayload);
+  const zoneProbabilities = csiPayload?.zone_probabilities || null;
+  const zoneTop = getTopProbability(zoneProbabilities);
   return {
     state: csiPayload?.motion_state || posePayload?.motion_state || 'unknown',
     confidence: safeNumber(csiPayload?.motion_confidence),
@@ -853,7 +879,9 @@ function buildMotionRuntime(csiPayload, posePayload) {
     packetsPerSecond: safeNumber(csiPayload?.pps),
     windowAgeSec: safeNumber(csiPayload?.window_age_sec),
     targetZone: csiPayload?.target_zone || 'unknown',
-    zoneProbabilities: csiPayload?.zone_probabilities || null,
+    zoneProbabilities,
+    zoneConfidence: zoneTop.confidence,
+    zoneTopLabel: zoneTop.label,
     zoneModel: csiPayload?.zone_model || null,
     targetX: safeNumber(csiPayload?.target_x),
     targetY: safeNumber(csiPayload?.target_y),
@@ -875,6 +903,41 @@ function buildExperimentalRuntime(csiPayload) {
     binaryConfidence: safeNumber(csiPayload?.binary_confidence),
     coarse: csiPayload?.coarse || 'unknown',
     coarseConfidence: safeNumber(csiPayload?.coarse_confidence)
+  };
+}
+
+function buildShadowDisagreement(csiPayload, primaryRuntime = null, v27Binary7NodeShadow = null) {
+  const primaryBinary = primaryRuntime?.binary || csiPayload?.binary || 'unknown';
+  const primaryBinaryConfidence = safeNumber(primaryRuntime?.binaryConfidence, safeNumber(csiPayload?.binary_confidence));
+  const primaryZone = primaryRuntime?.targetZone || csiPayload?.target_zone || 'unknown';
+  const primaryZoneConfidence = safeNumber(primaryRuntime?.zoneConfidence);
+  const shadowBinary = v27Binary7NodeShadow?.binary
+    || csiPayload?.v26_shadow?.binary
+    || 'unknown';
+  const shadowBinaryConfidence = safeNumber(
+    v27Binary7NodeShadow?.occupiedProbability,
+    safeNumber(csiPayload?.v26_shadow?.binary_proba)
+  );
+  const shadowLoaded = Boolean(v27Binary7NodeShadow?.loaded ?? csiPayload?.v26_shadow?.loaded);
+  const binaryDisagreement = shadowBinary !== 'unknown'
+    && primaryBinary !== 'unknown'
+    && primaryBinary !== shadowBinary;
+  const summary = binaryDisagreement
+    ? `primary=${primaryBinary} vs shadow=${shadowBinary}`
+    : 'primary и shadow совпадают';
+  const tone = binaryDisagreement ? 'risk' : (shadowLoaded ? 'ok' : 'warn');
+
+  return {
+    primaryBinary,
+    primaryBinaryConfidence,
+    primaryZone,
+    primaryZoneConfidence,
+    shadowBinary,
+    shadowBinaryConfidence,
+    shadowLoaded,
+    binaryDisagreement,
+    summary,
+    tone
   };
 }
 
@@ -1005,7 +1068,7 @@ function buildV27Binary7NodeRuntime(csiPayload) {
     enabled: Boolean(csiPayload?.v26_shadow),
     sourceField: 'v26_shadow',
     track: shadow?.track || 'V26_binary_7node',
-    candidateName: 'v27_binary_7node',
+    candidateName: shadow?.candidate_name || shadow?.candidateName || shadow?.track || 'unknown_candidate',
     loaded,
     status,
     binary,
@@ -1574,7 +1637,7 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shado
       role: 'shadow_candidate'
     },
     {
-      label: 'V27 binary 7-node candidate',
+      label: v27Binary7NodeShadow?.candidateName || v27Binary7NodeShadow?.track || '7-node binary candidate',
       status: v27Binary7NodeShadow?.loaded
         ? (v27Binary7NodeShadow?.binary ? 'healthy' : 'inactive')
         : (v27Binary7NodeShadow?.status === 'not_loaded' ? 'failed' : 'inactive'),
@@ -1674,6 +1737,7 @@ function normalizeSnapshot(state, service = null) {
   const baselineStatus = buildBaselineStatus(csi);
   const signalQuality = buildSignalQuality(csi);
   const operatorPresence = evaluateOperatorPresenceGate(csi);
+  const shadowDisagreement = buildShadowDisagreement(csi, primaryRuntime, v27Binary7NodeShadow);
   const ambiguity = deriveAmbiguityMode(csi, pose, support, operatorPresence);
   const lastMeaningfulEvent = deriveLastMeaningfulEvent(csi, pose, support, operatorPresence, ambiguity);
   const recordingStatus = state.recording.status || {};
@@ -1844,6 +1908,7 @@ function normalizeSnapshot(state, service = null) {
       v19Shadow,
       baselineStatus,
       signalQuality,
+      shadowDisagreement,
       shadowDiagnostics: buildShadowDiagnostics(metadata),
       multiPersonEstimate: buildMultiPersonEstimate(csi),
       runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow)

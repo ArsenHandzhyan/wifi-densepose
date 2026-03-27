@@ -62,7 +62,25 @@ async def lifespan(app: FastAPI):
             app.state.csi_prediction_service = csi_prediction_service
         except Exception as e:
             logger.warning(f"CSI prediction service not available: {e}")
-        
+
+        # Auto-start CSI UDP listener and prediction loop through the
+        # canonical idempotent service hook. If it fails, keep backend alive.
+        try:
+            svc = app.state.csi_prediction_service
+            auto_start = await svc.ensure_started(interval=2.0)
+            if auto_start.get("ok"):
+                logger.info(
+                    "CSI auto-start result: %s (model=%s, listener=%s, task=%s)",
+                    auto_start.get("status", "unknown"),
+                    auto_start.get("model_version", "?"),
+                    auto_start.get("listener_running", False),
+                    auto_start.get("prediction_task_running", False),
+                )
+            else:
+                logger.warning("CSI auto-start skipped: %s", auto_start.get("status", "unknown"))
+        except Exception as e:
+            logger.warning(f"CSI auto-start failed: {e}")
+
         logger.info("WiFi-DensePose API started successfully")
         
         yield

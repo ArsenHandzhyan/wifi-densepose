@@ -1,4 +1,4 @@
-import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260327-layout-v3-01';
+import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260327-v42-prod-01';
 
 let appInstance = null;
 let hashListener = null;

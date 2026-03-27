@@ -462,19 +462,11 @@ async def csi_validation_batch_approve(payload: ValidationBatchApproveRequest):
 @router.post("/start")
 async def csi_start():
     """Start CSI prediction (load model + start UDP listener)."""
-    if csi_prediction_service._running:
-        return {"status": "already_running"}
-
-    if not csi_prediction_service.binary_model:
-        ok = csi_prediction_service.load_model()
-        if not ok:
-            raise HTTPException(status_code=500, detail="Model not found. Train with scripts/train_v21_save_model.py")
-
     try:
-        import asyncio
-        await csi_prediction_service.start_udp_listener()
-        asyncio.create_task(csi_prediction_service.prediction_loop(interval=2.0))
-        return {"status": "started", "model_version": csi_prediction_service.current.get("model_version")}
+        result = await csi_prediction_service.ensure_started(interval=2.0)
+        if not result.get("ok"):
+            raise HTTPException(status_code=500, detail="Model not found. Train with scripts/train_v21_save_model.py")
+        return result
     except OSError as e:
         if "Address already in use" in str(e):
             raise HTTPException(status_code=409, detail="UDP port 5005 is already in use. Stop other CSI capture processes first.")
@@ -542,22 +534,35 @@ async def csi_nodes_health():
     return csi_prediction_service.get_node_health()
 
 
+@router.get("/nodes/packets")
+async def csi_nodes_packets():
+    """Per-node packet counts in current buffer — diagnostic endpoint."""
+    import time
+    svc = csi_prediction_service
+    now = time.time() - (svc._start_time or time.time())
+    window_start = now - 2.0  # last 2 seconds (WINDOW_SEC)
+    result = {}
+    for ip, pkts in svc._packets.items():
+        total = len(pkts)
+        in_window = sum(1 for t, _, _, _ in pkts if t >= window_start)
+        result[ip] = {"total_buffer": total, "in_window_2s": in_window}
+    return result
+
+
 # ── Recording endpoints ────────────────────────────────────────
 
 @router.post("/record/start")
 async def record_start(req: RecordingStartRequest):
     """Start recording CSI data (parallel with live prediction)."""
-    # Ensure prediction is running (UDP listener active)
-    if not csi_prediction_service._running:
-        if not csi_prediction_service.binary_model:
-            csi_prediction_service.load_model()
-        import asyncio
-        try:
-            await csi_prediction_service.start_udp_listener()
-            asyncio.create_task(csi_prediction_service.prediction_loop(interval=2.0))
-        except OSError as e:
-            if "Address already in use" not in str(e):
-                raise HTTPException(status_code=500, detail=str(e))
+    # Ensure prediction is running (UDP listener active).
+    try:
+        result = await csi_prediction_service.ensure_started(interval=2.0)
+    except OSError as e:
+        if "Address already in use" not in str(e):
+            raise HTTPException(status_code=500, detail=str(e))
+        result = {"ok": True, "status": "already_running"}
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail="Model not found. Train with scripts/train_v21_save_model.py")
 
     result = await csi_recording_service.start_recording(
         label=req.label,
@@ -1016,3 +1021,26 @@ async def fewshot_consumer_activate(req: FewshotConsumerActivateRequest):
 async def fewshot_consumer_deactivate(req: FewshotConsumerDeactivateRequest):
     """Deactivate the shadow-only few-shot packet consumer."""
     return fewshot_adaptation_consumer_service.deactivate(reason=req.reason)
+
+
+# ── V43 shadow hot-reload endpoints ─────────────────────────────────
+
+@router.post("/shadow/enable")
+async def shadow_v43_enable():
+    """Enable V43 shadow at runtime without restarting the server."""
+    result = csi_prediction_service.enable_v43_shadow()
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("detail", "unknown error"))
+    return result
+
+
+@router.post("/shadow/disable")
+async def shadow_v43_disable():
+    """Disable V43 shadow at runtime."""
+    return csi_prediction_service.disable_v43_shadow()
+
+
+@router.get("/shadow/status")
+async def shadow_v43_status():
+    """Get current V43 shadow state, agreement rate, and window count."""
+    return csi_prediction_service.get_v43_shadow_status()

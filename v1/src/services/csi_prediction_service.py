@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import pickle
 import time
 from collections import defaultdict
@@ -26,10 +27,12 @@ from typing import Any
 import numpy as np
 from scipy.stats import entropy, kurtosis, skew
 
+from .csi_node_inventory import CORE_NODE_IPS
+
 logger = logging.getLogger(__name__)
 
 PROJECT = Path(__file__).resolve().parents[3]
-MODEL_PATH = PROJECT / "output" / "v25_best_model.pkl"
+MODEL_PATH = PROJECT / "output" / "train_runs" / "v42_binary_balanced.pkl"
 UDP_PORT = 5005
 UDP_PORT_CSV = 5006  # ESP32-S3 nodes with CSI_DATA CSV format
 NODE_IPS = sorted(["192.168.1.101", "192.168.1.117", "192.168.1.125", "192.168.1.137", "192.168.1.33", "192.168.1.77", "192.168.1.41"])
@@ -124,7 +127,7 @@ OLD_ROUTER_DOMAIN_ADAPT_MODEL_PATH = (
     / "old_router_empty_static_regularization1"
     / OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME
 )
-OLD_ROUTER_DOMAIN_ADAPT_SHADOW_ENABLED = True
+OLD_ROUTER_DOMAIN_ADAPT_SHADOW_ENABLED = False  # disabled: trained on old router, diverges from production model
 OLD_ROUTER_DOMAIN_ADAPT_SEQ_LEN = 7
 
 # Guard-feature thresholds shared with V16/V18/domain-adapt training.
@@ -139,18 +142,30 @@ SC_VAR_MOTION_TVAR_CEILING = 1.5
 V29_CNN_MODEL_PATH = PROJECT / "output" / "train_runs" / "v29_cnn_zone_model.pt"
 V29_CNN_SHADOW_ENABLED = True
 
-# ── V30 few-shot zone calibration (2026-03-27) ────────────────────
-# v39: RF on 1229 windows (3 sessions, 26 features incl. amp_norm + ratios).
-# CV BA=0.9862. Balanced: 614 center / 615 door_passage. FREEZE.
-V30_FEWSHOT_MODEL_PATH = PROJECT / "output" / "train_runs" / "v39_fewshot_zone_calibration.pkl"
+# ── V42 few-shot zone calibration (2026-03-27) ────────────────────
+# V42: RF on 1424 windows (5 sessions, 33 features incl. amp_norm + ratios).
+# CV BA=0.9902. Balanced: 711 center / 713 door_passage. FREEZE.
+# Offline eval: accuracy=1.0, BA=1.0, macro_f1=1.0 on S1-S5 archive.
+V30_FEWSHOT_MODEL_PATH = PROJECT / "output" / "train_runs" / "v42_fewshot_zone_calibration.pkl"
 V30_FEWSHOT_ZONE_ENABLED = True
 V30_FEWSHOT_ZONE_NAMES = ["center", "door_passage"]
 
-# ── V26 binary 7-node shadow (2026-03-27) ──────────────────────────
-# HGB binary classifier retrained on 7-node garage data (722 windows).
-# CV balanced accuracy 0.9984. Shadow mode only — does NOT replace V20.
-V26_BINARY_7NODE_MODEL_PATH = PROJECT / "output" / "v26_binary_7node.pkl"
+# ── V42 binary balanced production (2026-03-27) ─────────────────────
+# Promoted from shadow to primary. V42 balanced HGB on 1876 windows
+# (484 empty + 1392 occupied), BA=0.9858. Uses the legacy v26 pipeline.
+V26_BINARY_7NODE_MODEL_PATH = PROJECT / "output" / "train_runs" / "v42_binary_balanced.pkl"
 V26_BINARY_SHADOW_ENABLED = True
+V26_BINARY_SHADOW_TELEMETRY_PATH = PROJECT / "temp" / "binary_7node_shadow_telemetry.ndjson"
+
+# ── V43 binary shadow test (2026-03-28) ───────────────────────────
+# V43: HGB coarse model on merged manifest_v20 (18828 windows, seq_len=7).
+# CV macro_f1=0.8365, binary_balacc=0.8642. Gate criteria NOT all pass.
+# Shadow mode only — runs alongside V42 production for live comparison.
+# Enable via SHADOW_V43=1 env var.
+V43_SHADOW_MODEL_PATH = PROJECT / "output" / "train_runs" / "v43_retrain" / "v43_binary_candidate.pkl"
+V43_SHADOW_ENABLED = os.environ.get("SHADOW_V43", "0") == "1"
+V43_SHADOW_SEQ_LEN = 7
+V43_SHADOW_LOG_PATH = PROJECT / "output" / "shadow_v43" / "shadow_log.jsonl"
 V29_CNN_MAX_PACKETS = 40
 V29_CNN_N_SC = 52  # subcarriers 2-53 per node
 V29_CNN_SC_START = 2
@@ -170,8 +185,8 @@ V29_CNN_IP_ORDER = [
 # misclassified as motion.  Evidence: overnight head-to-head showed
 # motion FP jumped from 9% to 80% when node04 reconnected after
 # ~7 hours offline (AGENTCLOUD_ANALYSIS2, 2026-03-21).
-WARMUP_OFFLINE_THRESHOLD_SEC = 300.0   # 5 min gap → treat as cold reconnect
-WARMUP_DURATION_SEC = 120.0            # dampen for 2 min (24 × 5-sec windows)
+WARMUP_OFFLINE_THRESHOLD_SEC = 120.0   # 2 min gap → treat as cold reconnect
+WARMUP_DURATION_SEC = 30.0             # dampen for 30s (enough for CSI to stabilize)
 
 # Garage geometry (meters). Origin = center of room, one door at bottom center.
 # Garage Planner v3 layout for the 3m×7m garage (updated 2026-03-26):
@@ -212,6 +227,7 @@ class CsiPredictionService:
         self._recent_predictions = []
         self._transport = None
         self._running = False
+        self._prediction_task: asyncio.Task | None = None
 
         # Current prediction state
         # PRIMARY: motion_state is the only reliable cross-session output
@@ -330,11 +346,14 @@ class CsiPredictionService:
 
         # ── V26 binary 7-node shadow state ────────────────────────────
         self._v26_model = None
+        self._v26_scaler = None
         self._v26_features: list[str] = []
         self._v26_threshold = 0.50
         self._v26_loaded = False
         self._v26_shadow: dict = {}
         self._v26_history: list[dict] = []
+        self._v26_candidate_name = V26_BINARY_7NODE_MODEL_PATH.name
+        self._v26_track = "V42_binary_balanced"
 
         # ── Garage ratio V2 shadow candidate ─────────────────────────
         self._garage_ratio_v2_bundle = None
@@ -381,6 +400,23 @@ class CsiPredictionService:
         self._v30_fewshot_confirmed_zone: str = ""  # hysteresis: last confirmed zone
         self._v30_fewshot_pending_zone: str = ""     # candidate zone waiting for confirmation
         self._v30_fewshot_pending_count: int = 0     # consecutive windows candidate has led
+
+        # ── V43 shadow test state (2026-03-28) ─────────────────────────
+        # V43 coarse HGB (seq_len=7) shadow: runs alongside production,
+        # logs predictions for offline comparison. Does NOT affect production.
+        self._v43_coarse_model = None
+        self._v43_binary_model = None
+        self._v43_window_features: list[str] = []
+        self._v43_class_names: list[str] = []
+        self._v43_seq_len = V43_SHADOW_SEQ_LEN
+        self._v43_loaded = False
+        self._v43_window_buffer: list[list[float]] = []
+        self._v43_shadow: dict = {}
+        self._v43_history: list[dict] = []
+        self._v43_warmup_windows = 0
+        self._v43_window_count = 0
+        self._v43_agree_count = 0
+        self._v43_shadow_enabled = V43_SHADOW_ENABLED  # runtime-controllable flag
 
         # ── Zone calibration shadow state (per-session centroid) ────────
         # Shadow-only zone predictions from per-session NearestCentroid.
@@ -644,6 +680,40 @@ class CsiPredictionService:
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             return False
+
+    async def ensure_started(self, interval: float = 2.0) -> dict[str, Any]:
+        """Ensure the CSI listener and prediction loop are running.
+
+        This is the canonical idempotent hook for backend startup and manual
+        CSI control paths. It loads a model on demand, starts the UDP listener,
+        and creates exactly one prediction loop task.
+        """
+        if not self.binary_model:
+            if not self.load_model():
+                return {
+                    "ok": False,
+                    "status": "model_not_loaded",
+                    "listener_running": self._running,
+                    "prediction_task_running": bool(self._prediction_task and not self._prediction_task.done()),
+                }
+
+        started_listener = False
+        if not self._running:
+            await self.start_udp_listener()
+            started_listener = True
+
+        loop_started = False
+        if self._prediction_task is None or self._prediction_task.done():
+            self._prediction_task = asyncio.create_task(self.prediction_loop(interval=interval))
+            loop_started = True
+
+        return {
+            "ok": True,
+            "status": "started" if (started_listener or loop_started) else "already_running",
+            "model_version": self.current.get("model_version"),
+            "listener_running": self._running,
+            "prediction_task_running": bool(self._prediction_task and not self._prediction_task.done()),
+        }
 
     # ── Track B v1 shadow-mode methods ──────────────────────────────
 
@@ -1312,7 +1382,7 @@ class CsiPredictionService:
     # ── V26 binary 7-node shadow methods ────────────────────────────
 
     def _load_v26_shadow(self) -> bool:
-        """Load V26 binary model (7-node garage HGB)."""
+        """Load current 7-node binary shadow candidate without touching primary runtime."""
         if self._v26_loaded:
             return True
         if not V26_BINARY_7NODE_MODEL_PATH.exists():
@@ -1321,13 +1391,17 @@ class CsiPredictionService:
             with V26_BINARY_7NODE_MODEL_PATH.open("rb") as fh:
                 bundle = pickle.load(fh)
             self._v26_model = bundle["model"]
+            self._v26_scaler = bundle.get("scaler")  # V40+ includes StandardScaler
             self._v26_features = bundle["feature_columns"]
-            self._v26_threshold = 0.50  # hardcoded: separates rats (~0.15) from humans (>0.97)
+            self._v26_threshold = float(bundle.get("threshold", 0.50))
+            self._v26_candidate_name = V26_BINARY_7NODE_MODEL_PATH.name
+            self._v26_track = str(bundle.get("version", "V26_binary_7node"))
             self._v26_loaded = True
             logger.info(
-                "V26 shadow loaded: features=%d, threshold=%.3f, version=%s",
+                "Binary shadow loaded: candidate=%s features=%d, threshold=%.3f, version=%s",
+                self._v26_candidate_name,
                 len(self._v26_features), self._v26_threshold,
-                bundle.get("version", "?"),
+                self._v26_track,
             )
             return True
         except Exception as e:
@@ -1348,6 +1422,8 @@ class CsiPredictionService:
                 dtype=np.float32,
             )
             X = np.nan_to_num(X, nan=0, posinf=0, neginf=0)
+            if self._v26_scaler is not None:
+                X = self._v26_scaler.transform(X)
 
             t0 = time.perf_counter()
             proba = self._v26_model.predict_proba(X)[0]
@@ -1358,7 +1434,10 @@ class CsiPredictionService:
             binary_label = "occupied" if p_occ >= self._v26_threshold else "empty"
 
             shadow = {
-                "track": "V26_binary_7node",
+                "track": self._v26_track,
+                "candidate_name": self._v26_candidate_name,
+                "loaded": True,
+                "status": "shadow_live",
                 "binary": binary_label,
                 "binary_proba": round(p_occ, 4),
                 "threshold": self._v26_threshold,
@@ -1378,6 +1457,198 @@ class CsiPredictionService:
             return shadow
         except Exception as e:
             logger.warning("V26 shadow predict error: %s", e)
+            return None
+
+    # ── V43 shadow test methods (2026-03-28) ────────────────────────
+
+    def enable_v43_shadow(self) -> dict:
+        """Enable V43 shadow at runtime (no restart needed)."""
+        loaded = self._load_v43_shadow()
+        if not loaded:
+            return {
+                "status": "error",
+                "detail": f"V43 model not found at {V43_SHADOW_MODEL_PATH}",
+            }
+        self._v43_shadow_enabled = True
+        logger.info("V43 shadow ENABLED via API (runtime hot-reload)")
+        return {
+            "status": "enabled",
+            "model": "v43_binary_candidate",
+            "model_path": str(V43_SHADOW_MODEL_PATH),
+            "seq_len": self._v43_seq_len,
+            "classes": self._v43_class_names,
+        }
+
+    def disable_v43_shadow(self) -> dict:
+        """Disable V43 shadow at runtime."""
+        self._v43_shadow_enabled = False
+        logger.info("V43 shadow DISABLED via API")
+        return {"status": "disabled"}
+
+    def get_v43_shadow_status(self) -> dict:
+        """Return current V43 shadow state for the status endpoint."""
+        agreement_rate = (
+            self._v43_agree_count / self._v43_window_count
+            if self._v43_window_count > 0
+            else None
+        )
+        return {
+            "enabled": self._v43_shadow_enabled,
+            "model_loaded": self._v43_loaded,
+            "model_path": str(V43_SHADOW_MODEL_PATH),
+            "window_count": self._v43_window_count,
+            "agree_count": self._v43_agree_count,
+            "agreement_rate": round(agreement_rate, 4) if agreement_rate is not None else None,
+            "seq_len": self._v43_seq_len,
+            "classes": self._v43_class_names if self._v43_loaded else [],
+            "last_shadow": self._v43_shadow or None,
+        }
+
+    def _load_v43_shadow(self) -> bool:
+        """Load V43 coarse HGB model for shadow inference."""
+        if self._v43_loaded:
+            return True
+        if not V43_SHADOW_MODEL_PATH.exists():
+            logger.warning("V43 shadow model not found: %s", V43_SHADOW_MODEL_PATH)
+            return False
+        try:
+            with V43_SHADOW_MODEL_PATH.open("rb") as fh:
+                bundle = pickle.load(fh)
+            self._v43_coarse_model = bundle.get("coarse_model")
+            self._v43_binary_model = bundle.get("binary_model")
+            self._v43_window_features = bundle.get("window_feature_names", [])
+            self._v43_class_names = bundle.get("coarse_labels", ["EMPTY", "MOTION", "STATIC"])
+            self._v43_seq_len = bundle.get("seq_len", V43_SHADOW_SEQ_LEN)
+            self._v43_loaded = True
+            logger.info(
+                "V43 shadow loaded: window_features=%d, seq_len=%d, classes=%s, version=%s",
+                len(self._v43_window_features), self._v43_seq_len,
+                self._v43_class_names, bundle.get("version", "v43"),
+            )
+            # Ensure log directory exists
+            V43_SHADOW_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            return True
+        except Exception as e:
+            logger.error("V43 shadow load failed: %s", e)
+            return False
+
+    def _shadow_predict_v43(self, feat_dict: dict, w_end: float,
+                            prod_coarse: str, prod_binary: str,
+                            prod_binary_conf: float) -> dict | None:
+        """Run V43 shadow inference. seq_len=7 coarse HGB model.
+
+        Logs every prediction to shadow_log.jsonl for offline analysis.
+        Does NOT affect production output.
+        """
+        if not self._v43_shadow_enabled:
+            return None
+        if not self._v43_loaded:
+            if not self._load_v43_shadow():
+                return None
+
+        # Use the same feature augmentation as V19 (F2 + V23 guard + zone)
+        augmented = self._add_v8_f2_features(feat_dict)
+        augmented = self._add_v23_guard_features(augmented)
+        augmented = self._add_v21d_zone_features(augmented)
+
+        # Extract window features in correct order
+        window_feats = [augmented.get(f, 0) for f in self._v43_window_features]
+        self._v43_window_buffer.append(window_feats)
+        self._v43_warmup_windows += 1
+
+        if len(self._v43_window_buffer) > self._v43_seq_len:
+            self._v43_window_buffer = self._v43_window_buffer[-self._v43_seq_len:]
+
+        if len(self._v43_window_buffer) < self._v43_seq_len:
+            return None
+
+        try:
+            X = np.array(
+                [f for window in self._v43_window_buffer for f in window],
+                dtype=np.float32,
+            ).reshape(1, -1)
+            X = np.nan_to_num(X, nan=0, posinf=0, neginf=0)
+
+            t0 = time.perf_counter()
+            coarse_proba = self._v43_coarse_model.predict_proba(X)[0]
+            coarse_classes = list(self._v43_class_names)
+            coarse_idx = int(np.argmax(coarse_proba))
+            coarse_pred = str(coarse_classes[coarse_idx])
+
+            empty_idx = coarse_classes.index("EMPTY") if "EMPTY" in coarse_classes else 0
+            empty_proba = float(coarse_proba[empty_idx])
+            v43_binary = "empty" if coarse_pred == "EMPTY" else "occupied"
+            v43_binary_conf = empty_proba if v43_binary == "empty" else 1.0 - empty_proba
+
+            inference_ms = (time.perf_counter() - t0) * 1000
+
+            self._v43_window_count += 1
+            agree_binary = v43_binary == prod_binary
+            if agree_binary:
+                self._v43_agree_count += 1
+            agreement_rate = (
+                self._v43_agree_count / self._v43_window_count
+                if self._v43_window_count > 0 else 0.0
+            )
+
+            shadow = {
+                "t": round(w_end, 2),
+                "track": "V43_shadow",
+                "predicted_class": coarse_pred,
+                "binary": v43_binary,
+                "binary_conf": round(v43_binary_conf, 4),
+                "probabilities": {
+                    str(cls): round(float(coarse_proba[i]), 4)
+                    for i, cls in enumerate(coarse_classes)
+                },
+                "inference_ms": round(inference_ms, 2),
+                "buffer_depth": len(self._v43_window_buffer),
+                "agree_binary": agree_binary,
+                "agree_coarse": coarse_pred.lower() == prod_coarse.lower(),
+                "prod_binary": prod_binary,
+                "prod_coarse": prod_coarse,
+                "prod_binary_conf": round(prod_binary_conf, 4),
+                "confidence_diff": round(v43_binary_conf - prod_binary_conf, 4),
+                "window_id": self._v43_window_count,
+                "agreement_rate": round(agreement_rate, 4),
+            }
+            self._v43_shadow = shadow
+            self._v43_history.append(shadow)
+            if len(self._v43_history) > 60:
+                self._v43_history = self._v43_history[-60:]
+
+            # Log to shadow file
+            try:
+                log_entry = {
+                    "ts": time.time(),
+                    **shadow,
+                }
+                with open(V43_SHADOW_LOG_PATH, "a") as sf:
+                    sf.write(json.dumps(log_entry) + "\n")
+            except Exception:
+                pass  # logging must never crash runtime
+
+            # Periodic summary every 100 windows
+            if self._v43_window_count % 100 == 0:
+                logger.info(
+                    "V43 SHADOW SUMMARY [%d windows]: agreement=%.1f%% "
+                    "v43_last=%s prod_last=%s",
+                    self._v43_window_count,
+                    agreement_rate * 100,
+                    v43_binary, prod_binary,
+                )
+
+            logger.debug(
+                "V43 SHADOW: %s (E=%.3f M=%.3f S=%.3f) bin=%s agree=%s %.1fms",
+                coarse_pred,
+                coarse_proba[coarse_classes.index("EMPTY")] if "EMPTY" in coarse_classes else 0,
+                coarse_proba[coarse_classes.index("MOTION")] if "MOTION" in coarse_classes else 0,
+                coarse_proba[coarse_classes.index("STATIC")] if "STATIC" in coarse_classes else 0,
+                v43_binary, agree_binary, inference_ms,
+            )
+            return shadow
+        except Exception as e:
+            logger.warning("V43 shadow predict error: %s", e)
             return None
 
     def _add_v21d_zone_features(self, feat_dict: dict) -> dict:
@@ -2365,7 +2636,7 @@ class CsiPredictionService:
                 )
                 pkts = []  # treat as offline — zero all features
 
-            if len(pkts) < 5:
+            if len(pkts) < 3:
                 for s in [
                     "mean", "std", "max", "range", "pps", "tvar", "diff1", "diff1_max",
                     "kurtosis", "skew", "zcr",
@@ -2401,6 +2672,12 @@ class CsiPredictionService:
             feat[f"{csi_pre}_amp_mean"] = float(np.mean(amps))
             feat[f"{csi_pre}_motion_mean"] = motion_mean
             feat[f"{csi_pre}_packets"] = int(len(pkts))
+            feat[f"{csi_pre}_amp_std"] = float(np.std(amps))
+            feat[f"{csi_pre}_amp_range"] = float(np.ptp(amps))
+            feat[f"{csi_pre}_amp_tvar"] = float(np.var(np.diff(amps))) if len(amps) > 1 else 0.0
+            _d1 = np.abs(np.diff(amps))
+            feat[f"{csi_pre}_amp_diff1"] = float(np.mean(_d1)) if len(_d1) > 0 else 0.0
+            feat[f"{csi_pre}_pps"] = len(pkts) / WINDOW_SEC
 
             # V12-style features
             feat[f"{pre}_mean"] = float(np.mean(amps))
@@ -2698,6 +2975,25 @@ class CsiPredictionService:
             ai = feat.get(f"csi_{ni_name}_amp_mean", 0.0)
             aj = feat.get(f"csi_{nj_name}_amp_mean", 0.0)
             feat[f"ratio_{ni_name}_{nj_name}"] = ai / (aj + _eps)
+
+        # ── V40: Additional drift-invariant features ──
+        # RSSI normalized share
+        total_rssi_abs = sum(abs(feat.get(f"csi_{n}_rssi_mean", 0.0)) for n in _ALL_NODES)
+        if total_rssi_abs > 0:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_rssi_norm"] = abs(feat.get(f"csi_{nn}_rssi_mean", 0.0)) / total_rssi_abs
+        else:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_rssi_norm"] = 0.0
+
+        # Motion normalized share (position-dependent, not drift-affected)
+        total_motion = sum(feat.get(f"csi_{n}_motion_mean", 0.0) for n in _ALL_NODES)
+        if total_motion > 0:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_motion_norm"] = feat.get(f"csi_{nn}_motion_mean", 0.0) / total_motion
+        else:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_motion_norm"] = 0.0
 
         return feat, active_nodes, sum(len(p) for p in self._packets.values() if any(t_start <= t < t_end for t, _, _, _ in p))
 
@@ -3115,19 +3411,16 @@ class CsiPredictionService:
             else:
                 target_x, target_y = self._prev_target
 
-            # Smooth with adaptive alpha and dead-zone
+            # Smooth with adaptive alpha
             import math
             if self._prev_target != (0.0, 0.0):
                 dx = target_x - self._prev_target[0]
                 dy = target_y - self._prev_target[1]
                 dist = math.hypot(dx, dy)
-                # Dead-zone: ignore shifts under 5cm
-                if dist < 0.05:
-                    target_x, target_y = self._prev_target
-                else:
-                    alpha = 0.45 if dist > 1.5 else 0.25 if dist > 0.5 else 0.15
-                    target_x = self._prev_target[0] + dx * alpha
-                    target_y = self._prev_target[1] + dy * alpha
+                # Adaptive alpha: higher = more responsive, less teleportation
+                alpha = 0.65 if dist > 1.5 else 0.45 if dist > 0.5 else 0.30
+                target_x = self._prev_target[0] + dx * alpha
+                target_y = self._prev_target[1] + dy * alpha
 
             # Clamp to garage bounds
             target_x = max(-GARAGE_WIDTH / 2, min(GARAGE_WIDTH / 2, target_x))
@@ -3628,45 +3921,61 @@ class CsiPredictionService:
         except Exception as e:
             logger.debug("V30 fewshot zone skipped: %s", e)
 
-        # ── V26 binary 7-node production override (promoted 2026-03-27) ──
-        # V26 = HGB binary retrained on 7-node garage data (CV BA=0.9984).
-        # Overrides V20 binary output only. Coarse stays from V20.
+        # ── V42 balanced binary production override ──
+        # V42 trained on 7-node balanced data (BA=0.9858), replaces V25/V40.
         try:
             v26_shadow = self._shadow_predict_v26(feat, w_end, binary_label)
             if v26_shadow is not None:
-                # V26 production override: binary only
-                v26_binary = v26_shadow["binary"]
-                v26_conf = v26_shadow["binary_proba"]
-                v20_binary_before = binary_label
+                primary_binary = binary_label
+                primary_conf = binary_conf
+                v40_binary = v26_shadow["binary"]
+                v40_conf = v26_shadow["binary_proba"]
+                # V40 production override
                 self.current.update({
-                    "binary": v26_binary,
-                    "binary_confidence": round(v26_conf if v26_binary == "occupied" else 1.0 - v26_conf, 3),
-                    "model_version": "v26",
-                    "model_id": "v26_binary_7node.pkl",
+                    "binary": v40_binary,
+                    "binary_confidence": round(v40_conf if v40_binary == "occupied" else 1.0 - v40_conf, 3),
+                    "model_version": v26_shadow["track"],
+                    "model_id": v26_shadow["candidate_name"],
                 })
-                binary_label = v26_binary
-                binary_conf = v26_conf
-                logger.debug("V26 production override: %s→%s P(occ)=%.4f",
-                             v20_binary_before, v26_binary, v26_conf)
+                binary_label = v40_binary
+                binary_conf = v40_conf
+                logger.debug(
+                    "V40 binary override: %s→%s P(occ)=%.4f",
+                    primary_binary,
+                    v40_binary,
+                    v40_conf,
+                )
 
                 try:
-                    v26_path = PROJECT / "temp" / "v26_production_telemetry.ndjson"
-                    with open(v26_path, "a") as vf:
+                    with open(V26_BINARY_SHADOW_TELEMETRY_PATH, "a") as vf:
                         v26_entry = {
                             "ts": time.time(),
                             "window_t": w_end,
-                            "v26_binary": v26_shadow["binary"],
-                            "v26_binary_proba": v26_shadow["binary_proba"],
-                            "v26_agree_v20": v26_shadow["agree_binary"],
-                            "v26_ms": v26_shadow["inference_ms"],
-                            "v20_binary": v20_binary_before,
-                            "v20_coarse": coarse_label,
+                            "candidate_name": v26_shadow["candidate_name"],
+                            "track": v26_shadow["track"],
+                            "shadow_binary": v26_shadow["binary"],
+                            "shadow_binary_proba": v26_shadow["binary_proba"],
+                            "shadow_agree_primary": v26_shadow["agree_binary"],
+                            "shadow_ms": v26_shadow["inference_ms"],
+                            "primary_binary": primary_binary,
+                            "primary_binary_confidence": primary_conf,
+                            "primary_coarse": coarse_label,
                         }
                         vf.write(json.dumps(v26_entry) + "\n")
                 except Exception:
                     pass  # telemetry must never crash
         except Exception as e:
-            logger.debug("V26 shadow skipped: %s", e)
+            logger.debug("7-node binary shadow skipped: %s", e)
+
+        # ── V43 shadow test (2026-03-28) ──
+        # Runs V43 coarse HGB shadow alongside production for comparison.
+        # Controlled by SHADOW_V43=1 env var. Does NOT affect production.
+        try:
+            v43_shadow = self._shadow_predict_v43(
+                feat, w_end, coarse_label, binary_label, binary_conf,
+            )
+        except Exception as e:
+            logger.debug("V43 shadow skipped: %s", e)
 
         # Prune old packets
         cutoff = now - MAX_BUFFER_SEC
@@ -3873,19 +4182,78 @@ class CsiPredictionService:
 
     async def stop(self):
         """Stop the UDP listener."""
+        if self._prediction_task is not None:
+            self._prediction_task.cancel()
+            try:
+                await self._prediction_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("Prediction loop stopped with error during shutdown: %s", exc)
+            finally:
+                self._prediction_task = None
+
         if self._transport:
-            self._transport.close()
+            close = getattr(self._transport, "close", None)
+            if callable(close):
+                close()
             self._transport = None
         self._running = False
         logger.info("CSI UDP listener stopped")
 
+    # ── Tenda AP auto-recovery ────────────────────────────────────
+    _tenda_last_reboot_t: float = 0.0
+    _tenda_reboot_cooldown: float = 300.0  # min 5 min between reboots
+    _tenda_dropout_threshold: int = 5      # if ≥5 nodes offline for 90s → reboot AP
+
+    def _check_tenda_ap_health(self):
+        """Auto-reboot Tenda AC7 when mass node dropout detected."""
+        now = time.monotonic()
+        if now - self._tenda_last_reboot_t < self._tenda_reboot_cooldown:
+            return
+        offline_count = 0
+        for ip in NODE_IPS:
+            last = self._node_last_seen.get(ip)
+            if last is None or (now - last) > 90:
+                offline_count += 1
+        if offline_count >= self._tenda_dropout_threshold:
+            logger.warning(
+                "TENDA AUTO-REBOOT: %d/%d nodes offline >90s — rebooting AP",
+                offline_count, len(NODE_IPS))
+            self._tenda_last_reboot_t = now
+            try:
+                import hashlib, urllib.request
+                pwd_hash = hashlib.md5(b"bookread595").hexdigest()
+                # Login
+                login_req = urllib.request.Request(
+                    "http://192.168.1.2/login/Auth",
+                    data=f"username=admin&password={pwd_hash}".encode())
+                resp = urllib.request.urlopen(login_req, timeout=5)
+                cookie = None
+                for hdr in resp.headers.get_all("Set-Cookie") or []:
+                    if "password=" in hdr:
+                        cookie = hdr.split(";")[0]
+                        break
+                if cookie:
+                    reboot_req = urllib.request.Request(
+                        "http://192.168.1.2/goform/SysToolReboot")
+                    reboot_req.add_header("Cookie", cookie)
+                    urllib.request.urlopen(reboot_req, timeout=5)
+                    logger.warning("TENDA REBOOT command sent successfully")
+            except Exception as e:
+                logger.error("TENDA REBOOT failed: %s", e)
+
     async def prediction_loop(self, interval: float = 0.3):
         """Run predictions at regular intervals."""
+        loop_count = 0
         while self._running:
             try:
                 self.predict_window()
                 self._estimate_multi_person()
                 self._voice_announce()
+                loop_count += 1
+                if loop_count % 100 == 0:  # every ~30s at 0.3s interval
+                    self._check_tenda_ap_health()
             except Exception as e:
                 logger.error(f"Prediction error: {e}")
             await asyncio.sleep(interval)
@@ -4161,6 +4529,53 @@ class CsiPredictionService:
             }
         return result
 
+    @staticmethod
+    def _build_dropout_summary(nodes: dict) -> dict:
+        if not nodes:
+            return {
+                "total_nodes": 0,
+                "online_nodes": [],
+                "degraded_nodes": [],
+                "offline_nodes": [],
+                "core_nodes": [],
+                "shadow_nodes": [],
+                "core_online_count": 0,
+                "core_degraded_count": 0,
+                "core_offline_count": 0,
+                "healthy_core_count": 0,
+                "healthy_total_count": 0,
+                "has_dropout": False,
+                "latest_last_seen_sec": None,
+                "oldest_last_seen_sec": None,
+            }
+
+        node_values = list(nodes.values())
+        online_nodes = [name for name, node in nodes.items() if node.get("status") == "online"]
+        degraded_nodes = [name for name, node in nodes.items() if node.get("status") == "degraded"]
+        offline_nodes = [name for name, node in nodes.items() if node.get("status") == "offline"]
+        core_nodes = [name for name, node in nodes.items() if node.get("ip") in CORE_NODE_IPS]
+        shadow_nodes = [name for name, node in nodes.items() if node.get("ip") not in CORE_NODE_IPS]
+        core_online = [name for name, node in nodes.items() if node.get("status") == "online" and node.get("ip") in CORE_NODE_IPS]
+        core_degraded = [name for name, node in nodes.items() if node.get("status") == "degraded" and node.get("ip") in CORE_NODE_IPS]
+        core_offline = [name for name, node in nodes.items() if node.get("status") == "offline" and node.get("ip") in CORE_NODE_IPS]
+        seen_ages = [float(node["last_seen_sec"]) for node in node_values if node.get("last_seen_sec") is not None]
+        return {
+            "total_nodes": len(nodes),
+            "online_nodes": online_nodes,
+            "degraded_nodes": degraded_nodes,
+            "offline_nodes": offline_nodes,
+            "core_nodes": core_nodes,
+            "shadow_nodes": shadow_nodes,
+            "core_online_count": len(core_online),
+            "core_degraded_count": len(core_degraded),
+            "core_offline_count": len(core_offline),
+            "healthy_core_count": len(core_online),
+            "healthy_total_count": len(online_nodes),
+            "has_dropout": len(degraded_nodes) > 0 or len(offline_nodes) > 0,
+            "latest_last_seen_sec": max(seen_ages) if seen_ages else None,
+            "oldest_last_seen_sec": min(seen_ages) if seen_ages else None,
+        }
+
     def get_status(self) -> dict:
         """Get current prediction status for API."""
         # Preload V8 shadow metadata for UI/debug surfaces even before the
@@ -4245,6 +4660,8 @@ class CsiPredictionService:
             status["v26_shadow"] = self._v26_shadow
         elif V26_BINARY_SHADOW_ENABLED:
             status["v26_shadow"] = {
+                "candidate_name": self._v26_candidate_name,
+                "track": self._v26_track,
                 "loaded": self._v26_loaded,
                 "status": "not_loaded",
             }
@@ -4282,6 +4699,28 @@ class CsiPredictionService:
             status["garage_ratio_v3_shadow"] = shadow_stub
             status["garage_ratio_v2_shadow"] = {
                 **shadow_stub,
+            }
+
+        # ── V43 shadow test status ─────────────────────────────────────
+        if self._v43_loaded and self._v43_shadow:
+            status["v43_shadow"] = {
+                **self._v43_shadow,
+                "total_windows": self._v43_window_count,
+                "total_agreements": self._v43_agree_count,
+            }
+        elif V43_SHADOW_ENABLED:
+            status["v43_shadow"] = {
+                "loaded": self._v43_loaded,
+                "status": "warmup" if self._v43_loaded else "not_loaded",
+                "buffer_depth": len(self._v43_window_buffer),
+                "warmup_remaining": max(0, self._v43_seq_len - len(self._v43_window_buffer)),
+                "env_enabled": V43_SHADOW_ENABLED,
+                "model_path": str(V43_SHADOW_MODEL_PATH),
+            }
+        else:
+            status["v43_shadow"] = {
+                "enabled": False,
+                "status": "disabled (set SHADOW_V43=1 to enable)",
             }
 
         # ── V29 CNN zone shadow status ──────────────────────────────────
@@ -4334,7 +4773,9 @@ class CsiPredictionService:
             pass
 
         # ── Node health (keepalive + CSI packet tracking) ─────────────
-        status["nodes"] = self.get_node_health()
+        nodes = self.get_node_health()
+        status["nodes"] = nodes
+        status["dropout_summary"] = self._build_dropout_summary(nodes)
 
         # ── V23: Empty baseline calibration status ────────────────────
         status["empty_baseline"] = self.get_baseline_status()

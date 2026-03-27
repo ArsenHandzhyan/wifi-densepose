@@ -1,9 +1,9 @@
 {
     "bridge": {
-        "name": "Homebridge 3D5C",
-        "username": "0E:54:1D:15:3D:5C",
-        "port": 52000,
-        "pin": "412-96-255",
+        "name": "Homebridge 2375",
+        "username": "0E:D7:BE:13:23:75",
+        "port": 51160,
+        "pin": "540-45-155",
         "advertiser": "bonjour-hap"
     },
     "accessories": [],

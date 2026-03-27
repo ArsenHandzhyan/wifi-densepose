@@ -9,7 +9,7 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
 import { FP2Tab } from './FP2Tab.js?v=20260327-unified-01';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260327-layout-v3-01';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260327-v42-prod-01';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
 
@@ -159,6 +159,16 @@ function displayFewshotZone(value) {
     default:
       return String(value);
   }
+}
+
+function getShadowDisagreementLabel(shadowDisagreement) {
+  if (!shadowDisagreement) {
+    return UI_LOCALE.common.noData;
+  }
+  if (!shadowDisagreement.shadowLoaded) {
+    return 'shadow не загружен';
+  }
+  return shadowDisagreement.binaryDisagreement ? 'есть расхождение' : 'совпадает';
 }
 
 function getDoorZoneWindowCount(zoneShadow) {
@@ -485,14 +495,15 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, v27Binary7Nod
 
   if (selectedView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE) {
     const headline = v27Binary7NodeShadow?.binary || v27Binary7NodeShadow?.status || 'unknown';
+    const candidateName = v27Binary7NodeShadow?.candidateName || v27Binary7NodeShadow?.track || '7-node binary candidate';
     return {
       id: UI_RUNTIME_VIEW_OPTIONS.V27_7NODE,
-      label: 'V27 binary 7-node кандидат',
+      label: `${candidateName} / binary кандидат`,
       routeLabel: 'тестовый UI',
       state: headline,
       confidence: getV27Binary7NodeConfidence(v27Binary7NodeShadow),
-      modelVersion: 'v27_binary_7node',
-      modelId: 'v27_binary_7node.pkl',
+      modelVersion: v27Binary7NodeShadow?.track || candidateName,
+      modelId: candidateName,
       running: Boolean(v27Binary7NodeShadow?.loaded),
       modelLoaded: Boolean(v27Binary7NodeShadow?.loaded),
       nodesActive: primaryRuntime?.nodesActive,
@@ -505,7 +516,7 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, v27Binary7Nod
       targetY: null,
       inferenceMs: v27Binary7NodeShadow?.inferenceMs,
       threshold: v27Binary7NodeShadow?.threshold,
-      summary: 'UI показывает 7‑node binary кандидата из архивного payload v26_shadow; селектор меняет только представление, состояние backend не трогает.'
+      summary: 'UI показывает текущего 7-node binary кандидата из архивного payload v26_shadow; селектор меняет только представление, состояние backend не трогает.'
     };
   }
 
@@ -1632,9 +1643,9 @@ export class CsiOperatorApp {
       this.signalCoordinateHistory = [];
     }
 
-    // Keep a sliding window of recent raw samples for averaging
+    // Keep a sliding window of recent raw samples for median filtering
     this.signalCoordinateHistory.push({ x: target.xMeters, y: target.yMeters });
-    if (this.signalCoordinateHistory.length > 5) {
+    if (this.signalCoordinateHistory.length > 3) {
       this.signalCoordinateHistory.shift();
     }
 
@@ -1647,7 +1658,7 @@ export class CsiOperatorApp {
 
     const previous = this.signalCoordinateState;
     if (!previous) {
-      this.signalCoordinateState = { xMeters: medianX, yMeters: medianY, vx: 0, vy: 0 };
+      this.signalCoordinateState = { xMeters: medianX, yMeters: medianY };
       return { xMeters: medianX, yMeters: medianY };
     }
 
@@ -1655,24 +1666,13 @@ export class CsiOperatorApp {
     const dy = medianY - previous.yMeters;
     const distance = Math.hypot(dx, dy);
 
-    // Dead-zone: ignore jitter below 8cm
-    if (distance < 0.08) {
-      return { xMeters: previous.xMeters, yMeters: previous.yMeters };
-    }
-
-    // Adaptive alpha: very gentle for small/medium moves, faster for large jumps
-    const alpha = distance > 2.0 ? 0.50 : distance > 1.0 ? 0.25 : distance > 0.3 ? 0.15 : 0.10;
-
-    // Velocity damping: blend toward target with momentum
-    const velocityDamping = 0.6;
-    const vx = (previous.vx || 0) * velocityDamping + dx * alpha;
-    const vy = (previous.vy || 0) * velocityDamping + dy * alpha;
+    // Simple EMA — no dead-zone, no velocity damping
+    // Backend already does smoothing; UI just adds gentle follow
+    const alpha = distance > 2.0 ? 0.80 : distance > 0.5 ? 0.50 : 0.35;
 
     const smoothed = {
-      xMeters: previous.xMeters + vx,
-      yMeters: previous.yMeters + vy,
-      vx: vx,
-      vy: vy
+      xMeters: previous.xMeters + dx * alpha,
+      yMeters: previous.yMeters + dy * alpha
     };
 
     this.signalCoordinateState = smoothed;
@@ -2431,6 +2431,7 @@ export class CsiOperatorApp {
     const trust = snapshot?.live?.trust || { tone: 'neutral', label: 'booting', summary: 'Идёт загрузка live-runtime…' };
     const topology = snapshot?.live?.topology || {};
     const primaryRuntime = snapshot?.live?.primaryRuntime || {};
+    const shadowDisagreement = snapshot?.live?.shadowDisagreement || {};
     const trackBShadow = snapshot?.live?.trackBShadow || {};
     const v15Shadow = snapshot?.live?.v8Shadow || snapshot?.live?.v7Shadow || snapshot?.live?.v15Shadow || {};
     const v27Binary7NodeShadow = snapshot?.live?.v27Binary7NodeShadow || {};
@@ -2448,6 +2449,9 @@ export class CsiOperatorApp {
     const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const topologyLabel = getTopologyHeadline(topology, primaryRuntime);
     const sessionId = getRuntimeSessionText(snapshot);
+    const liveBinaryLabel = displayMaybeToken(shadowDisagreement.primaryBinary || primaryRuntime.binary || 'unknown');
+    const liveZoneLabel = displayMaybeToken(primaryRuntime.targetZone || runtimeView.targetZone || 'unknown');
+    const liveShadowLabel = displayMaybeToken(shadowDisagreement.shadowBinary || 'unknown');
 
     this.sections.overview.innerHTML = `
       <div class="summary-stack">
@@ -2457,9 +2461,13 @@ export class CsiOperatorApp {
           <div class="summary-card__meta">${escapeHtml(trust.summary)}</div>
         </div>
         <div class="summary-card tone-info">
-          <div class="summary-card__label">Режим UI</div>
-          <div class="summary-card__value">${escapeHtml(String(displayMaybeToken(runtimeView.state || 'unknown')).toUpperCase())}</div>
-          <div class="summary-card__meta">${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))} / дверь‑центр ${escapeHtml(zoneGate.state)}</div>
+          <div class="summary-card__label">Live verdict</div>
+          <div class="summary-card__value">${escapeHtml(String(liveBinaryLabel || 'unknown')).toUpperCase()}</div>
+          <div class="summary-card__meta">
+            binary ${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.primaryBinaryConfidence ?? primaryRuntime.binaryConfidence, 0))}
+            <br>zone ${escapeHtml(liveZoneLabel)} / ${escapeHtml(formatPercent(primaryRuntime.zoneConfidence, 0))}
+            <br>shadow ${escapeHtml(liveShadowLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.shadowBinaryConfidence, 0))} / ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))} · ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}
+          </div>
         </div>
         <div class="summary-card tone-neutral">
           <div class="summary-card__label">Runtime-сессия</div>
@@ -2499,6 +2507,7 @@ export class CsiOperatorApp {
     }
 
     const primaryRuntime = snapshot.live.primaryRuntime || {};
+    const shadowDisagreement = snapshot.live.shadowDisagreement || {};
     const secondaryRuntime = snapshot.live.secondaryRuntime || {};
     const trackBShadow = snapshot.live.trackBShadow || {};
     const v15Shadow = snapshot.live.v8Shadow || snapshot.live.v7Shadow || snapshot.live.v15Shadow || {};
@@ -2562,6 +2571,10 @@ export class CsiOperatorApp {
       ['EMPTY', v27Binary7NodeShadow.emptyProbability],
       ['OCCUPIED', v27Binary7NodeShadow.occupiedProbability]
     ].filter(([, value]) => value != null);
+    const binary7NodeCandidateName = v27Binary7NodeShadow.candidateName || v27Binary7NodeShadow.track || 'V42 binary balanced';
+    const liveBinaryLabel = displayMaybeToken(shadowDisagreement.primaryBinary || primaryRuntime.binary || 'unknown');
+    const liveZoneLabel = displayMaybeToken(primaryRuntime.targetZone || 'unknown');
+    const liveShadowLabel = displayMaybeToken(shadowDisagreement.shadowBinary || 'unknown');
 
     this.sections.live.innerHTML = `
       <section class="hero-panel">
@@ -2578,6 +2591,7 @@ export class CsiOperatorApp {
             <span class="tag ${toneClass(trust.tone)}">${escapeHtml(trust.summary)}</span>
             <span class="tag tone-info">${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))}</span>
             <span class="tag ${toneClass(zoneGate.tone)}">дверь‑центр ${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</span>
+            <span class="tag ${toneClass(shadowDisagreement.tone)}">shadow ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))} / ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}</span>
             <span class="tag tone-info">support‑path ${escapeHtml(getSupportStatusText({ ...support, status: support.candidateStatus || support.status }))}</span>
           </div>
         </div>
@@ -2602,21 +2616,20 @@ export class CsiOperatorApp {
 
       <div class="surface-grid surface-grid--four">
         <article class="panel">
-          <div class="panel__eyebrow">Выбранный режим отображения</div>
-          <div class="panel__headline">${escapeHtml(displayMaybeToken(runtimeView.state || 'unknown'))}</div>
+          <div class="panel__eyebrow">Операторский digest</div>
+          <div class="panel__headline">${escapeHtml(String(liveBinaryLabel || 'unknown'))} · ${escapeHtml(liveZoneLabel)}</div>
           <div class="kv-list">
-            <div class="kv"><span>Источник</span><strong>${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)}</strong></div>
-            <div class="kv"><span>Основная уверенность</span><strong>${escapeHtml(formatPercent(runtimeView.confidence, 0))}</strong></div>
-            <div class="kv"><span>Статус runtime</span><strong>${escapeHtml(runtimeView.running ? UI_LOCALE.common.running : 'offline')} / ${escapeHtml(runtimeView.modelLoaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Binary</span><strong>${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.primaryBinaryConfidence ?? primaryRuntime.binaryConfidence, 0))}</strong></div>
+            <div class="kv"><span>Zone</span><strong>${escapeHtml(liveZoneLabel)} / ${escapeHtml(formatPercent(primaryRuntime.zoneConfidence, 0))}</strong></div>
+            <div class="kv"><span>Shadow</span><strong>${escapeHtml(liveShadowLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.shadowBinaryConfidence, 0))} / ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))}</strong></div>
+            <div class="kv"><span>Disagreement</span><strong>${escapeHtml(shadowDisagreement.binaryDisagreement ? 'есть' : 'нет')} / ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}</strong></div>
+            <div class="kv"><span>Runtime</span><strong>${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)} / ${escapeHtml(runtimeView.running ? UI_LOCALE.common.running : 'offline')}</strong></div>
             <div class="kv"><span>Узлы / packets</span><strong>${escapeHtml(formatNumber(runtimeView.nodesActive))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatNumber(runtimeView.packetsInWindow))}</strong></div>
             <div class="kv"><span>PPS / возраст окна</span><strong>${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} / ${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong></div>
-            <div class="kv"><span>Дверь‑центр</span><strong>${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</strong></div>
-            <div class="kv"><span>Зона (V39 fewshot)</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))}${runtimeView.zoneProbabilities ? ` (${Object.entries(runtimeView.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ')})` : ''}</strong></div>
-            <div class="kv"><span>Координата</span><strong>${escapeHtml(formatNumber(runtimeView.targetX, 1))}, ${escapeHtml(formatNumber(runtimeView.targetY, 1))}${runtimeView.zoneModel ? ` [${escapeHtml(runtimeView.zoneModel)}]` : ''}</strong></div>
-            ${runtimeView.inferenceMs != null ? `<div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(runtimeView.inferenceMs, { digits: 2, unit: ' ms' }))}</strong></div>` : ''}
-            ${runtimeView.bufferDepth != null ? `<div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(runtimeView.bufferDepth))}/7 / ${escapeHtml(formatNumber(runtimeView.warmupRemaining))} до ready</strong></div>` : ''}
+            <div class="kv"><span>Model</span><strong>${escapeHtml(runtimeView.modelVersion || 'unknown')} / ${escapeHtml(runtimeView.modelLoaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Zone model</span><strong>${escapeHtml(primaryRuntime.zoneModel || 'unknown')} / ${primaryRuntime.zoneProbabilities ? Object.entries(primaryRuntime.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ') : 'нет вероятностей'}</strong></div>
           </div>
-          <div class="panel__footer">${escapeHtml(runtimeView.summary)}</div>
+          <div class="panel__footer">${escapeHtml(runtimeView.summary)} / ${escapeHtml(zoneGate.state)} · ${escapeHtml(zoneGate.detail)}</div>
         </article>
 
         <article class="panel">
@@ -2676,7 +2689,7 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">V27 binary 7-node кандидат</div>
+          <div class="panel__eyebrow">${escapeHtml(binary7NodeCandidateName)}</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(v27BinaryStatusToken))}</div>
           <div class="kv-list">
             <div class="kv"><span>Источник payload</span><strong>${escapeHtml(v27Binary7NodeShadow.sourceField || 'v26_shadow')}</strong></div>
@@ -2689,7 +2702,7 @@ export class CsiOperatorApp {
           <div class="metric-bars">
             ${v27BinaryProbabilities.length
               ? v27BinaryProbabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
-              : '<div class="muted">V27 binary 7-node ещё не прислал probability.</div>'}
+              : '<div class="muted">7-node binary кандидат ещё не прислал probability.</div>'}
           </div>
           <div class="panel__footer">В UI этот кандидат показывается отдельно как тестовый binary‑режим, хотя backend пока публикует его через архивный field v26_shadow.</div>
         </article>
@@ -3235,6 +3248,7 @@ export class CsiOperatorApp {
     const v27BinaryHeadline = v27Binary7NodeShadow.binary
       ? String(v27Binary7NodeShadow.binary).toLowerCase()
       : (v27Binary7NodeShadow.status || 'unknown');
+    const binary7NodeCandidateName = v27Binary7NodeShadow.candidateName || v27Binary7NodeShadow.track || 'V42 binary balanced';
     const garageV2Headline = garageRatioV2Shadow.predictedZone
       ? String(garageRatioV2Shadow.predictedZone).toLowerCase()
       : (garageRatioV2Shadow.status || 'unknown');
@@ -3310,7 +3324,7 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">V27 binary 7‑node кандидат</div>
+          <div class="panel__eyebrow">${escapeHtml(binary7NodeCandidateName)}</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(v27BinaryHeadline))}</div>
           <div class="kv-list">
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v27Binary7NodeShadow.status || 'unknown'))} / ${escapeHtml(v27Binary7NodeShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
@@ -3322,7 +3336,7 @@ export class CsiOperatorApp {
             <div class="kv"><span>Согласие с primary</span><strong>${escapeHtml(v27Binary7NodeShadow.agreeBinary == null ? 'ещё нет verdict' : (v27Binary7NodeShadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
             <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v27Binary7NodeShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
           </div>
-          <div class="panel__footer">Этот кандидат собран как v27_binary_7node.pkl, но backend пока публикует его через архивный контракт v26_shadow; UI теперь показывает его явно для ручного теста.</div>
+          <div class="panel__footer">Этот binary-кандидат публикуется через архивный контракт v26_shadow; UI показывает фактический candidate name явно для ручного теста.</div>
         </article>
 
         <article class="panel">
@@ -3435,7 +3449,7 @@ export class CsiOperatorApp {
             data-action="select-ui-runtime-view"
             data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.V27_7NODE}"
           >
-            V27 7-node / test
+            7-node binary / test
           </button>
           <button
             type="button"
@@ -3449,11 +3463,11 @@ export class CsiOperatorApp {
         <div class="panel__footer">
           Сейчас выбран <strong>${escapeHtml(
             selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-              ? 'Track B v1 кандидат'
+                ? 'Track B v1 кандидат'
               : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V15
                 ? 'V8 F2-spectral canonical кандидат'
                 : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
-                  ? 'V27 binary 7-node кандидат'
+                  ? binary7NodeCandidateName
                 : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
                   ? 'Garage Ratio V3 кандидат'
                 : 'Track A боевой'

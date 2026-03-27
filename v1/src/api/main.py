@@ -23,6 +23,10 @@ from src.api.middleware.rate_limit import RateLimitMiddleware
 from src.api.dependencies import get_pose_service, get_stream_service, get_hardware_service
 from src.api.websocket.connection_manager import connection_manager
 from src.api.websocket.pose_stream import PoseStreamHandler
+from src.services.backend_instance_guard import (
+    acquire_backend_instance_lock,
+    release_backend_instance_lock,
+)
 
 # Configure logging
 settings = get_settings()
@@ -36,6 +40,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting WiFi-DensePose API...")
     
     try:
+        lock_info = acquire_backend_instance_lock("v1.src.api.main:app")
+        logger.info("Backend instance guard acquired: %s", lock_info)
+
         # Initialize services
         await initialize_services(app)
         
@@ -53,6 +60,7 @@ async def lifespan(app: FastAPI):
         # Cleanup on shutdown
         logger.info("Shutting down WiFi-DensePose API...")
         await cleanup_services(app)
+        release_backend_instance_lock()
         logger.info("WiFi-DensePose API shutdown complete")
 
 

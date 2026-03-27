@@ -19,9 +19,9 @@ export const AGENT7_OPERATOR_TRUTH = {
   informationArchitecture: [
     {
       id: 'live',
-      label: 'Live-консоль',
+      label: 'Статус',
       role: 'first_screen',
-      summary: 'Live state, support-path, topology, trust и последнее значимое событие.'
+      summary: 'Live‑состояние, support‑path, топология, доверие и последнее значимое событие.'
     },
     {
       id: 'signal',
@@ -30,22 +30,40 @@ export const AGENT7_OPERATOR_TRUTH = {
       summary: 'Свежесть пакетов, активность узлов, динамика движения и сигнатура топологии.'
     },
     {
+      id: 'runtime',
+      label: 'Запись',
+      role: 'recording',
+      summary: 'Guided‑запись, ручной и freeform режимы, контроль голоса/видео и статус backend.'
+    },
+    {
+      id: 'labeling',
+      label: 'Разметка',
+      role: 'labeling',
+      summary: 'Видео‑разметка, список пакетов, ручные правки и быстрый доступ к обзору.'
+    },
+    {
+      id: 'validation',
+      label: 'Валидация',
+      role: 'dual_validation',
+      summary: 'Сверка видео-лейблов и CSI-отпечатков, разбор конфликтов, согласование корпуса.'
+    },
+    {
       id: 'model',
       label: 'Модель',
       role: 'frozen_truth',
-      summary: 'Primary runtime-контракт, current-best support-path, frozen baseline, threshold и границы scope.'
+      summary: 'Primary runtime‑контракт, текущий best‑candidate, baseline и границы scope.'
+    },
+    {
+      id: 'fp2',
+      label: 'FP2',
+      role: 'fp2',
+      summary: 'FP2 мониторинг и live‑телеметрия внутри единого интерфейса.'
     },
     {
       id: 'forensics',
-      label: 'Форензика',
+      label: 'Разбор',
       role: 'operator_analysis',
       summary: 'Ordered semantics, failure families, contamination notes и реестр артефактов.'
-    },
-    {
-      id: 'runtime',
-      label: 'Runtime / corpus',
-      role: 'health_and_artifacts',
-      summary: 'Здоровье backend, live-сервисы, runtime-policy и видимость экспериментов.'
     }
   ],
   currentBest: {

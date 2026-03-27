@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import uuid
+import sqlite3
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ _SCRIPTS_DIR = _PROJECT_ROOT / "scripts"
 _CAPTURES_DIR = _PROJECT_ROOT / "temp" / "captures"
 _MODELS_DIR = _PROJECT_ROOT / "temp" / "models"
 _DOCS_DIR = _PROJECT_ROOT / "docs"
+_GUIDED_REVIEW_DIR = _PROJECT_ROOT / "output" / "garage_guided_review_dense1"
 _SCRIPT_PYTHON = os.getenv("CSI_TRAINING_PYTHON", "python3")
 _RUN_LOCK = asyncio.Lock()
 _ACTIVE_RUN: dict[str, Any] | None = None
@@ -468,6 +470,13 @@ class LiveCSICaptureRequest(BaseModel):
     out_dir: str | None = Field(default=None, description="Optional output directory override.")
 
 
+class VideoTeacherAnnotationsSaveRequest(BaseModel):
+    recording_label: str = Field(..., description="Recording label.")
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    review_output_dir: str | None = None
+    is_gold: bool | None = None
+
+
 def _program_catalog() -> list[dict[str, Any]]:
     return [
         {
@@ -616,6 +625,89 @@ def _latest_artifact_mtime(artifacts: list[dict[str, Any]]) -> float | None:
             continue
         latest = mtime if latest is None else max(latest, mtime)
     return latest
+
+
+def _resolve_review_output_dir(recording_label: str, review_output_dir: str | None) -> Path:
+    if review_output_dir:
+        path = Path(review_output_dir).expanduser().resolve()
+        if _GUIDED_REVIEW_DIR not in path.parents and path != _GUIDED_REVIEW_DIR:
+            raise HTTPException(status_code=400, detail="review_output_dir outside allowed review directory")
+        return path
+    if not _GUIDED_REVIEW_DIR.exists():
+        raise HTTPException(status_code=404, detail="review directory not found")
+    matches: list[Path] = []
+    for viewer_data_path in _GUIDED_REVIEW_DIR.rglob("viewer_data.json"):
+        try:
+            payload = json.loads(viewer_data_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(payload.get("recording_label")) == recording_label:
+            matches.append(viewer_data_path.parent)
+    if not matches:
+        raise HTTPException(status_code=404, detail="review session not found")
+    return matches[0]
+
+
+def _save_annotations_db(
+    *,
+    recording_label: str,
+    output_dir: Path,
+    annotations: list[dict[str, Any]],
+    is_gold: bool,
+) -> Path:
+    db_path = _GUIDED_REVIEW_DIR / "annotations.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS video_teacher_annotations (
+                recording_label TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,
+                annotations_count INTEGER NOT NULL,
+                output_dir TEXT NOT NULL,
+                is_gold INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(video_teacher_annotations)")}
+        except sqlite3.Error:
+            columns = set()
+        if "is_gold" not in columns:
+            conn.execute("ALTER TABLE video_teacher_annotations ADD COLUMN is_gold INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            INSERT INTO video_teacher_annotations
+            (recording_label, updated_at, annotations_count, output_dir, is_gold, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(recording_label) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                annotations_count=excluded.annotations_count,
+                output_dir=excluded.output_dir,
+                is_gold=excluded.is_gold,
+                payload_json=excluded.payload_json
+            """,
+            (
+                recording_label,
+                _utc_now_iso(),
+                len(annotations),
+                str(output_dir),
+                1 if is_gold else 0,
+                json.dumps(
+                    {
+                        "recording_label": recording_label,
+                        "annotations": annotations,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -1049,6 +1141,52 @@ async def training_run_viewer(
             "reason": f"Viewer generation failed: {exc}",
         }
     return {"run_id": run_id, "viewer": viewer}
+
+
+@router.post("/video_teacher_annotations/save")
+async def save_video_teacher_annotations(payload: VideoTeacherAnnotationsSaveRequest) -> dict[str, Any]:
+    available, reason = _local_execution_available()
+    if not available:
+        raise HTTPException(status_code=400, detail=reason)
+    output_dir = _resolve_review_output_dir(payload.recording_label, payload.review_output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing_gold = False
+    existing_path = output_dir / "manual_annotations_v1.json"
+    if existing_path.exists():
+        try:
+            existing_payload = json.loads(existing_path.read_text(encoding="utf-8"))
+            existing_gold = bool(existing_payload.get("gold_standard"))
+        except Exception:
+            existing_gold = False
+    is_gold = existing_gold if payload.is_gold is None else bool(payload.is_gold)
+    out_path = output_dir / "manual_annotations_v1.json"
+    out_path.write_text(
+        json.dumps(
+            {
+                "recording_label": payload.recording_label,
+                "annotations": payload.annotations,
+                "gold_standard": is_gold,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = _save_annotations_db(
+        recording_label=payload.recording_label,
+        output_dir=output_dir,
+        annotations=payload.annotations,
+        is_gold=is_gold,
+    )
+    return {
+        "status": "ok",
+        "recording_label": payload.recording_label,
+        "annotations_count": len(payload.annotations),
+        "is_gold": is_gold,
+        "output_dir": str(output_dir),
+        "file_path": str(out_path),
+        "db_path": str(db_path),
+    }
 
 
 @router.post("/runs/current/stop")

@@ -108,3 +108,26 @@ def test_build_session_summary_marks_full_required_video_as_ready():
     assert summary["truth_summary"]["coverage_status"] == "full"
     assert summary["labeling_verdict"]["suitable_for_labeling"] is True
     assert summary["labeling_verdict"]["code"] == "video_backed_session_ready"
+
+
+def test_get_status_exposes_last_summary_aliases_for_ui_refresh():
+    service = make_service()
+    service.session_label = "saved_case"
+    service._last_stop_result = {
+        "label": "saved_case",
+        "stop_reason": "completed",
+        "session_status": "completed",
+    }
+    service._session_summary = {
+        "label": "saved_case",
+        "truth_summary": {"teacher_video_exists": True},
+        "labeling_verdict": {"suitable_for_labeling": True},
+    }
+
+    status = service.get_status()
+
+    assert status["recording"] is False
+    assert status["last_result"] == status["lastStopResult"]
+    assert status["last_session_summary"] == status["lastSessionSummary"]
+    assert status["lastStopResult"]["label"] == "saved_case"
+    assert status["lastSessionSummary"]["label"] == "saved_case"

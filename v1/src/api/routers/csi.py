@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -20,6 +21,7 @@ from ...services.zone_calibration_service import zone_calibration_service
 from ...services.csi_node_inventory import list_csi_nodes
 from ...services.fewshot_calibration_storage_service import fewshot_calibration_storage_service
 from ...services.fewshot_adaptation_consumer_service import fewshot_adaptation_consumer_service
+from ...services.dual_validation_service import DualValidationService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["CSI Prediction"])
@@ -28,6 +30,128 @@ TTS_HELPER = PROJECT_ROOT / "scripts" / "tts_helper.py"
 GARAGE_ZONE_REVIEW_PACKET_SCRIPT = PROJECT_ROOT / "scripts" / "init_garage_zone_review_packet.py"
 _tts_helper_lock = threading.Lock()
 _tts_helper_proc: subprocess.Popen | None = None
+DUAL_VALIDATION_GOLD_DIR = PROJECT_ROOT / "output" / "garage_guided_review_dense1"
+DUAL_VALIDATION_CAPTURES_DIR = PROJECT_ROOT / "temp" / "captures"
+DUAL_VALIDATION_OUTPUT_DIR = PROJECT_ROOT / "output" / "dual_validation"
+_validation_cache: dict[str, Any] = {}
+_validation_cache_ts: float | None = None
+_validation_source_mtime: float | None = None
+_validation_resolutions_path = DUAL_VALIDATION_OUTPUT_DIR / "resolutions.json"
+
+
+def _load_validation_resolutions() -> dict[str, Any]:
+    if _validation_resolutions_path.exists():
+        try:
+            return json.loads(_validation_resolutions_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_validation_resolutions(payload: dict[str, Any]) -> None:
+    DUAL_VALIDATION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _validation_resolutions_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _latest_validation_source_mtime() -> float:
+    latest = 0.0
+    if _validation_resolutions_path.exists():
+        try:
+            latest = max(latest, _validation_resolutions_path.stat().st_mtime)
+        except OSError:
+            pass
+    if DUAL_VALIDATION_GOLD_DIR.exists():
+        for ann_path in DUAL_VALIDATION_GOLD_DIR.rglob("manual_annotations_v1.json"):
+            try:
+                latest = max(latest, ann_path.stat().st_mtime)
+            except OSError:
+                continue
+    return latest
+
+
+def _ensure_validation_state(force: bool = False) -> dict[str, Any]:
+    global _validation_cache_ts, _validation_cache, _validation_source_mtime
+    now = time.time()
+    source_mtime = _latest_validation_source_mtime()
+    if (
+        not force
+        and _validation_cache_ts
+        and now - _validation_cache_ts < 15
+        and _validation_source_mtime == source_mtime
+    ):
+        return _validation_cache
+
+    svc = DualValidationService(
+        gold_dir=DUAL_VALIDATION_GOLD_DIR,
+        captures_dir=DUAL_VALIDATION_CAPTURES_DIR,
+    )
+    svc.load_gold_annotations()
+    svc.load_capture_data()
+    svc.build_zone_fingerprints()
+    svc.validate_all()
+    validated_doc, conflicts_doc = svc.get_output_bundle()
+    resolutions = _load_validation_resolutions()
+    _validation_cache = {
+        "generated": validated_doc.get("generated"),
+        "gold_fingerprints": validated_doc.get("gold_fingerprints", {}),
+        "segments": validated_doc.get("segments", []),
+        "summary": validated_doc.get("summary", {}),
+        "conflicts": conflicts_doc.get("conflicts", []),
+        "resolutions": resolutions.get("resolutions", {}),
+    }
+    _validation_cache_ts = now
+    _validation_source_mtime = source_mtime
+    return _validation_cache
+
+
+def _summarize_validation(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(segments)
+    validated = len([s for s in segments if s.get("status") == "validated"])
+    conflict = len([s for s in segments if s.get("status") == "conflict"])
+    ambiguous = len([s for s in segments if s.get("status") == "ambiguous"])
+    return {
+        "total_segments": total,
+        "validated_count": validated,
+        "conflict_count": conflict,
+        "ambiguous_count": ambiguous,
+        "validated_pct": validated / total if total else 0.0,
+        "conflict_pct": conflict / total if total else 0.0,
+        "ambiguous_pct": ambiguous / total if total else 0.0,
+    }
+
+
+def _segment_to_status(segment: dict[str, Any], resolution: dict[str, Any] | None) -> dict[str, Any]:
+    start_sec = float(segment.get("start_sec", 0))
+    end_sec = float(segment.get("end_sec", 0))
+    return {
+        "segment_id": segment.get("id"),
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "duration_sec": max(0.0, end_sec - start_sec),
+        "video_label": segment.get("video_label"),
+        "csi_label": segment.get("csi_closest_zone"),
+        "similarity_score": segment.get("csi_similarity"),
+        "validation_status": segment.get("status"),
+        "resolved_by": resolution.get("resolved_by") if resolution else None,
+        "resolved_at": resolution.get("resolved_at") if resolution else None,
+        "resolution": resolution.get("resolution") if resolution else None,
+    }
+
+
+def _extract_node_fingerprint(stats: dict[str, Any]) -> dict[str, Any]:
+    per_node: dict[str, Any] = {}
+    for key, value in stats.items():
+        if "_" not in key:
+            continue
+        node_id, feat = key.split("_", 1)
+        if node_id not in per_node:
+            per_node[node_id] = {}
+        if feat in {"amp_mean", "sc_var_mean", "rssi_mean", "motion_mean", "tvar", "diff1"}:
+            per_node[node_id][feat] = value.get("mean") if isinstance(value, dict) else value
+    return per_node
 
 
 def _resolve_tts_helper_python() -> str:
@@ -180,6 +304,17 @@ class RuntimeModelSelectRequest(BaseModel):
     model_id: str
 
 
+class ValidationResolveRequest(BaseModel):
+    segment_id: str
+    resolution: str
+    operator_note: str | None = None
+
+
+class ValidationBatchApproveRequest(BaseModel):
+    recording_id: str | None = None
+    dry_run: bool = False
+
+
 @router.get("/status")
 async def csi_status():
     """Current CSI prediction status with history."""
@@ -218,6 +353,112 @@ async def csi_select_model(req: RuntimeModelSelectRequest):
     }
 
 
+@router.get("/validation/status")
+async def csi_validation_status(
+    recording_id: str | None = None,
+    manifest_version: str | None = None,
+    status_filter: str | None = None,
+    refresh: bool = False,
+):
+    state = _ensure_validation_state(force=refresh)
+    segments = list(state.get("segments", []))
+    if recording_id:
+        segments = [s for s in segments if s.get("recording_label") == recording_id]
+    if status_filter and status_filter != "all":
+        segments = [s for s in segments if s.get("status") == status_filter]
+    resolutions = state.get("resolutions", {})
+    payload_segments = [
+        _segment_to_status(seg, resolutions.get(seg.get("id"))) for seg in segments
+    ]
+    return {
+        "recording_id": recording_id,
+        "manifest_version": manifest_version,
+        "summary": _summarize_validation(segments),
+        "segments": payload_segments,
+    }
+
+
+@router.get("/validation/segment/{segment_id}")
+async def csi_validation_segment(segment_id: str):
+    state = _ensure_validation_state(force=False)
+    segments = state.get("segments", [])
+    segment = next((s for s in segments if s.get("id") == segment_id), None)
+    if not segment:
+        raise HTTPException(status_code=404, detail="segment not found")
+    resolutions = state.get("resolutions", {})
+    closest_zone = segment.get("csi_closest_zone")
+    fp_stats = state.get("gold_fingerprints", {}).get(closest_zone, {})
+    per_node = _extract_node_fingerprint(fp_stats.get("stats", {}) if isinstance(fp_stats, dict) else {})
+    resolution = resolutions.get(segment_id)
+    return {
+        "segment_id": segment_id,
+        "start_sec": segment.get("start_sec"),
+        "end_sec": segment.get("end_sec"),
+        "video_label": segment.get("video_label"),
+        "csi_label": segment.get("csi_closest_zone"),
+        "similarity_score": segment.get("csi_similarity"),
+        "validation_status": segment.get("status"),
+        "all_similarities": segment.get("all_similarities", {}),
+        "csi_fingerprint": {"per_node": per_node, "zone": closest_zone},
+        "resolution": resolution.get("resolution") if resolution else None,
+        "operator_note": resolution.get("operator_note") if resolution else None,
+        "resolved_at": resolution.get("resolved_at") if resolution else None,
+    }
+
+
+@router.post("/validation/resolve")
+async def csi_validation_resolve(payload: ValidationResolveRequest):
+    if payload.resolution not in {"confirm_video", "accept_csi", "mark_ambiguous"}:
+        raise HTTPException(status_code=400, detail="invalid resolution")
+    state = _ensure_validation_state(force=False)
+    resolutions = state.get("resolutions", {})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    resolutions[payload.segment_id] = {
+        "resolution": payload.resolution,
+        "resolved_by": "operator",
+        "resolved_at": now_iso,
+        "operator_note": payload.operator_note,
+    }
+    _save_validation_resolutions({"resolutions": resolutions})
+    state["resolutions"] = resolutions
+    return {
+        "segment_id": payload.segment_id,
+        "resolution": payload.resolution,
+        "resolved_at": now_iso,
+        "updated_summary": _summarize_validation(state.get("segments", [])),
+    }
+
+
+@router.post("/validation/batch-approve")
+async def csi_validation_batch_approve(payload: ValidationBatchApproveRequest):
+    state = _ensure_validation_state(force=False)
+    segments = state.get("segments", [])
+    if payload.recording_id:
+        segments = [s for s in segments if s.get("recording_label") == payload.recording_id]
+    validated = [s for s in segments if s.get("status") == "validated"]
+    if payload.dry_run:
+        return {"approved_count": len(validated), "skipped_count": 0, "updated_summary": _summarize_validation(segments)}
+    resolutions = state.get("resolutions", {})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for seg in validated:
+        seg_id = seg.get("id")
+        if not seg_id:
+            continue
+        resolutions[seg_id] = {
+            "resolution": "confirm_video",
+            "resolved_by": "auto",
+            "resolved_at": now_iso,
+            "operator_note": None,
+        }
+    _save_validation_resolutions({"resolutions": resolutions})
+    state["resolutions"] = resolutions
+    return {
+        "approved_count": len(validated),
+        "skipped_count": 0,
+        "updated_summary": _summarize_validation(segments),
+    }
+
+
 @router.post("/start")
 async def csi_start():
     """Start CSI prediction (load model + start UDP listener)."""
@@ -245,6 +486,18 @@ async def csi_stop():
     """Stop CSI prediction."""
     await csi_prediction_service.stop()
     return {"status": "stopped"}
+
+
+@router.post("/voice/start")
+async def csi_voice_start():
+    """Enable real-time voice announcements via ElevenLabs TTS."""
+    return csi_prediction_service.voice_start()
+
+
+@router.post("/voice/stop")
+async def csi_voice_stop():
+    """Disable voice announcements."""
+    return csi_prediction_service.voice_stop()
 
 
 @router.get("/nodes")
@@ -281,6 +534,12 @@ async def csi_nodes():
                 })
 
     return {"nodes": nodes}
+
+
+@router.get("/nodes/health")
+async def csi_nodes_health():
+    """Per-node health based on last-seen CSI/keepalive packets."""
+    return csi_prediction_service.get_node_health()
 
 
 # ── Recording endpoints ────────────────────────────────────────

@@ -8,7 +8,8 @@ import {
   getManualCapturePreset,
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260326-stabilize-01';
+import { FP2Tab } from './FP2Tab.js?v=20260327-unified-01';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260327-layout-v3-01';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
 
@@ -160,6 +161,60 @@ function displayFewshotZone(value) {
   }
 }
 
+function getDoorZoneWindowCount(zoneShadow) {
+  return safeNumber(zoneShadow?.nCalWindows?.door, safeNumber(zoneShadow?.nCalWindows?.door_passage, 0)) || 0;
+}
+
+function buildDoorCenterCalibrationGate(zoneShadow, fewshot = {}) {
+  const centerWindows = safeNumber(zoneShadow?.nCalWindows?.center, 0) || 0;
+  const doorWindows = getDoorZoneWindowCount(zoneShadow);
+  const zones = Array.isArray(zoneShadow?.zonesCalibrated) ? zoneShadow.zonesCalibrated : [];
+  const hasCenter = zones.includes('center');
+  const hasDoor = zones.includes('door') || zones.includes('door_passage');
+  const ready = Boolean(zoneShadow?.calibrated && hasCenter && hasDoor);
+  const fewshotStatus = String(fewshot?.status || 'idle');
+  const rejectionReason = zoneShadow?.rejectionReason || fewshot?.fitResult?.error || fewshot?.lastError || null;
+  const windowDetail = `center ${formatNumber(centerWindows, 0)} / door ${formatNumber(doorWindows, 0)}`;
+
+  if (ready) {
+    return {
+      state: 'готово',
+      detail: `${windowDetail} / quality ${zoneShadow?.calibrationQuality || 'unknown'}`,
+      tone: 'ok'
+    };
+  }
+
+  if (zoneShadow?.status === 'calibrating' || ['cueing', 'running', 'paused', 'stopping'].includes(fewshotStatus)) {
+    return {
+      state: 'калибруется',
+      detail: `${windowDetail} / few-shot ${fewshotStatus}`,
+      tone: 'warn'
+    };
+  }
+
+  if (centerWindows + doorWindows === 0) {
+    return {
+      state: 'не готово',
+      detail: `few-shot пустой: ${windowDetail}`,
+      tone: 'risk'
+    };
+  }
+
+  if (rejectionReason) {
+    return {
+      state: 'отклонено',
+      detail: `${windowDetail} / ${rejectionReason}`,
+      tone: 'risk'
+    };
+  }
+
+  return {
+    state: 'не готово',
+    detail: `${windowDetail} / нужна рабочая калибровка door vs center`,
+    tone: 'warn'
+  };
+}
+
 function normalizeSearchValue(value) {
   return String(value ?? '')
     .toLowerCase()
@@ -279,16 +334,19 @@ const DEFAULT_GARAGE_LAYOUT = {
   door: { xMeters: 0.0, yMeters: 0.0 },
   zones: {
     doorMaxY: 3.5,
-    deepMinY: 5.0
+    deepMinY: 5.0,
+    // Подзоны внутри door (center-based X: -1.5..+1.5)
+    zone3: { xMin: 0.50, xMax: 1.50, yMin: 0.0, yMax: 3.5, label: 'Проход' },
+    zone4: { xMin: -0.50, xMax: 0.50, yMin: 0.0, yMax: 1.0, label: 'FP2' }
   },
   nodes: [
     { nodeId: 'node01', ip: '192.168.1.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
     { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.105', xMeters: 0.00, yMeters: 3.50, zone: 'center' },
-    { nodeId: 'node06', ip: '192.168.1.106', xMeters: -1.50, yMeters: 4.35, zone: 'center' },
-    { nodeId: 'node07', ip: '192.168.1.107', xMeters: 1.50, yMeters: 3.70, zone: 'center' }
+    { nodeId: 'node05', ip: '192.168.1.33',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.1.77',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.1.41',  xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
 const DEFAULT_VISIBLE_NODE_COUNT = Math.max(DEFAULT_GARAGE_LAYOUT.nodes.length, 7);
@@ -304,6 +362,7 @@ const UI_RUNTIME_VIEW_OPTIONS = {
   TRACK_A: 'track_a',
   TRACK_B: 'track_b',
   V15: 'v15',
+  V27_7NODE: 'v27_7node',
   GARAGE_V2: 'garage_v2'
 };
 
@@ -315,6 +374,9 @@ function readUiRuntimeViewSelection() {
     }
     if (raw === UI_RUNTIME_VIEW_OPTIONS.V15) {
       return UI_RUNTIME_VIEW_OPTIONS.V15;
+    }
+    if (raw === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE) {
+      return UI_RUNTIME_VIEW_OPTIONS.V27_7NODE;
     }
     if (raw === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2) {
       return UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2;
@@ -360,13 +422,21 @@ function getGarageRatioV2Confidence(shadow) {
   return candidates.length ? Math.max(...candidates) : null;
 }
 
-function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, selectedView) {
+function getV27Binary7NodeConfidence(shadow) {
+  const candidates = [
+    Number(shadow?.emptyProbability),
+    Number(shadow?.occupiedProbability)
+  ].filter((value) => Number.isFinite(value));
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, v27Binary7NodeShadow, garageRatioV2Shadow, selectedView) {
   if (selectedView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B) {
     const headline = trackBShadow?.predictedClass || trackBShadow?.status || 'unknown';
     return {
       id: UI_RUNTIME_VIEW_OPTIONS.TRACK_B,
-      label: 'Track B v1 candidate',
-      routeLabel: 'shadow-only',
+      label: 'Track B v1 кандидат',
+      routeLabel: 'только shadow',
       state: headline,
       confidence: getTrackBShadowConfidence(trackBShadow),
       modelVersion: 'track_b_v1',
@@ -382,7 +452,7 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
       targetX: null,
       targetY: null,
       inferenceMs: trackBShadow?.inferenceMs,
-      summary: 'UI показывает Track B как тестовый runtime-view; production routing остаётся на Track A.'
+      summary: 'UI показывает Track B как тестовый режим отображения; боевой маршрут остаётся на Track A.'
     };
   }
 
@@ -390,8 +460,8 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
     const headline = v15Shadow?.predictedClass || v15Shadow?.status || 'unknown';
     return {
       id: UI_RUNTIME_VIEW_OPTIONS.V15,
-      label: 'V8 F2-spectral canonical candidate',
-      routeLabel: 'shadow-only',
+      label: 'V8 F2-spectral canonical кандидат',
+      routeLabel: 'только shadow',
       state: headline,
       confidence: getShadowConfidence(v15Shadow),
       modelVersion: 'v8_f2spectral_canonical',
@@ -409,7 +479,33 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
       inferenceMs: v15Shadow?.inferenceMs,
       bufferDepth: v15Shadow?.bufferDepth,
       warmupRemaining: v15Shadow?.warmupRemaining,
-      summary: 'UI показывает V8 как test-only shadow candidate с буфером 7 окон; production routing остаётся на Track A.'
+      summary: 'UI показывает V8 как shadow‑кандидат только для теста, буфер 7 окон; боевой маршрут остаётся на Track A.'
+    };
+  }
+
+  if (selectedView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE) {
+    const headline = v27Binary7NodeShadow?.binary || v27Binary7NodeShadow?.status || 'unknown';
+    return {
+      id: UI_RUNTIME_VIEW_OPTIONS.V27_7NODE,
+      label: 'V27 binary 7-node кандидат',
+      routeLabel: 'тестовый UI',
+      state: headline,
+      confidence: getV27Binary7NodeConfidence(v27Binary7NodeShadow),
+      modelVersion: 'v27_binary_7node',
+      modelId: 'v27_binary_7node.pkl',
+      running: Boolean(v27Binary7NodeShadow?.loaded),
+      modelLoaded: Boolean(v27Binary7NodeShadow?.loaded),
+      nodesActive: primaryRuntime?.nodesActive,
+      totalNodes: Number(primaryRuntime?.totalNodes) || DEFAULT_VISIBLE_NODE_COUNT,
+      packetsInWindow: primaryRuntime?.packetsInWindow,
+      packetsPerSecond: primaryRuntime?.packetsPerSecond,
+      windowAgeSec: primaryRuntime?.windowAgeSec,
+      targetZone: v27Binary7NodeShadow?.binary || 'unknown',
+      targetX: null,
+      targetY: null,
+      inferenceMs: v27Binary7NodeShadow?.inferenceMs,
+      threshold: v27Binary7NodeShadow?.threshold,
+      summary: 'UI показывает 7‑node binary кандидата из архивного payload v26_shadow; селектор меняет только представление, состояние backend не трогает.'
     };
   }
 
@@ -417,8 +513,8 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
     const headline = garageRatioV2Shadow?.predictedZone || garageRatioV2Shadow?.status || 'unknown';
     return {
       id: UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2,
-      label: 'Garage Ratio V3 candidate',
-      routeLabel: 'shadow-only',
+      label: 'Garage Ratio V3 кандидат',
+      routeLabel: 'только shadow',
       state: headline,
       confidence: getGarageRatioV2Confidence(garageRatioV2Shadow),
       modelVersion: garageRatioV2Shadow?.candidateName || 'GARAGE_RATIO_LAYER_V3_CANDIDATE',
@@ -434,7 +530,7 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
       targetX: null,
       targetY: null,
       inferenceMs: garageRatioV2Shadow?.inferenceMs,
-      summary: 'UI показывает гаражный V3 ratio-layer как shadow candidate; production routing остаётся на Track A.'
+      summary: 'UI показывает гаражный V3 ratio‑layer как shadow‑кандидат; боевой маршрут остаётся на Track A.'
     };
   }
 
@@ -445,8 +541,8 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
 
   return {
     id: UI_RUNTIME_VIEW_OPTIONS.TRACK_A,
-    label: 'Track A production',
-    routeLabel: 'production',
+    label: 'Track A боевой',
+    routeLabel: 'боевой',
     state: trackAState,
     confidence: primaryRuntime?.confidence,
     modelVersion: primaryRuntime?.modelVersion,
@@ -462,7 +558,7 @@ function buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2
     targetX: primaryRuntime?.targetX,
     targetY: primaryRuntime?.targetY,
     inferenceMs: null,
-    summary: 'UI показывает текущий production runtime Track A.'
+    summary: 'UI показывает текущий боевой runtime Track A.'
   };
 }
 const DEFAULT_MAC_CAMERA_DEVICE = '0';
@@ -521,7 +617,7 @@ function getAggregateNodeNote(nodes, primaryRuntime) {
     return null;
   }
   const totalNodes = Math.max(Number(primaryRuntime?.totalNodes) || 0, nodes.length || 0, DEFAULT_VISIBLE_NODE_COUNT, activeNodes);
-  return `Motion-runtime видит ${activeNodes}/${totalNodes} источника, но по пакетам доступен только сводный уровень.`;
+  return `Runtime видит ${activeNodes}/${totalNodes} источника, но по пакетам доступен только сводный уровень.`;
 }
 
 function getNodeValueText(node) {
@@ -605,7 +701,7 @@ function formatLiveEventDetail(detail) {
 
 function getSupportStatusText(support) {
   if (!support) {
-    return 'support-path не прислал статус';
+      return 'support‑path не прислал статус';
   }
   if ((support.status === 'unknown' || !support.status) && isSupportPathMissing(support)) {
     return 'без live-данных';
@@ -615,17 +711,17 @@ function getSupportStatusText(support) {
 
 function getSupportHeadline(support) {
   if (!support) {
-    return 'support-path не прислал данные';
+    return 'support‑path не прислал данные';
   }
   if (isSupportPathMissing(support)) {
-    return 'support-path не получен';
+    return 'support‑path не получен';
   }
   return displayMaybeToken(support.candidateName);
 }
 
 function getSupportReasonText(support) {
   if (!support) {
-    return 'support-path не прислал причину';
+    return 'support‑path не прислал причину';
   }
   if ((support.reason === 'unknown' || !support.reason) && isSupportPathMissing(support)) {
     return 'pose payload не прислал support_observations';
@@ -694,11 +790,11 @@ function getStartupSignalGuard(recording) {
     reason: guard?.reason || guard?.note || (deadOnStart
       ? 'CSI сигнал не пошёл. Запись остановлена.'
       : passed
-        ? 'startup guard passed'
-        : 'startup guard pending'),
+    ? 'проверка старта пройдена'
+    : 'проверка старта в ожидании'),
     thresholds,
     metrics,
-    note: guard?.note || (deadOnStart ? 'Auto-stop по startup_signal_guard' : 'startup guard waiting'),
+    note: guard?.note || (deadOnStart ? 'Автостоп по startup_signal_guard' : 'проверка старта в ожидании'),
     raw: guard
   };
 }
@@ -724,7 +820,7 @@ function getStartupSignalGuardLabel(guard) {
     return 'startup_signal_guard: csi_dead_on_start';
   }
   if (guard.passed) {
-    return 'startup_signal_guard: passed';
+    return 'startup_signal_guard: пройдена';
   }
   return `startup_signal_guard: ${displayToken(guard.status || 'unknown')}`;
 }
@@ -853,9 +949,9 @@ function getTeacherSourceKindLabel(kind) {
     case TEACHER_SOURCE_KIND.PIXEL_RTSP:
       return 'Pixel RTSP';
     case TEACHER_SOURCE_KIND.MAC_CAMERA:
-      return 'Mac Camera';
+    return 'Камера Mac';
     case TEACHER_SOURCE_KIND.NONE:
-      return 'none (legacy/degraded)';
+      return 'нет (архивный/деградированный)';
     default:
       return humanizeToken(kind);
   }
@@ -868,7 +964,7 @@ function getTeacherSourceSelectionDetail(selection) {
     case TEACHER_SOURCE_KIND.MAC_CAMERA:
       return `${selection.macDeviceName || DEFAULT_MAC_CAMERA_DEVICE_NAME} · device=${selection.macDevice || DEFAULT_MAC_CAMERA_DEVICE}`;
     case TEACHER_SOURCE_KIND.NONE:
-      return 'Legacy/degraded path без teacher video.';
+      return 'Архивный путь без teacher‑видео.';
     default:
       return UI_LOCALE.common.noData;
   }
@@ -936,18 +1032,18 @@ function getCanonicalRecordingState(snapshot) {
       ? 'risk'
       : videoChecked ? (videoAvailable ? 'ok' : 'risk') : 'warn',
     reason: selectedTeacherKind === TEACHER_SOURCE_KIND.NONE
-      ? 'Выбран legacy/degraded source none. Канонический freeform не стартует с teacher_source_kind=none.'
+      ? 'Выбран архивный источник none. Канонический freeform не стартует с teacher_source_kind=none.'
       : videoChecked
         ? (videoAvailable
-            ? `Preflight подтвердил ${teacherResolvedLabel} как явный teacher source.`
-            : (videoError || `Preflight не подтвердил ${teacherResolvedLabel}.`))
-        : `Teacher source выбран явно (${teacherSelectionLabel}), но ещё не проверен preflight.`
+            ? `Предпроверка подтвердила ${teacherResolvedLabel} как явный источник teacher.`
+            : (videoError || `Предпроверка не подтвердила ${teacherResolvedLabel}.`))
+        : `Источник teacher выбран явно (${teacherSelectionLabel}), но ещё не проверен предпроверкой.`
   };
 
   let truth = {
-    label: 'ожидает preflight',
+    label: 'ожидает предпроверку',
     tone: 'warn',
-    summary: 'Truth-layer ещё не подтверждён: сначала нужен video-backed preflight.'
+    summary: 'Слой truth ещё не подтверждён: сначала нужна предпроверка с видео.'
   };
 
   const activeVideoBackedSession = Boolean(status.recording && status.with_video);
@@ -955,76 +1051,76 @@ function getCanonicalRecordingState(snapshot) {
 
   if ((manualActive && !status.with_video) || legacyFreeformActive) {
     truth = {
-      label: 'legacy without teacher',
+      label: 'архив без teacher-видео',
       tone: 'risk',
       summary: legacyFreeformActive
-        ? 'Идёт legacy freeform без video-backed teacher source. Это не каноническая teacher-запись.'
-        : 'Идёт legacy-сессия без video-backed teacher source. Это не каноническая teacher-запись.'
+        ? 'Идёт архивный freeform без teacher-видео. Это не каноническая teacher‑запись.'
+        : 'Идёт архивная сессия без teacher-видео. Это не каноническая teacher‑запись.'
     };
   } else if (activeTruthTrackedSession) {
     if (videoChecked && !videoAvailable) {
       truth = {
-        label: 'truth lost',
+        label: 'доверие потеряно',
         tone: 'risk',
-        summary: videoError || 'Сессия требует видео, но teacher source недоступен.'
+        summary: videoError || 'Сессия требует видео, но источник teacher недоступен.'
       };
     } else if (trust.label === 'offline' || liveSourceCount < 3) {
       truth = {
-        label: 'truth lost',
+        label: 'доверие потеряно',
         tone: 'risk',
         summary: trust.label === 'offline'
-          ? 'Live runtime ушёл в offline во время teacher-сессии.'
+          ? 'Живой runtime ушёл в оффлайн во время teacher-сессии.'
           : `Live coverage просела до ${liveSourceCount}/${Math.max(liveSourceCount, readyNodes, DEFAULT_VISIBLE_NODE_COUNT)} активных источников.`
       };
     } else if (trust.label === 'degraded' || trust.tone === 'warn' || truthInvalidationReason) {
       truth = {
-        label: 'degraded',
+        label: 'деградация',
         tone: 'warn',
         summary: truthInvalidationReason
-          ? `Truth coverage деградировал: ${displayToken(truthInvalidationReason)}.`
-          : `Live trust сейчас ${displayToken(trust.label || 'degraded')}; teacher truth нужно считать degraded.`
+          ? `Покрытие truth деградировало: ${displayToken(truthInvalidationReason)}.`
+          : `Сейчас live trust = ${displayToken(trust.label || 'degraded')}; teacher truth нужно считать деградировавшим.`
       };
     } else {
       truth = {
-        label: 'video-backed',
+        label: 'с видео',
         tone: 'ok',
-        summary: `Teacher-session остаётся video-backed; live trust ${displayToken(trust.label || 'ready')} и ${Math.max(liveSourceCount, readyNodes)}/${Math.max(liveSourceCount, readyNodes, DEFAULT_VISIBLE_NODE_COUNT)} источников активны.`
+        summary: `Teacher-сессия остаётся с видео; live trust ${displayToken(trust.label || 'ready')} и ${Math.max(liveSourceCount, readyNodes)}/${Math.max(liveSourceCount, readyNodes, DEFAULT_VISIBLE_NODE_COUNT)} источников активны.`
       };
     }
   } else if (preflight.ok && videoAvailable) {
     truth = {
       label: 'ready',
       tone: 'ok',
-      summary: 'Preflight подтвердил video-backed source; можно стартовать каноническую запись.'
+      summary: 'Предпроверка подтвердила источник с видео; можно стартовать каноническую запись.'
     };
   }
 
   const blockReasons = [];
   if (guidedActive) {
-    blockReasons.push('Сейчас активен legacy guided-пакет. Останови его, прежде чем запускать канонический freeform.');
+    blockReasons.push('Сейчас активен архивный guided‑пакет. Останови его, прежде чем запускать канонический freeform.');
   }
   if (legacyFreeformActive) {
-    blockReasons.push('Сейчас идёт legacy freeform без teacher video. Канонический freeform заблокирован, пока эта сессия не завершится.');
+    blockReasons.push('Сейчас идёт архивный freeform без teacher‑видео. Канонический freeform заблокирован, пока эта сессия не завершится.');
   }
   if (manualActive && !legacyFreeformActive) {
     blockReasons.push(status.with_video
       ? 'Сейчас активна ручная запись. Канонический freeform ждёт освобождения backend.'
-      : 'Сейчас активна legacy ручная запись без teacher video. Канонический freeform заблокирован.');
+      : 'Сейчас активна архивная ручная запись без teacher‑видео. Канонический freeform заблокирован.');
   }
   if (!Number.isFinite(Number(freeform.personCount)) || Number(freeform.personCount) < 1) {
     blockReasons.push('Сначала выбери количество людей для freeform-сессии.');
   }
   if (selectedTeacherKind === TEACHER_SOURCE_KIND.NONE) {
-    blockReasons.push('Выбран legacy/degraded source none. Для канонического freeform нужен Pixel RTSP или Mac Camera.');
+    blockReasons.push('Выбран архивный source none. Для канонического freeform нужен Pixel RTSP или камера Mac.');
   }
   if (!videoChecked) {
-    blockReasons.push('Сначала запусти preflight, чтобы явно проверить teacher source и узлы.');
+    blockReasons.push('Сначала запусти предпроверку, чтобы явно проверить источник teacher и узлы.');
   }
   if (videoChecked && !videoAvailable) {
-    blockReasons.push(videoError || 'Teacher video source недоступен, поэтому start заблокирован.');
+    blockReasons.push(videoError || 'Источник teacher-видео недоступен, поэтому старт заблокирован.');
   }
   if (videoChecked && !preflight.ok) {
-    blockReasons.push(recording.preflightError || preflight.error || 'Preflight не подтвердил operational readiness.');
+    blockReasons.push(recording.preflightError || preflight.error || 'Предпроверка не подтвердила operational readiness.');
   }
 
   return {
@@ -1067,7 +1163,7 @@ function getSupportTopologyText(signature) {
 
 function getRequiredTopologyText(support) {
   if (isSupportPathMissing(support)) {
-    return 'support-path не прислал';
+    return 'support‑path не прислал';
   }
   return getSupportTopologyText(support.requiredTopologySignature);
 }
@@ -1087,14 +1183,14 @@ function getSupportProbabilityText(support) {
   if (support?.probability != null && !Number.isNaN(Number(support.probability))) {
     return formatNumber(support.probability, 4);
   }
-  return isSupportPathMissing(support) ? 'support-path не рассчитан' : 'вероятность не передана';
+    return isSupportPathMissing(support) ? 'support‑path не рассчитан' : 'вероятность не передана';
 }
 
 function getSupportThresholdText(support) {
   if (support?.threshold != null && !Number.isNaN(Number(support.threshold))) {
     return formatNumber(support.threshold, 3);
   }
-  return isSupportPathMissing(support) ? 'support-path не рассчитан' : 'threshold не передан';
+    return isSupportPathMissing(support) ? 'support‑path не рассчитан' : 'порог не передан';
 }
 
 function getSupportLastEventText(support) {
@@ -1109,7 +1205,7 @@ function getSupportTimingText(value, support) {
   if (value != null && !Number.isNaN(Number(value))) {
     return formatRelativeTime(value);
   }
-  return isSupportPathMissing(support) ? 'support-path не активен' : 'время не передано';
+    return isSupportPathMissing(support) ? 'support‑path не активен' : 'время не передано';
 }
 
 function getFingerprintLabelText(fingerprint) {
@@ -1128,13 +1224,13 @@ function getFingerprintMarginText(fingerprint) {
 
 function getCoordinateSourceText(coordinate) {
   if (coordinate?.ambiguityActive) {
-    return 'диагностическая координата (ambiguity safe-mode)';
+    return 'диагностическая координата (безопасный режим неоднозначности)';
   }
   if (coordinate?.activeForMap && coordinate?.operatorXMeters != null && coordinate?.operatorYMeters != null) {
-    return 'operator-safe confirmed motion gate';
+    return 'подтверждённый motion gate в безопасном режиме оператора';
   }
   if (coordinate?.activeForMap === false && (coordinate?.xCm != null || coordinate?.yCm != null)) {
-    return 'диагностическая координата (вне active motion)';
+    return 'диагностическая координата (вне активного движения)';
   }
   if (coordinate?.source && coordinate.source !== 'unknown') {
     return displayToken(coordinate.source);
@@ -1447,6 +1543,7 @@ export class CsiOperatorApp {
     this.service = new CsiOperatorService();
     this.snapshot = null;
     this.unsubscribe = null;
+    this.fp2Tab = null;
     this.sections = {};
     this.forensicQuery = '';
     this.forensicViewMode = 'time';
@@ -1456,6 +1553,7 @@ export class CsiOperatorApp {
     this.lastRenderedForensicRunId = null;
     this.signalCoordinateState = null;
     this.runtimeViewSelection = readUiRuntimeViewSelection();
+    this.validationFilter = 'all';
     this.runtimeRecordingUi = {
       showLegacyGuided: false,
       showLegacyManual: false,
@@ -1476,6 +1574,14 @@ export class CsiOperatorApp {
     document.addEventListener('keydown', this.handleGlobalKeydown);
     this.tabManager = new TabManager(this.root);
     this.tabManager.init();
+    this.tabManager.onTabChange((tabId) => {
+      if (tabId === 'fp2') {
+        this.initFp2Tab();
+      }
+      if (tabId === 'labeling') {
+        this.renderLabeling();
+      }
+    });
     this.unsubscribe = this.service.subscribe((snapshot) => {
       this.snapshot = snapshot;
       this.renderSnapshot();
@@ -1498,6 +1604,8 @@ export class CsiOperatorApp {
       ? UI_RUNTIME_VIEW_OPTIONS.TRACK_B
       : nextView === UI_RUNTIME_VIEW_OPTIONS.V15
         ? UI_RUNTIME_VIEW_OPTIONS.V15
+        : nextView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
+          ? UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
         : nextView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
           ? UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
         : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
@@ -1715,6 +1823,37 @@ export class CsiOperatorApp {
       return;
     }
 
+    const validationRefresh = event.target.closest('[data-action="validation-refresh"]');
+    if (validationRefresh) {
+      void this.service.refreshValidationStatus(true);
+      return;
+    }
+
+    const validationSelect = event.target.closest('[data-action="validation-select"]');
+    if (validationSelect) {
+      const segmentId = validationSelect.getAttribute('data-segment-id');
+      if (segmentId) {
+        void this.service.fetchValidationSegmentDetail(segmentId);
+      }
+      return;
+    }
+
+    const validationResolve = event.target.closest('[data-action="validation-resolve"]');
+    if (validationResolve) {
+      const segmentId = validationResolve.getAttribute('data-segment-id');
+      const resolution = validationResolve.getAttribute('data-resolution');
+      if (segmentId && resolution) {
+        void this.service.resolveValidationSegment(segmentId, resolution);
+      }
+      return;
+    }
+
+    const validationBatch = event.target.closest('[data-action="validation-batch-approve"]');
+    if (validationBatch) {
+      void this.service.batchApproveValidated({ dryRun: false });
+      return;
+    }
+
     const refreshRuntimeModelsButton = event.target.closest('[data-action="refresh-runtime-models"]');
     if (refreshRuntimeModelsButton) {
       void this.service.refreshRuntimeModels(true);
@@ -1747,6 +1886,15 @@ export class CsiOperatorApp {
         this.ensureForensicSelectionVisible();
         this.renderForensics();
         this.scheduleForensicSearchPrefetch();
+      }
+      return;
+    }
+
+    const validationFilter = event.target.closest('[data-role="validation-filter"]');
+    if (validationFilter) {
+      this.validationFilter = validationFilter.value || 'all';
+      if (this.snapshot) {
+        this.renderValidation();
       }
       return;
     }
@@ -2220,9 +2368,12 @@ export class CsiOperatorApp {
       errors: this.root.querySelector('[data-region="errors"]'),
       live: this.root.querySelector('#live'),
       signal: this.root.querySelector('#signal'),
+      runtime: this.root.querySelector('#runtime'),
+      labeling: this.root.querySelector('#labeling'),
       model: this.root.querySelector('#model'),
       forensics: this.root.querySelector('#forensics'),
-      runtime: this.root.querySelector('#runtime')
+      validation: this.root.querySelector('#validation'),
+      fp2: this.root.querySelector('#fp2')
     };
   }
 
@@ -2265,11 +2416,14 @@ export class CsiOperatorApp {
     this.renderErrors();
     this.renderLive();
     this.renderSignal();
-    this.renderModel();
-    this.renderForensics();
     if (!this.isRuntimeRecorderEditing()) {
       this.renderRuntime();
     }
+    this.renderLabeling();
+    this.renderForensics();
+    this.renderValidation();
+    this.renderModel();
+    this.renderFp2();
   }
 
   renderOverview() {
@@ -2279,8 +2433,19 @@ export class CsiOperatorApp {
     const primaryRuntime = snapshot?.live?.primaryRuntime || {};
     const trackBShadow = snapshot?.live?.trackBShadow || {};
     const v15Shadow = snapshot?.live?.v8Shadow || snapshot?.live?.v7Shadow || snapshot?.live?.v15Shadow || {};
+    const v27Binary7NodeShadow = snapshot?.live?.v27Binary7NodeShadow || {};
+    const zoneCalibrationShadow = snapshot?.live?.zoneCalibrationShadow || {};
+    const fewshotCalibration = snapshot?.recording?.fewshotCalibration || {};
     const garageRatioV2Shadow = snapshot?.live?.garageRatioV2Shadow || {};
-    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, this.runtimeViewSelection);
+    const runtimeView = buildRuntimeView(
+      primaryRuntime,
+      trackBShadow,
+      v15Shadow,
+      v27Binary7NodeShadow,
+      garageRatioV2Shadow,
+      this.runtimeViewSelection
+    );
+    const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const topologyLabel = getTopologyHeadline(topology, primaryRuntime);
     const sessionId = getRuntimeSessionText(snapshot);
 
@@ -2292,9 +2457,9 @@ export class CsiOperatorApp {
           <div class="summary-card__meta">${escapeHtml(trust.summary)}</div>
         </div>
         <div class="summary-card tone-info">
-          <div class="summary-card__label">UI runtime-view</div>
+          <div class="summary-card__label">Режим UI</div>
           <div class="summary-card__value">${escapeHtml(String(displayMaybeToken(runtimeView.state || 'unknown')).toUpperCase())}</div>
-          <div class="summary-card__meta">${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))}</div>
+          <div class="summary-card__meta">${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))} / дверь‑центр ${escapeHtml(zoneGate.state)}</div>
         </div>
         <div class="summary-card tone-neutral">
           <div class="summary-card__label">Runtime-сессия</div>
@@ -2337,11 +2502,22 @@ export class CsiOperatorApp {
     const secondaryRuntime = snapshot.live.secondaryRuntime || {};
     const trackBShadow = snapshot.live.trackBShadow || {};
     const v15Shadow = snapshot.live.v8Shadow || snapshot.live.v7Shadow || snapshot.live.v15Shadow || {};
+    const v27Binary7NodeShadow = snapshot.live.v27Binary7NodeShadow || {};
     const garageRatioV2Shadow = snapshot.live.garageRatioV2Shadow || {};
     const v19Shadow = snapshot.live.v19Shadow || {};
+    const zoneCalibrationShadow = snapshot.live.zoneCalibrationShadow || {};
     const baselineStatus = snapshot.live.baselineStatus || {};
     const signalQuality = snapshot.live.signalQuality || {};
-    const runtimeView = buildRuntimeView(primaryRuntime, trackBShadow, v15Shadow, garageRatioV2Shadow, this.runtimeViewSelection);
+    const fewshotCalibration = snapshot.recording?.fewshotCalibration || {};
+    const runtimeView = buildRuntimeView(
+      primaryRuntime,
+      trackBShadow,
+      v15Shadow,
+      v27Binary7NodeShadow,
+      garageRatioV2Shadow,
+      this.runtimeViewSelection
+    );
+    const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const support = snapshot.live.supportPath;
     const trust = snapshot.live.trust;
     const failureSignal = snapshot.live.failureSignal;
@@ -2381,6 +2557,11 @@ export class CsiOperatorApp {
       ['STATIC', v19Shadow.staticProbability],
       ['MOTION', v19Shadow.motionProbability]
     ].filter(([, value]) => value != null);
+    const v27BinaryStatusToken = String(v27Binary7NodeShadow.binary || v27Binary7NodeShadow.status || 'unknown');
+    const v27BinaryProbabilities = [
+      ['EMPTY', v27Binary7NodeShadow.emptyProbability],
+      ['OCCUPIED', v27Binary7NodeShadow.occupiedProbability]
+    ].filter(([, value]) => value != null);
 
     this.sections.live.innerHTML = `
       <section class="hero-panel">
@@ -2390,13 +2571,14 @@ export class CsiOperatorApp {
           <p>
             ${escapeHtml(runtimeView.label)} сейчас <strong>${escapeHtml(displayMaybeToken(runtimeView.state || 'unknown'))}</strong>
             с уверенностью <strong>${escapeHtml(formatPercent(runtimeView.confidence, 0))}</strong>,
-            support-path сейчас <strong>${escapeHtml(getSupportStatusText(support))}</strong>,
+            support‑path сейчас <strong>${escapeHtml(getSupportStatusText(support))}</strong>,
             а текущий кадр читается как <strong>${escapeHtml(displayToken(trust.label))}</strong>.
           </p>
           <div class="hero-tags">
             <span class="tag ${toneClass(trust.tone)}">${escapeHtml(trust.summary)}</span>
             <span class="tag tone-info">${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))}</span>
-            <span class="tag tone-info">support-path ${escapeHtml(getSupportStatusText({ ...support, status: support.candidateStatus || support.status }))}</span>
+            <span class="tag ${toneClass(zoneGate.tone)}">дверь‑центр ${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</span>
+            <span class="tag tone-info">support‑path ${escapeHtml(getSupportStatusText({ ...support, status: support.candidateStatus || support.status }))}</span>
           </div>
         </div>
         <div class="hero-panel__rail">
@@ -2420,7 +2602,7 @@ export class CsiOperatorApp {
 
       <div class="surface-grid surface-grid--four">
         <article class="panel">
-          <div class="panel__eyebrow">Выбранный runtime-view</div>
+          <div class="panel__eyebrow">Выбранный режим отображения</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(runtimeView.state || 'unknown'))}</div>
           <div class="kv-list">
             <div class="kv"><span>Источник</span><strong>${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)}</strong></div>
@@ -2428,22 +2610,24 @@ export class CsiOperatorApp {
             <div class="kv"><span>Статус runtime</span><strong>${escapeHtml(runtimeView.running ? UI_LOCALE.common.running : 'offline')} / ${escapeHtml(runtimeView.modelLoaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
             <div class="kv"><span>Узлы / packets</span><strong>${escapeHtml(formatNumber(runtimeView.nodesActive))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatNumber(runtimeView.packetsInWindow))}</strong></div>
             <div class="kv"><span>PPS / возраст окна</span><strong>${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} / ${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong></div>
-            <div class="kv"><span>Класс / координата</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))} / ${escapeHtml(formatNumber(runtimeView.targetX, 1))}, ${escapeHtml(formatNumber(runtimeView.targetY, 1))}</strong></div>
-            ${runtimeView.inferenceMs != null ? `<div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(runtimeView.inferenceMs, { digits: 2, unit: ' ms' }))}</strong></div>` : ''}
+            <div class="kv"><span>Дверь‑центр</span><strong>${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</strong></div>
+            <div class="kv"><span>Зона (V36 fewshot)</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))}${runtimeView.zoneProbabilities ? ` (${Object.entries(runtimeView.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ')})` : ''}</strong></div>
+            <div class="kv"><span>Координата</span><strong>${escapeHtml(formatNumber(runtimeView.targetX, 1))}, ${escapeHtml(formatNumber(runtimeView.targetY, 1))}${runtimeView.zoneModel ? ` [${escapeHtml(runtimeView.zoneModel)}]` : ''}</strong></div>
+            ${runtimeView.inferenceMs != null ? `<div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(runtimeView.inferenceMs, { digits: 2, unit: ' ms' }))}</strong></div>` : ''}
             ${runtimeView.bufferDepth != null ? `<div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(runtimeView.bufferDepth))}/7 / ${escapeHtml(formatNumber(runtimeView.warmupRemaining))} до ready</strong></div>` : ''}
           </div>
           <div class="panel__footer">${escapeHtml(runtimeView.summary)}</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Track B shadow</div>
+          <div class="panel__eyebrow">Track B (тень)</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(trackBStatusToken))}</div>
           <div class="kv-list">
             <div class="kv"><span>Роль</span><strong>${escapeHtml(displayToken(trackBShadow.track || 'B_v1'))}</strong></div>
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(trackBShadow.status || 'unknown'))} / ${escapeHtml(trackBShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
             <div class="kv"><span>Узлы / окно</span><strong>${escapeHtml(formatNumber(trackBShadow.nodesWithData))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatRelativeTime(primaryRuntime.windowAgeSec))}</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
-            <div class="kv"><span>Production routing</span><strong>shadow-only / Track A остаётся боевым</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+            <div class="kv"><span>Боевой маршрут</span><strong>только shadow / Track A остаётся боевым</strong></div>
           </div>
           <div class="metric-bars">
             ${trackBProbabilities.length
@@ -2454,45 +2638,64 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">V8 F2-spectral canonical candidate</div>
+          <div class="panel__eyebrow">V8 F2‑spectral кандидат</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(v15StatusToken))}</div>
           <div class="kv-list">
-            <div class="kv"><span>Роль</span><strong>V8 shadow / test-only</strong></div>
+            <div class="kv"><span>Роль</span><strong>V8 shadow / только тест</strong></div>
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v15Shadow.status || 'unknown'))} / ${escapeHtml(v15Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
             <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v15Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v15Shadow.warmupRemaining))} до ready</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
-            <div class="kv"><span>Agreement vs V5</span><strong>${escapeHtml(v15Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v15Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v15Shadow.agreeBinary == null ? 'binary n/a' : (v15Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+            <div class="kv"><span>Согласование с V5</span><strong>${escapeHtml(v15Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v15Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v15Shadow.agreeBinary == null ? 'binary n/a' : (v15Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
           </div>
           <div class="metric-bars">
             ${v15Probabilities.length
               ? v15Probabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
-              : '<div class="muted">V8 ещё греет буфер и не отдал coarse probabilities.</div>'}
+              : '<div class="muted">V8 ещё греет буфер и не отдал coarse-вероятности.</div>'}
           </div>
-          <div class="panel__footer">Это текущий strongest frozen candidate. UI показывает его отдельно как shadow-view, без смены production routing с V5.</div>
+          <div class="panel__footer">Это текущий самый сильный замороженный кандидат. UI показывает его отдельно в shadow‑режиме, без смены боевого routing с V5.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">V19 V23-features shadow</div>
+          <div class="panel__eyebrow">V19 shadow по V23-features</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(v19StatusToken))}</div>
           <div class="kv-list">
             <div class="kv"><span>Роль</span><strong>V19 shadow / V23 phase+baseline+quality</strong></div>
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v19Shadow.status || 'unknown'))} / ${escapeHtml(v19Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
             <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v19Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v19Shadow.warmupRemaining))} до ready</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v19Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
-            <div class="kv"><span>Agreement vs V5</span><strong>${escapeHtml(v19Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v19Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v19Shadow.agreeBinary == null ? 'binary n/a' : (v19Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v19Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+            <div class="kv"><span>Согласование с V5</span><strong>${escapeHtml(v19Shadow.agreeCoarse == null ? 'ещё нет verdict' : (v19Shadow.agreeCoarse ? 'coarse согласован' : 'coarse расходится'))} / ${escapeHtml(v19Shadow.agreeBinary == null ? 'binary n/a' : (v19Shadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
             <div class="kv"><span>Empty gate</span><strong style="color: ${v19Shadow.emptyGateState ? '#f0c040' : '#6c8'};">${v19Shadow.emptyGateState ? 'ON → EMPTY' + (v19Shadow.rawPredictedClass ? ' (raw: ' + escapeHtml(v19Shadow.rawPredictedClass) + ')' : '') : 'OFF'} [${v19Shadow.gateConsecBelow}↓ ${v19Shadow.gateConsecAbove}↑ / N=4]</strong></div>
-            <div class="kv"><span>Baseline deviation</span><strong>amp=${escapeHtml(formatNumber(v19Shadow.blAmpDevMax, 2))}σ / sc=${escapeHtml(formatNumber(v19Shadow.blScVarDevMax, 2))}σ (thr: 1.2/1.3)</strong></div>
+            <div class="kv"><span>Отклонение от baseline</span><strong>amp=${escapeHtml(formatNumber(v19Shadow.blAmpDevMax, 2))}σ / sc=${escapeHtml(formatNumber(v19Shadow.blScVarDevMax, 2))}σ (thr: 1.2/1.3)</strong></div>
           </div>
           <div class="metric-bars">
             ${v19Probabilities.length
               ? v19Probabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
-              : '<div class="muted">V19 ещё греет буфер и не отдал coarse probabilities.</div>'}
+              : '<div class="muted">V19 ещё греет буфер и не отдал coarse-вероятности.</div>'}
           </div>
           <div class="panel__footer">V23 features: enhanced phase, baseline deviation, signal quality gates. Macro F1=0.9467, STATIC F1=0.8657. Shadow-only, production остаётся на V5.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Текущий support-path</div>
+          <div class="panel__eyebrow">V27 binary 7-node кандидат</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(v27BinaryStatusToken))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Источник payload</span><strong>${escapeHtml(v27Binary7NodeShadow.sourceField || 'v26_shadow')}</strong></div>
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v27Binary7NodeShadow.status || 'unknown'))} / ${escapeHtml(v27Binary7NodeShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Binary вердикт</span><strong>${escapeHtml(displayMaybeToken(v27Binary7NodeShadow.binary || 'unknown'))}</strong></div>
+            <div class="kv"><span>Дверь vs Центр</span><strong>${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</strong></div>
+            <div class="kv"><span>Threshold / согласие</span><strong>${escapeHtml(formatNumber(v27Binary7NodeShadow.threshold, 3))} / ${escapeHtml(v27Binary7NodeShadow.agreeBinary == null ? 'ещё нет verdict' : (v27Binary7NodeShadow.agreeBinary ? 'совпадает с primary' : 'расходится с primary'))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v27Binary7NodeShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+          </div>
+          <div class="metric-bars">
+            ${v27BinaryProbabilities.length
+              ? v27BinaryProbabilities.map(([label, value]) => renderMetricBar(label, Number(value) || 0)).join('')
+              : '<div class="muted">V27 binary 7-node ещё не прислал probability.</div>'}
+          </div>
+          <div class="panel__footer">В UI этот кандидат показывается отдельно как тестовый binary‑режим, хотя backend пока публикует его через архивный field v26_shadow.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Текущий support‑path</div>
           <div class="panel__headline">${escapeHtml(getSupportHeadline(support))}</div>
           <div class="kv-list">
             <div class="kv"><span>Статус</span><strong>${escapeHtml(getSupportStatusText(support))}</strong></div>
@@ -2761,7 +2964,7 @@ export class CsiOperatorApp {
       ? ambiguity.targetZone || coordinate?.ambiguityTargetZone || 'unknown'
       : multiTargetDiagnosticActive
         ? `${mpEstimate.personCountEstimate || mpTracks.length} diagnostic tracks (${mpState})`
-      : displayCoordinate?.targetZone || (shadowPresenceDetected ? 'shadow presence detected' : 'no_active_motion');
+      : displayCoordinate?.targetZone || (shadowPresenceDetected ? 'обнаружен shadow-presence' : 'нет активного движения');
     const smoothingLabel = ambiguity.active
       ? 'отключено в ambiguity safe-mode'
       : activeCoordinate
@@ -2829,6 +3032,26 @@ export class CsiOperatorApp {
                   <span>${zone.label}</span>
                 </div>
               `).join('')}
+              ${(() => {
+                const w = Number(garage?.widthMeters) || DEFAULT_GARAGE_LAYOUT.widthMeters;
+                const h = Number(garage?.heightMeters) || DEFAULT_GARAGE_LAYOUT.heightMeters;
+                const subzones = [
+                  garage?.zones?.zone3 || DEFAULT_GARAGE_LAYOUT.zones.zone3,
+                  garage?.zones?.zone4 || DEFAULT_GARAGE_LAYOUT.zones.zone4
+                ].filter(Boolean);
+                return subzones.map((sz) => {
+                  const left = ((sz.xMin + w / 2) / w) * 100;
+                  const right = ((sz.xMax + w / 2) / w) * 100;
+                  const top = (1 - sz.yMax / h) * 100;
+                  const bottom = (1 - sz.yMin / h) * 100;
+                  return '<div class="garage-map__subzone" style="'
+                    + 'left:' + left.toFixed(1) + '%;'
+                    + 'top:' + top.toFixed(1) + '%;'
+                    + 'width:' + (right - left).toFixed(1) + '%;'
+                    + 'height:' + (bottom - top).toFixed(1) + '%">'
+                    + '<span>' + escapeHtml(sz.label) + '</span></div>';
+                }).join('');
+              })()}
               <div class="garage-map__centerline garage-map__centerline--x"></div>
               <div class="garage-map__centerline garage-map__centerline--y"></div>
               <svg class="garage-map__overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -2874,7 +3097,7 @@ export class CsiOperatorApp {
                     ? `${mpEstimate.personCountEstimate || mpTracks.length} диагностические цели (runtime estimator)`
                     : `multi-person unresolved — точное разделение невозможно`)}</strong>
                   <span>${escapeHtml(mpState === 'multi'
-                    ? `Runtime estimator оценил ${mpEstimate.personCountEstimate || '?'} человек (уверенность ${Math.round(mpConfidence * 100)}%). Это диагностические candidate-цели из runtime signals, не confirmed targets.`
+                    ? `Оценщик runtime оценил ${mpEstimate.personCountEstimate || '?'} человек (уверенность ${Math.round(mpConfidence * 100)}%). Это диагностические цели из runtime-сигналов, не подтверждённые цели.`
                     : `Есть признаки нескольких людей (${Math.round(mpConfidence * 100)}%), но exact separation не resolved. ${mpEstimate.estimatorReasons?.join(', ') || ''}`)}</span>
                 </div>
               ` : currentPoint ? `
@@ -2986,14 +3209,20 @@ export class CsiOperatorApp {
     const primaryRuntime = this.snapshot?.live?.primaryRuntime || {};
     const trackBShadow = this.snapshot?.live?.trackBShadow || {};
     const v15Shadow = this.snapshot?.live?.v8Shadow || this.snapshot?.live?.v7Shadow || this.snapshot?.live?.v15Shadow || {};
+    const v27Binary7NodeShadow = this.snapshot?.live?.v27Binary7NodeShadow || {};
+    const zoneCalibrationShadow = this.snapshot?.live?.zoneCalibrationShadow || {};
     const garageRatioV2Shadow = this.snapshot?.live?.garageRatioV2Shadow || {};
+    const fewshotCalibration = this.snapshot?.recording?.fewshotCalibration || {};
     const runtimeModels = this.snapshot?.runtimeModels || {};
     const models = Array.isArray(runtimeModels.items) ? runtimeModels.items : [];
+    const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const trackAConnected = Boolean(primaryRuntime.running && primaryRuntime.modelLoaded);
     const selectedRuntimeView = this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
       ? UI_RUNTIME_VIEW_OPTIONS.TRACK_B
       : this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.V15
         ? UI_RUNTIME_VIEW_OPTIONS.V15
+        : this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
+          ? UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
         : this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
           ? UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
         : UI_RUNTIME_VIEW_OPTIONS.TRACK_A;
@@ -3003,6 +3232,9 @@ export class CsiOperatorApp {
     const v15Headline = v15Shadow.predictedClass
       ? String(v15Shadow.predictedClass).toLowerCase()
       : (v15Shadow.status || 'unknown');
+    const v27BinaryHeadline = v27Binary7NodeShadow.binary
+      ? String(v27Binary7NodeShadow.binary).toLowerCase()
+      : (v27Binary7NodeShadow.status || 'unknown');
     const garageV2Headline = garageRatioV2Shadow.predictedZone
       ? String(garageRatioV2Shadow.predictedZone).toLowerCase()
       : (garageRatioV2Shadow.status || 'unknown');
@@ -3012,68 +3244,106 @@ export class CsiOperatorApp {
         ? `${UI_LOCALE.models.actionErrorPrefix} ${runtimeModels.actionError || runtimeModels.error}`
         : UI_LOCALE.models.catalogSummary;
 
+    const fewshotZone = this.snapshot?.live?.primaryRuntime || {};
+    const fewshotZoneModel = fewshotZone.zoneModel || null;
+    const fewshotZoneName = fewshotZone.targetZone || 'unknown';
+    const fewshotZoneProbs = fewshotZone.zoneProbabilities || {};
+    const fewshotActive = fewshotZoneModel === 'v30_fewshot';
+
     this.sections.model.innerHTML = `
       <div class="surface-grid surface-grid--four">
-        <article class="panel">
-          <div class="panel__eyebrow">Primary runtime-контракт</div>
-          <div class="panel__headline">motion-only runtime</div>
+        <article class="panel" style="${fewshotActive ? 'border-color: rgba(34, 197, 94, 0.4); box-shadow: 0 0 12px rgba(34, 197, 94, 0.08)' : ''}">
+          <div class="panel__eyebrow">V36 fewshot zone — production zone override</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(fewshotActive ? fewshotZoneName : 'оффлайн'))}</div>
           <div class="kv-list">
-            <div class="kv"><span>Primary state</span><strong>MOTION_DETECTED / NO_MOTION</strong></div>
+            <div class="kv"><span>Файл</span><strong>v36_fewshot_zone_calibration.pkl</strong></div>
+            <div class="kv"><span>Архитектура</span><strong>RandomForest-500 / 14 фич / 7 узлов</strong></div>
+            <div class="kv"><span>CV balanced accuracy</span><strong>100% (87 окон)</strong></div>
+            <div class="kv"><span>Обучающая выборка</span><strong>87 окон (multisession packet)</strong></div>
+            <div class="kv"><span>Зоны</span><strong>center / door_passage</strong></div>
+            <div class="kv"><span>Зона сейчас</span><strong>${escapeHtml(displayMaybeToken(fewshotZoneName))}${Object.keys(fewshotZoneProbs).length ? ' (' + Object.entries(fewshotZoneProbs).map(([k, v]) => k + ': ' + (v * 100).toFixed(0) + '%').join(' / ') + ')' : ''}</strong></div>
+            <div class="kv"><span>zone_model backend</span><strong>${escapeHtml(fewshotZoneModel || 'не подключено')}</strong></div>
+            <div class="kv"><span>Статус</span><strong>${fewshotActive ? 'активна / production override' : 'оффлайн (бэкенд не запущен)'}</strong></div>
+          </div>
+          <div class="panel__footer">V36 — RF-500 zone-модель из multisession calibration packet (87 окон, 82 center / 5 door_passage). CV BA=1.0. Production zone override поверх Track A.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Основной runtime-контракт</div>
+          <div class="panel__headline">runtime только по движению</div>
+          <div class="kv-list">
+            <div class="kv"><span>Основное состояние</span><strong>MOTION_DETECTED / NO_MOTION</strong></div>
             <div class="kv"><span>Поле confidence</span><strong>motion_confidence</strong></div>
             <div class="kv"><span>Текущая модель</span><strong>${escapeHtml(primaryRuntime.modelVersion || UI_LOCALE.common.unknown)}</strong></div>
             <div class="kv"><span>Активный bundle</span><strong>${escapeHtml(runtimeModels.activeModelId || primaryRuntime.modelId || 'bundle не выбран')}</strong></div>
-            <div class="kv"><span>Secondary fields</span><strong>binary / coarse</strong></div>
-            <div class="kv"><span>Track A runtime</span><strong>${trackAConnected ? 'подключён / production' : 'offline'}</strong></div>
+            <div class="kv"><span>Вторичные поля</span><strong>binary / coarse</strong></div>
+            <div class="kv"><span>Track A runtime</span><strong>${trackAConnected ? 'подключён / боевой' : 'оффлайн'}</strong></div>
           </div>
           <div class="panel__footer">Track A остаётся текущим production runtime и именно он сейчас выдаёт боевой motion verdict.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Track B v1 candidate</div>
+          <div class="panel__eyebrow">Track B v1 кандидат</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(trackBHeadline))}</div>
           <div class="kv-list">
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(trackBShadow.status || 'unknown'))} / ${escapeHtml(trackBShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
-            <div class="kv"><span>Режим</span><strong>shadow-only</strong></div>
+            <div class="kv"><span>Режим</span><strong>только shadow</strong></div>
             <div class="kv"><span>Архитектура</span><strong>raw CSI TCN</strong></div>
             <div class="kv"><span>Последний класс</span><strong>${escapeHtml(displayMaybeToken(trackBHeadline))}</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(trackBShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
           </div>
-          <div class="panel__footer">Этот кандидат уже подключён в runtime для тестов, но не участвует в production routing и не появляется в selector каталога Track A-моделей.</div>
+          <div class="panel__footer">Этот кандидат уже подключён в runtime для тестов, но не участвует в production routing и не появляется в selector каталога Track A‑моделей.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">V8 canonical candidate</div>
+          <div class="panel__eyebrow">V8 canonical кандидат</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(v15Headline))}</div>
           <div class="kv-list">
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v15Shadow.status || 'unknown'))} / ${escapeHtml(v15Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
-            <div class="kv"><span>Режим</span><strong>shadow-only / test view</strong></div>
+            <div class="kv"><span>Режим</span><strong>только shadow / тестовый режим</strong></div>
             <div class="kv"><span>Архитектура</span><strong>warehouse-bound HGB + F2 spectral, seq_len=7</strong></div>
             <div class="kv"><span>Последний класс</span><strong>${escapeHtml(displayMaybeToken(v15Headline))}</strong></div>
             <div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(v15Shadow.bufferDepth))}/7 / ${escapeHtml(formatNumber(v15Shadow.warmupRemaining))} до ready</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v15Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет seq=7' }))}</strong></div>
           </div>
           <div class="panel__footer">Именно этот кандидат сейчас нужен для полевого теста. Он уже живёт в runtime shadow и показывается в UI отдельно от Track A selector.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Garage Ratio V3 candidate</div>
+          <div class="panel__eyebrow">V27 binary 7‑node кандидат</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(v27BinaryHeadline))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(v27Binary7NodeShadow.status || 'unknown'))} / ${escapeHtml(v27Binary7NodeShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Режим</span><strong>binary кандидат / UI тест‑режим</strong></div>
+            <div class="kv"><span>Поле backend</span><strong>${escapeHtml(v27Binary7NodeShadow.sourceField || 'v26_shadow')}</strong></div>
+            <div class="kv"><span>Последний binary</span><strong>${escapeHtml(displayMaybeToken(v27BinaryHeadline))}</strong></div>
+            <div class="kv"><span>Дверь‑центр</span><strong>${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</strong></div>
+            <div class="kv"><span>P(occupied) / порог</span><strong>${escapeHtml(formatPercent(v27Binary7NodeShadow.occupiedProbability, 0))} / ${escapeHtml(formatNumber(v27Binary7NodeShadow.threshold, 3))}</strong></div>
+            <div class="kv"><span>Согласие с primary</span><strong>${escapeHtml(v27Binary7NodeShadow.agreeBinary == null ? 'ещё нет verdict' : (v27Binary7NodeShadow.agreeBinary ? 'binary согласован' : 'binary расходится'))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(v27Binary7NodeShadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+          </div>
+          <div class="panel__footer">Этот кандидат собран как v27_binary_7node.pkl, но backend пока публикует его через архивный контракт v26_shadow; UI теперь показывает его явно для ручного теста.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Garage Ratio V3 кандидат</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(garageV2Headline))}</div>
           <div class="kv-list">
             <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(garageRatioV2Shadow.status || 'unknown'))} / ${escapeHtml(garageRatioV2Shadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
-            <div class="kv"><span>Режим</span><strong>shadow-only / garage zoning</strong></div>
+            <div class="kv"><span>Режим</span><strong>только shadow / garage zoning</strong></div>
             <div class="kv"><span>Архитектура</span><strong>ratio RF-500 + V5 door rescue + causal smooth k=7</strong></div>
             <div class="kv"><span>Последняя зона</span><strong>${escapeHtml(displayMaybeToken(garageV2Headline))}</strong></div>
             <div class="kv"><span>Raw → final</span><strong>${escapeHtml(displayMaybeToken(garageRatioV2Shadow.rawPredictedZone || 'unknown'))} → ${escapeHtml(displayMaybeToken(garageV2Headline))}</strong></div>
             <div class="kv"><span>Door / Center / Deep</span><strong>${escapeHtml(formatPercent(garageRatioV2Shadow.doorProbability, 0))} / ${escapeHtml(formatPercent(garageRatioV2Shadow.centerProbability, 0))} / ${escapeHtml(formatPercent(garageRatioV2Shadow.deepProbability, 0))}</strong></div>
             <div class="kv"><span>Door rescue</span><strong>${garageRatioV2Shadow.doorRescueApplied ? 'сработал' : 'нет'}</strong></div>
             <div class="kv"><span>Smoothing</span><strong>${garageRatioV2Shadow.smoothingApplied ? 'применено' : 'не меняло решение'} / ${escapeHtml(formatNumber(garageRatioV2Shadow.smoothingCount))} из ${escapeHtml(formatNumber(garageRatioV2Shadow.smoothingWindow))}</strong></div>
-            <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(garageRatioV2Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+            <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(garageRatioV2Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
           </div>
-          <div class="panel__footer">Это текущий лучший гаражный shadow-кандидат. В рантайме он сглаживается только causal-majority по последним окнам и не меняет production routing Track A / V5.</div>
+          <div class="panel__footer">Это текущий лучший гаражный shadow‑кандидат. В рантайме он сглаживается только causal‑majority по последним окнам и не меняет production routing Track A / V5.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Zone Calibration / shadow centroid</div>
+          <div class="panel__eyebrow">Калибровка зон / shadow centroid</div>
           <div class="panel__headline">${escapeHtml((() => {
             const zc = this.snapshot?.live?.zoneCalibrationShadow || {};
             if (zc.calibrated && zc.zone && zc.zone !== 'unknown') return displayFewshotZone(zc.zone);
@@ -3086,30 +3356,30 @@ export class CsiOperatorApp {
               const zc = this.snapshot?.live?.zoneCalibrationShadow || {};
               return `
                 <div class="kv"><span>Статус</span><strong>${escapeHtml(zc.status || 'not_calibrated')}</strong></div>
-                <div class="kv"><span>Режим</span><strong>shadow-only / NearestCentroid</strong></div>
+                <div class="kv"><span>Режим</span><strong>только shadow / NearestCentroid</strong></div>
                 <div class="kv"><span>Откалибровано</span><strong>${zc.calibrated ? 'да' : 'нет'}${zc.stale ? ' (устарело)' : ''}</strong></div>
                 <div class="kv"><span>Зоны</span><strong>${(zc.zonesCalibrated || []).map((item) => displayFewshotZone(item)).join(', ') || 'нет'}</strong></div>
                 <div class="kv"><span>Качество</span><strong>${escapeHtml(zc.calibrationQuality || 'не определено')}</strong></div>
                 <div class="kv"><span>Зона (raw → smooth)</span><strong>${escapeHtml(displayFewshotZone(zc.zoneRaw || 'unknown'))} → ${escapeHtml(displayFewshotZone(zc.zone || 'unknown'))}</strong></div>
                 <div class="kv"><span>Confidence</span><strong>${zc.confidence != null ? formatNumber(zc.confidence, 2) : 'нет'}${zc.lowConfidence ? ' (низкая)' : ''}</strong></div>
                 <div class="kv"><span>Smoothing k=5</span><strong>${zc.smoothed ? 'применено' : 'не меняло решение'}</strong></div>
-                <div class="kv"><span>Inference</span><strong>${escapeHtml(formatNumberWithUnit(zc.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
+                <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(zc.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
                 ${zc.rejectionReason ? `<div class="kv"><span>Причина отклонения</span><strong>${escapeHtml(zc.rejectionReason)}</strong></div>` : ''}
               `;
             })()}
           </div>
-          <div class="panel__footer">Текущий runtime backend здесь остаётся shadow centroid. Новый guided few-shot flow уже пересобран под live-геометрию center + door_passage, но future storage/retrain path ещё не внедрён и production V20 не трогает.</div>
+          <div class="panel__footer">Текущий runtime backend здесь остаётся shadow centroid. Новый guided few‑shot flow уже пересобран под live‑геометрию center + door_passage, но future storage/retrain path ещё не внедрён и production V20 не трогает.</div>
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Текущий support-path</div>
+          <div class="panel__eyebrow">Текущий support‑path</div>
           <div class="panel__headline">${escapeHtml(displayToken(truth.currentBest.runtimePath.mode))}</div>
           <div class="kv-list">
             <div class="kv"><span>Кандидат</span><strong>${escapeHtml(truth.currentBest.runtimePath.candidateName)}</strong></div>
             <div class="kv"><span>Топология</span><strong>${escapeHtml(truth.currentBest.runtimePath.topologySignature)}</strong></div>
-            <div class="kv"><span>Threshold</span><strong>${escapeHtml(formatNumber(truth.currentBest.runtimePath.threshold, 3))}</strong></div>
-            <div class="kv"><span>Support-only</span><strong>${truth.currentBest.runtimePath.supportOnly ? UI_LOCALE.common.yes : UI_LOCALE.common.no}</strong></div>
-            <div class="kv"><span>Authoritative</span><strong>${truth.currentBest.runtimePath.authoritative ? UI_LOCALE.common.yes : UI_LOCALE.common.no}</strong></div>
+            <div class="kv"><span>Порог</span><strong>${escapeHtml(formatNumber(truth.currentBest.runtimePath.threshold, 3))}</strong></div>
+            <div class="kv"><span>Только support</span><strong>${truth.currentBest.runtimePath.supportOnly ? UI_LOCALE.common.yes : UI_LOCALE.common.no}</strong></div>
+            <div class="kv"><span>Авторитетный</span><strong>${truth.currentBest.runtimePath.authoritative ? UI_LOCALE.common.yes : UI_LOCALE.common.no}</strong></div>
           </div>
           <div class="token-row">${formatList(truth.currentBest.runtimePath.scope)}</div>
         </article>
@@ -3118,8 +3388,8 @@ export class CsiOperatorApp {
           <div class="panel__eyebrow">Замороженный offline-baseline</div>
           <div class="panel__headline">${escapeHtml(truth.currentBest.frozenBaseline.baselineName)}</div>
           <div class="kv-list">
-            <div class="kv"><span>Threshold</span><strong>${escapeHtml(formatNumber(truth.currentBest.frozenBaseline.threshold, 3))}</strong></div>
-            <div class="kv"><span>Runtime switch</span><strong>${truth.currentBest.frozenBaseline.runtimeSwitchForbidden ? 'запрещён' : 'разрешён'}</strong></div>
+            <div class="kv"><span>Порог</span><strong>${escapeHtml(formatNumber(truth.currentBest.frozenBaseline.threshold, 3))}</strong></div>
+            <div class="kv"><span>Переключение runtime</span><strong>${truth.currentBest.frozenBaseline.runtimeSwitchForbidden ? 'запрещено' : 'разрешено'}</strong></div>
             <div class="kv"><span>quiet_static_center</span><strong>${escapeHtml(truth.currentBest.runtimePath.quietStaticCenterStatus)}</strong></div>
             <div class="kv"><span>quiet_static_door</span><strong>${escapeHtml(truth.currentBest.runtimePath.quietStaticDoorStatus)}</strong></div>
           </div>
@@ -3130,8 +3400,8 @@ export class CsiOperatorApp {
       <article class="panel">
         <div class="panel__header panel__header--split">
           <div>
-            <div class="panel__eyebrow">UI test-selector</div>
-            <div class="panel__headline">Какой runtime-view показывать на первом экране</div>
+          <div class="panel__eyebrow">UI тест‑селектор</div>
+            <div class="panel__headline">Какой режим отображать на первом экране</div>
           </div>
         </div>
         <div class="capture-pack__actions">
@@ -3141,7 +3411,7 @@ export class CsiOperatorApp {
             data-action="select-ui-runtime-view"
             data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.TRACK_A}"
           >
-            Track A / production
+            Track A / боевой
           </button>
           <button
             type="button"
@@ -3161,6 +3431,14 @@ export class CsiOperatorApp {
           </button>
           <button
             type="button"
+            class="capture-pack__button ${selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE ? 'capture-pack__button--primary' : 'capture-pack__button--ghost'}"
+            data-action="select-ui-runtime-view"
+            data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.V27_7NODE}"
+          >
+            V27 7-node / test
+          </button>
+          <button
+            type="button"
             class="capture-pack__button ${selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2 ? 'capture-pack__button--primary' : 'capture-pack__button--ghost'}"
             data-action="select-ui-runtime-view"
             data-runtime-view="${UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2}"
@@ -3171,14 +3449,16 @@ export class CsiOperatorApp {
         <div class="panel__footer">
           Сейчас выбран <strong>${escapeHtml(
             selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
-              ? 'Track B v1 candidate'
+              ? 'Track B v1 кандидат'
               : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V15
-                ? 'V8 F2-spectral canonical candidate'
+                ? 'V8 F2-spectral canonical кандидат'
+                : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.V27_7NODE
+                  ? 'V27 binary 7-node кандидат'
                 : selectedRuntimeView === UI_RUNTIME_VIEW_OPTIONS.GARAGE_V2
-                  ? 'Garage Ratio V3 candidate'
-                : 'Track A production'
+                  ? 'Garage Ratio V3 кандидат'
+                : 'Track A боевой'
           )}</strong>.
-          Это меняет только UI runtime-view для теста; backend production routing остаётся на Track A v5.
+          Это меняет только режим отображения для теста; backend routing и live‑state этот переключатель не трогает.
         </div>
       </article>
 
@@ -3218,7 +3498,7 @@ export class CsiOperatorApp {
             ${escapeHtml(UI_LOCALE.models.refresh)}
           </button>
         </div>
-        <div class="panel__footer">${escapeHtml(catalogSummary)} Track B и V8 сюда не входят: этот selector управляет только Track A-compatible runtime bundles и не должен подменять shadow/test candidates.</div>
+          <div class="panel__footer">${escapeHtml(catalogSummary)} Track B и V8 сюда не входят: этот селектор управляет только совместимыми с Track A runtime bundles и не должен подменять shadow/test candidates.</div>
         ${models.length ? `
           <div class="runtime-model-grid">
             ${models.map((item) => {
@@ -3532,7 +3812,7 @@ export class CsiOperatorApp {
             <h2>${escapeHtml(selectedRun?.display_label || selectedSummary.display_label || selectedSummary.run_id)}</h2>
             <div class="hero-summary">${escapeHtml(operatorSummary)}</div>
             <p>
-              Live support-path остаётся <strong>support-only</strong>; narrative выше собирается на сервере из watcher/raw/bundle evidence и не подменяет primary motion verdict.
+              Live support‑path остаётся <strong>только support</strong>; narrative выше собирается на сервере из watcher/raw/bundle evidence и не подменяет primary motion verdict.
             </p>
             <div class="hero-tags">
               ${renderStatusPill(classificationBadgeLabel(classificationStatus), classificationToneValue)}
@@ -3603,7 +3883,7 @@ export class CsiOperatorApp {
             <div class="kv-list">
               <div class="kv"><span>Назначенная сторона</span><strong>${escapeHtml(displayToken(ordered.first_direction_assignment?.assigned_side || 'сторона не назначена'))}</strong></div>
               <div class="kv"><span>Фаза</span><strong>${escapeHtml(displayToken(ordered.first_direction_assignment_phase || ordered.first_direction_assignment?.scenario_phase_label || 'фаза не зафиксирована'))}</strong></div>
-              <div class="kv"><span>Pending direction</span><strong>${escapeHtml(displayToken(ordered.first_direction_assignment?.shadow_pending_direction || 'ожидаемое направление не рассчитано'))}</strong></div>
+              <div class="kv"><span>Ожидаемое направление</span><strong>${escapeHtml(displayToken(ordered.first_direction_assignment?.shadow_pending_direction || 'ожидаемое направление не рассчитано'))}</strong></div>
             </div>
           </article>
         </div>
@@ -3679,10 +3959,10 @@ export class CsiOperatorApp {
           <article class="panel">
             <div class="panel__eyebrow">Сводка run end-to-end</div>
             <div class="kv-list">
-              <div class="kv"><span>Watcher preflight OK</span><strong>${escapeHtml(formatBoolean(watcher.preflight_ok))}</strong></div>
-              <div class="kv"><span>Operational ready</span><strong>${escapeHtml(formatBoolean(watcher.preflight?.operational_ready))}</strong></div>
-              <div class="kv"><span>Threshold</span><strong>${escapeHtml(formatNumber(watcher.preflight?.threshold, 3))}</strong></div>
-              <div class="kv"><span>Runtime scope</span><strong>${escapeHtml((watcher.preflight?.runtime_scope || []).map((item) => displayToken(item)).join(', ') || 'scope не передан') }</strong></div>
+            <div class="kv"><span>Предпроверка watcher OK</span><strong>${escapeHtml(formatBoolean(watcher.preflight_ok))}</strong></div>
+            <div class="kv"><span>Операционная готовность</span><strong>${escapeHtml(formatBoolean(watcher.preflight?.operational_ready))}</strong></div>
+            <div class="kv"><span>Порог</span><strong>${escapeHtml(formatNumber(watcher.preflight?.threshold, 3))}</strong></div>
+            <div class="kv"><span>Область runtime</span><strong>${escapeHtml((watcher.preflight?.runtime_scope || []).map((item) => displayToken(item)).join(', ') || 'scope не передан') }</strong></div>
               <div class="kv"><span>Финальное состояние sequence</span><strong>${escapeHtml(displayToken(watcher.sequence?.final_state || 'состояние sequence не зафиксировано'))}</strong></div>
               <div class="kv"><span>Зафиксировано стадий</span><strong>${escapeHtml(formatNumber(sequenceStages.length))}</strong></div>
             </div>
@@ -3749,9 +4029,9 @@ export class CsiOperatorApp {
                 { key: 'elapsed_sec', label: 'Прошло, с' },
                 { key: 'occupancy_state', label: 'Occupancy debug' },
                 { key: 'occupancy_event', label: 'Событие' },
-                { key: 'shadow_status', label: 'Shadow-статус' },
+                { key: 'shadow_status', label: 'Shadow‑статус' },
                 { key: 'shadow_context_validity', label: 'Контекст' },
-                { key: 'shadow_pending_direction', label: 'Pending direction' },
+                { key: 'shadow_pending_direction', label: 'Ожидаемое направление' },
                 { key: 'live_total_packets', label: 'Пакеты' },
                 { key: 'markers', label: 'Маркеры' }
               ],
@@ -3792,7 +4072,7 @@ export class CsiOperatorApp {
               { key: 'phase_label', label: 'Фаза' },
               { key: 'ordered_sequence_markers', label: 'Маркеры' },
               { key: 'ordered_failure_mode', label: 'Failure mode' },
-              { key: 'watcher_shadow_status', label: 'Shadow-статус' },
+              { key: 'watcher_shadow_status', label: 'Shadow‑статус' },
               { key: 'motion_state', label: 'Движение' },
               { key: 'live_total_packets', label: 'Пакеты' }
             ],
@@ -3886,6 +4166,217 @@ export class CsiOperatorApp {
     this.scheduleForensicPrefetch(orderedVisibleRuns, selectedRunId);
   }
 
+  renderValidation() {
+    if (!this.sections.validation) {
+      return;
+    }
+    const validation = this.snapshot?.validation || {};
+    const status = validation.status || {};
+    const summary = status.summary || {};
+    const segments = Array.isArray(status.segments) ? status.segments : [];
+    const filtered = this.validationFilter === 'all'
+      ? segments
+      : segments.filter((seg) => seg.validation_status === this.validationFilter);
+    const detail = validation.selectedSegmentDetail;
+
+    const summaryCards = `
+      <div class="summary-stack">
+        <div class="summary-card tone-info">
+          <div class="summary-card__label">Всего сегментов</div>
+          <div class="summary-card__value">${escapeHtml(formatNumber(summary.total_segments))}</div>
+        <div class="summary-card__meta">источник: двойная валидация</div>
+        </div>
+        <div class="summary-card tone-success">
+        <div class="summary-card__label">Согласовано</div>
+          <div class="summary-card__value">${escapeHtml(formatPercent(summary.validated_pct || 0))}</div>
+          <div class="summary-card__meta">${escapeHtml(formatNumber(summary.validated_count))} сегментов</div>
+        </div>
+        <div class="summary-card tone-warn">
+        <div class="summary-card__label">Неоднозначно</div>
+          <div class="summary-card__value">${escapeHtml(formatPercent(summary.ambiguous_pct || 0))}</div>
+          <div class="summary-card__meta">${escapeHtml(formatNumber(summary.ambiguous_count))} сегментов</div>
+        </div>
+        <div class="summary-card tone-danger">
+        <div class="summary-card__label">Конфликт</div>
+          <div class="summary-card__value">${escapeHtml(formatPercent(summary.conflict_pct || 0))}</div>
+          <div class="summary-card__meta">${escapeHtml(formatNumber(summary.conflict_count))} сегментов</div>
+        </div>
+      </div>
+    `;
+
+    const rows = filtered.slice(0, 200).map((seg) => `
+      <div class="inspector-table__row" style="--columns:6" data-action="validation-select" data-segment-id="${escapeHtml(seg.segment_id)}">
+        <div class="inspector-table__cell">${escapeHtml(seg.segment_id || '—')}</div>
+        <div class="inspector-table__cell">${escapeHtml(formatNumber(seg.start_sec, 2))}–${escapeHtml(formatNumber(seg.end_sec, 2))}с</div>
+        <div class="inspector-table__cell">${escapeHtml(seg.video_label || '—')}</div>
+        <div class="inspector-table__cell">${escapeHtml(seg.csi_label || '—')}</div>
+        <div class="inspector-table__cell">${escapeHtml(formatNumber(seg.similarity_score, 3))}</div>
+        <div class="inspector-table__cell">${escapeHtml(seg.validation_status || '—')}</div>
+      </div>
+    `).join('');
+
+    const table = `
+      <div class="inspector-table">
+        <div class="inspector-table__head" style="--columns:6">
+          <div class="inspector-table__cell">Сегмент</div>
+          <div class="inspector-table__cell">Время</div>
+          <div class="inspector-table__cell">Видео</div>
+          <div class="inspector-table__cell">CSI</div>
+          <div class="inspector-table__cell">Сходство</div>
+          <div class="inspector-table__cell">Статус</div>
+        </div>
+        ${rows || `<div class="inspector-empty">Нет сегментов</div>`}
+      </div>
+    `;
+
+    const detailPanel = detail ? `
+      <div class="panel" style="margin-top: 16px;">
+        <div class="panel__eyebrow">Сегмент</div>
+        <div class="panel__headline">${escapeHtml(detail.segment_id || '')}</div>
+        <div class="panel__text">Видео: ${escapeHtml(detail.video_label || '—')} · CSI: ${escapeHtml(detail.csi_label || '—')} · сходство ${escapeHtml(formatNumber(detail.similarity_score, 3))}</div>
+        <div class="hero-tags">
+          ${renderStatusPill(`статус: ${detail.validation_status || '—'}`, detail.validation_status === 'conflict' ? 'danger' : detail.validation_status === 'ambiguous' ? 'warn' : 'ok')}
+        </div>
+        <div class="capture-console__actions" style="margin-top: 10px;">
+          <button type="button" class="capture-pack__button" data-action="validation-resolve" data-segment-id="${escapeHtml(detail.segment_id)}" data-resolution="confirm_video">Принять видео</button>
+          <button type="button" class="capture-pack__button capture-pack__button--ghost" data-action="validation-resolve" data-segment-id="${escapeHtml(detail.segment_id)}" data-resolution="accept_csi">Принять CSI</button>
+          <button type="button" class="capture-pack__button capture-pack__button--ghost" data-action="validation-resolve" data-segment-id="${escapeHtml(detail.segment_id)}" data-resolution="mark_ambiguous">Неоднозначно</button>
+        </div>
+      </div>
+    ` : '';
+
+    this.sections.validation.innerHTML = `
+      ${summaryCards}
+      <article class="panel" style="margin-top: 16px;">
+        <div class="panel__eyebrow">Фильтр</div>
+        <div class="row">
+          <select data-role="validation-filter">
+            ${['all', 'validated', 'ambiguous', 'conflict'].map((statusKey) => {
+              const label = statusKey === 'all'
+                ? 'все'
+                : statusKey === 'validated'
+                  ? 'согласовано'
+                  : statusKey === 'ambiguous'
+                    ? 'неоднозначно'
+                    : 'конфликт';
+              return `<option value="${statusKey}" ${statusKey === this.validationFilter ? 'selected' : ''}>${label}</option>`;
+            }).join('')}
+          </select>
+          <button class="capture-pack__button capture-pack__button--ghost" data-action="validation-refresh">Обновить</button>
+          <button class="capture-pack__button" data-action="validation-batch-approve">Подтвердить все validated</button>
+        </div>
+        <div class="panel__text">${validation.error ? escapeHtml(validation.error) : ''}</div>
+        ${table}
+      </article>
+      ${detailPanel}
+    `;
+
+    if (!validation.status && !validation.loading) {
+      void this.service.refreshValidationStatus();
+    }
+  }
+
+  renderLabeling() {
+    if (!this.sections.labeling) {
+      return;
+    }
+    const reviewIndexUrl = 'http://127.0.0.1:8124/index.html';
+    const reviewRootPath = '/Users/arsen/Desktop/wifi-densepose/output/garage_guided_review_dense1';
+    this.sections.labeling.innerHTML = `
+      <article class="panel">
+        <div class="panel__eyebrow">Разметка и QC</div>
+        <div class="panel__headline">Единый обзор разметки</div>
+        <div class="panel__text">
+          Это точка входа для всех ручных видео‑разметок и их проверки. Никаких отдельных UI: один индекс и единый viewer.
+        </div>
+        <div class="capture-pack__actions" style="margin-top: 10px;">
+          <a class="capture-pack__button" href="${reviewIndexUrl}" target="_blank" rel="noopener">Открыть индекс разметки</a>
+        </div>
+        <div class="panel__footer">
+          Если индекс не открывается, запусти локальный сервер из каталога:<br>
+          <code>cd ${reviewRootPath} && python3 -m http.server 8124</code>
+        </div>
+      </article>
+      <article class="panel" style="margin-top: 16px;">
+        <div class="panel__eyebrow">Локальные артефакты</div>
+        <div class="panel__text">Папка разметки: <code>${reviewRootPath}</code></div>
+      </article>
+    `;
+  }
+
+  initFp2Tab() {
+    if (this.fp2Tab || !this.sections.fp2) {
+      return;
+    }
+    if (!this.sections.fp2.dataset.fp2Ready) {
+      this.sections.fp2.innerHTML = `
+        <div class="panel">
+          <div class="panel__eyebrow">FP2 мониторинг</div>
+          <div class="panel__text">Live‑данные FP2 через /api/v1/fp2/current и /api/v1/fp2/ws.</div>
+        </div>
+        <div class="fp2-toolbar" style="margin-top: 12px;">
+          <button id="fp2Refresh" class="btn btn--secondary">Обновить</button>
+          <button id="fp2StreamToggle" class="btn btn--primary">Старт стрима</button>
+          <select id="fp2EntitySelect" class="zone-select" style="min-width: 280px;"></select>
+          <button id="fp2EntityAuto" class="btn btn--secondary">Автовыбор Entity</button>
+        </div>
+        <div class="fp2-grid">
+          <div class="fp2-card">
+            <h3>Статус FP2</h3>
+            <div class="fp2-kv"><span>API</span><span id="fp2ApiStatus" class="chip">-</span></div>
+            <div class="fp2-kv"><span>Stream</span><span id="fp2StreamStatus" class="chip">disconnected</span></div>
+            <div class="fp2-kv"><span>Entity</span><code id="fp2EntityId">-</code></div>
+            <div class="fp2-kv"><span>Последнее обновление</span><span id="fp2UpdatedAt">-</span></div>
+            <div class="fp2-kv"><span>Presence</span><span id="fp2PresenceValue" class="presence-pill absent">НЕТ</span></div>
+          </div>
+          <div class="fp2-card">
+            <h3>Метрики</h3>
+            <div class="fp2-kv"><span>Людей</span><strong id="fp2PersonsCount">0</strong></div>
+            <div class="fp2-kv"><span>Зон</span><strong id="fp2ZonesCount">0</strong></div>
+            <div class="fp2-kv"><span>FP2 Entities в HA</span><strong id="fp2EntitiesCount">0</strong></div>
+            <div class="fp2-kv"><span>Текущая зона</span><strong id="fp2CurrentZone">-</strong></div>
+            <div class="fp2-kv"><span>Длительность присутствия</span><strong id="fp2PresenceDuration">0s</strong></div>
+            <ul id="fp2HistoryList" class="fp2-history-list"></ul>
+          </div>
+        </div>
+        <div class="fp2-card">
+          <h3>Движение</h3>
+          <ul id="fp2MovementList" class="fp2-history-list fp2-movement-list"></ul>
+        </div>
+        <div class="fp2-card">
+          <h3>Карта перемещений</h3>
+          <canvas id="fp2MovementCanvas" width="960" height="260" style="width: 100%; height: 260px;"></canvas>
+        </div>
+        <div class="fp2-card">
+          <h3>Realtime‑график</h3>
+          <canvas id="fp2RealtimeGraph" width="960" height="200" style="width: 100%; height: 200px; background: #1a1a2e; border-radius: 8px;"></canvas>
+          <div class="fp2-graph-legend">
+            <span class="legend-item"><span class="legend-color present"></span> Есть</span>
+            <span class="legend-item"><span class="legend-color absent"></span> Нет</span>
+          </div>
+        </div>
+        <div class="fp2-card">
+          <h3>Сырые данные</h3>
+          <pre id="fp2RawOutput" class="fp2-raw-output">{}</pre>
+        </div>
+      `;
+      this.sections.fp2.dataset.fp2Ready = 'true';
+    }
+    this.fp2Tab = new FP2Tab(this.sections.fp2);
+    this.fp2Tab.init().catch((error) => {
+      console.error('Failed to initialize FP2 tab:', error);
+    });
+  }
+
+  renderFp2() {
+    if (!this.sections.fp2) {
+      return;
+    }
+    if (this.tabManager?.getActiveTab() === 'fp2') {
+      this.initFp2Tab();
+    }
+  }
+
   renderGuidedCapturePackCard(pack, recording) {
     const summary = getGuidedCapturePackSummary(pack);
     const guidedStatus = recording.guided?.status || 'idle';
@@ -3912,7 +4403,7 @@ export class CsiOperatorApp {
           <h3>${escapeHtml(pack.name)}</h3>
           <p>${escapeHtml(pack.description)}</p>
           <div class="capture-pack__meta">
-            ${renderStatusPill('legacy', 'warn')}
+            ${renderStatusPill('архив', 'warn')}
             ${renderStatusPill(`${summary.clipCount} ${UI_LOCALE.capture.clips}`, 'info')}
             ${renderStatusPill(`${UI_LOCALE.capture.activeTime} ${formatDurationCompact(summary.activeSeconds)}`, 'neutral')}
             ${renderStatusPill(`${UI_LOCALE.capture.totalTime} ${formatDurationCompact(summary.totalSeconds)}`, 'neutral')}
@@ -4021,7 +4512,7 @@ export class CsiOperatorApp {
         ? `${formatDurationCompact(recordingStatus.elapsed_sec)} / ${formatNumber(recordingStatus.chunk_pps, 1)} pps`
         : freeformActive
           ? `${formatDurationCompact(recordingStatus.elapsed_sec)} / ${formatNumber(recordingStatus.chunk_pps, 1)} pps`
-        : `Preflight ${preflight.ok ? UI_LOCALE.common.ready : UI_LOCALE.common.unavailable}`;
+        : `Предпроверка ${preflight.ok ? UI_LOCALE.common.ready : UI_LOCALE.common.unavailable}`;
 
     return `
       <div class="capture-console">
@@ -4050,16 +4541,16 @@ export class CsiOperatorApp {
                   : status === 'completed'
                     ? `Пакет завершён без terminal. Последний фрагмент: ${escapeHtml(getGuidedLastChunkText(guided, recordingStatus))}.`
                     : status === 'cancelled'
-                      ? 'Guided run остановлен оператором. Можно перезапустить pack с этого же экрана.'
+                      ? 'guided-запуск остановлен оператором. Можно перезапустить пакет с этого же экрана.'
                       : status === 'preflight_failed'
-                        ? `Preflight не прошёл: ${escapeHtml(guided.lastError || recording.preflightError || UI_LOCALE.common.unavailable)}`
+                        ? `Предпроверка не прошла: ${escapeHtml(guided.lastError || recording.preflightError || UI_LOCALE.common.unavailable)}`
                       : status === 'error'
-                          ? `Guided run завершился ошибкой: ${escapeHtml(guided.lastError || recording.actionError || UI_LOCALE.common.unavailable)}`
+                          ? `guided-запуск завершился ошибкой: ${escapeHtml(guided.lastError || recording.actionError || UI_LOCALE.common.unavailable)}`
                           : manualActive
                             ? `Пакет сейчас не запущен. Backend занят ручной записью ${escapeHtml(getRecordingLabelText(recordingStatus))}.`
                             : freeformActive
                               ? `Пакет сейчас не запущен. Backend занят freeform-записью ${escapeHtml(getRecordingLabelText(recordingStatus))}.`
-                          : 'Выбери pack, сделай preflight и запускай клипы прямо из UI.'}
+                          : 'Выбери пакет, сделай предпроверку и запускай клипы прямо из UI.'}
             </div>
           </div>
           <div class="hero-panel__rail">
@@ -4076,7 +4567,7 @@ export class CsiOperatorApp {
             <div class="hero-stat">
               <span>${escapeHtml(UI_LOCALE.capture.nextStep)}</span>
               <strong>${escapeHtml(nextStep?.label || UI_LOCALE.capture.completedLabel)}</strong>
-              <small>${escapeHtml(nextStep?.instruction || 'Следующий шаг появится после старта pack.')}</small>
+              <small>${escapeHtml(nextStep?.instruction || 'Следующий шаг появится после старта пакета.')}</small>
             </div>
           </div>
         </div>
@@ -4183,14 +4674,14 @@ export class CsiOperatorApp {
     const manualTeacherLabel = getTeacherSourceKindLabel(manualTeacherKind);
     const manualTeacherDetail = manual.withVideo
       ? getTeacherSourceSelectionDetail(teacherSource)
-      : 'manual.withVideo=false -> teacher_source_kind=none';
+      : 'При отключенном видео используется teacher_source_kind=none.';
 
     return `
       <div class="manual-recorder">
         <div class="panel__eyebrow">${escapeHtml(UI_LOCALE.capture.manualEyebrow)}</div>
         <div class="panel__headline">${escapeHtml(UI_LOCALE.capture.manualHeadline)}</div>
         <div class="panel__text">${escapeHtml(UI_LOCALE.capture.manualSummary)}</div>
-        <div class="recording-archive__notice">Legacy compatibility path: используй только если канонический freeform невозможен и это осознанное исключение.</div>
+        <div class="recording-archive__notice">Архивный путь совместимости: используй только если канонический freeform невозможен и это осознанное исключение.</div>
         <div class="panel__footer manual-recorder__selection-note">Текущий teacher contract для manual preflight/start: ${escapeHtml(manualTeacherLabel)} · ${escapeHtml(manualTeacherDetail)}</div>
 
         <div class="manual-recorder__grid">
@@ -4335,9 +4826,9 @@ export class CsiOperatorApp {
         <div class="panel__footer">${escapeHtml(UI_LOCALE.capture.manualLabelAuto)}</div>
 
         <div class="hero-tags">
-          ${renderStatusPill('legacy branch', 'warn')}
-          ${manual.withVideo ? renderStatusPill('video-backed override', 'info') : renderStatusPill('no teacher video', 'risk')}
-          ${manual.skipPreflight ? renderStatusPill('preflight bypass', 'risk') : renderStatusPill('preflight enforced', 'ok')}
+          ${renderStatusPill('архивная ветка', 'warn')}
+          ${manual.withVideo ? renderStatusPill('видео-override', 'info') : renderStatusPill('без teacher-видео', 'risk')}
+          ${manual.skipPreflight ? renderStatusPill('пропуск предпроверки', 'risk') : renderStatusPill('предпроверка обязательна', 'ok')}
           ${manualActive ? renderStatusPill(UI_LOCALE.capture.manualActive, 'risk') : ''}
           ${guidedActive ? renderStatusPill('guided-пакет активен', 'warn') : ''}
           ${freeformActive ? renderStatusPill('freeform-режим активен', 'warn') : ''}
@@ -4415,9 +4906,9 @@ export class CsiOperatorApp {
     const currentStateText = freeformActive
       ? UI_LOCALE.capture.freeformActive
       : legacyFreeformActive
-        ? 'Канонический flow ждёт завершения legacy freeform без видео'
-      : guidedActive
-        ? 'Канонический flow ждёт завершения legacy guided-пакета'
+        ? 'Канонический flow ждёт завершения архивного freeform без видео'
+        : guidedActive
+          ? 'Канонический flow ждёт завершения архивного guided‑пакета'
         : manualActive
           ? 'Канонический flow ждёт завершения ручной записи'
           : 'Канонический freeform ждёт preflight и явный старт';
@@ -4431,33 +4922,33 @@ export class CsiOperatorApp {
     const selectedTeacherKind = normalizeTeacherSourceKind(teacherSource.selectedKind);
     const showLegacyTeacherSource = this.runtimeRecordingUi.showLegacyTeacherSource || selectedTeacherKind === TEACHER_SOURCE_KIND.NONE;
     const teacherChoiceHint = selectedTeacherKind === TEACHER_SOURCE_KIND.PIXEL_RTSP
-      ? 'Strongest canonical path: Pixel RTSP via atomic-style teacher contract.'
+      ? 'Самый сильный канонический путь: Pixel RTSP через атомарный teacher-контракт.'
       : selectedTeacherKind === TEACHER_SOURCE_KIND.MAC_CAMERA
-        ? 'Fallback path: явная Mac Camera contract-конфигурация вместо implicit Darwin default.'
-        : 'Legacy/degraded path. Подходит только для archive/manual compatibility.';
+        ? 'Резервный путь: явная контрактная конфигурация Mac Camera вместо неявного значения Darwin по умолчанию.'
+        : 'Архивный путь. Подходит только для совместимости.';
     const teacherSourceFieldLabel = selectedTeacherKind === TEACHER_SOURCE_KIND.PIXEL_RTSP
       ? 'RTSP URL'
       : selectedTeacherKind === TEACHER_SOURCE_KIND.MAC_CAMERA
-        ? 'Device selector'
-        : 'Legacy note';
+        ? 'Выбор устройства'
+        : 'Архивная заметка';
     const teacherSourceFieldValue = selectedTeacherKind === TEACHER_SOURCE_KIND.PIXEL_RTSP
       ? (teacherSource.pixelRtspUrl || DEFAULT_PIXEL_RTSP_URL)
       : selectedTeacherKind === TEACHER_SOURCE_KIND.MAC_CAMERA
         ? (teacherSource.macDevice || DEFAULT_MAC_CAMERA_DEVICE)
         : 'teacher_source_kind=none';
     const teacherStateText = canonical.teacher.stateLabel === 'available'
-      ? 'teacher source доступен'
+      ? 'источник teacher доступен'
       : canonical.teacher.stateLabel === 'unavailable'
-        ? 'teacher source unavailable'
-        : canonical.teacher.stateLabel === 'legacy_selected'
-          ? 'teacher source legacy/degraded'
-        : 'teacher source не проверен';
-    const truthStateText = canonical.truth.label === 'video-backed'
-      ? 'truth full'
-      : canonical.truth.label === 'truth lost'
-        ? 'truth lost'
-        : canonical.truth.label === 'degraded'
-          ? 'truth degraded'
+        ? 'источник teacher недоступен'
+      : canonical.teacher.stateLabel === 'legacy_selected'
+          ? 'источник teacher архив/деградация'
+        : 'источник teacher не проверен';
+    const truthStateText = canonical.truth.label === 'с видео'
+      ? 'truth полный'
+      : canonical.truth.label === 'доверие потеряно'
+        ? 'доверие потеряно'
+        : canonical.truth.label === 'деградация'
+          ? 'truth деградирован'
           : canonical.truth.label;
     const startDisabled = !freeformActive && !canonical.startReady;
     const blockReasons = recording.actionError
@@ -4476,19 +4967,19 @@ export class CsiOperatorApp {
     return `
       <div class="manual-recorder freeform-recorder canonical-recorder">
         <div class="panel__eyebrow">Основной операторский путь</div>
-        <div class="panel__headline">One-person freeform / video-backed default</div>
-        <div class="panel__text">Текущий practical flow: garage router + all antennas. Teacher source должен быть явным, preflight честным, а voice prompts остаются частью процесса.</div>
+        <div class="panel__headline">Свободная запись одной персоны / видео по умолчанию</div>
+        <div class="panel__text">Текущий практический поток: garage router + все антенны. Источник teacher должен быть явным, предпроверка честной, а голосовые подсказки остаются частью процесса.</div>
 
         <div class="hero-tags">
-          ${renderStatusPill('garage router + all antennas', 'info')}
-          ${renderStatusPill('video-backed default', 'warn')}
+          ${renderStatusPill('garage router + все антенны', 'info')}
+          ${renderStatusPill('видео по умолчанию', 'warn')}
           ${renderStatusPill(teacherStateText, canonical.teacher.tone)}
           ${renderStatusPill(truthStateText, canonical.truth.tone)}
-          ${renderStatusPill(canonical.voiceEnabled ? 'voice cues on' : 'voice cues off', canonical.voiceEnabled ? 'ok' : 'neutral')}
-          ${Number(personCountValue || 1) === 1 ? renderStatusPill('one-person default', 'ok') : renderStatusPill('multi-person override', 'warn')}
+          ${renderStatusPill(canonical.voiceEnabled ? 'голосовые подсказки включены' : 'голосовые подсказки выключены', canonical.voiceEnabled ? 'ok' : 'neutral')}
+          ${Number(personCountValue || 1) === 1 ? renderStatusPill('одна персона по умолчанию', 'ok') : renderStatusPill('многоперсонный режим', 'warn')}
           ${freeformActive ? renderStatusPill('идёт primary operator session', 'risk') : ''}
-          ${legacyFreeformActive ? renderStatusPill('legacy freeform без video', 'risk') : ''}
-          ${guidedActive ? renderStatusPill('legacy guided активен', 'warn') : ''}
+          ${legacyFreeformActive ? renderStatusPill('архивный freeform без видео', 'risk') : ''}
+          ${guidedActive ? renderStatusPill('архивный guided активен', 'warn') : ''}
           ${manualActive && !legacyFreeformActive ? renderStatusPill('ручной режим активен', 'warn') : ''}
           ${renderStatusPill(getStartupSignalGuardLabel(startupSignalGuard), getStartupSignalGuardTone(startupSignalGuard))}
           ${recording.preflightLoading ? renderStatusPill(UI_LOCALE.capture.preflightRunning, 'info') : ''}
@@ -4496,11 +4987,11 @@ export class CsiOperatorApp {
 
         <div class="surface-grid surface-grid--two manual-recorder__status-grid canonical-recorder__status-grid">
           <article class="panel">
-            <div class="panel__eyebrow">Teacher source</div>
+            <div class="panel__eyebrow">Источник teacher</div>
             <div class="kv-list">
               <div class="kv"><span>Выбранный contract</span><strong>${escapeHtml(canonical.teacher.selectionLabel)}</strong></div>
-              <div class="kv"><span>Runtime source</span><strong>${escapeHtml(canonical.teacher.selected ? canonical.teacher.label : 'не выбран')}</strong></div>
-              <div class="kv"><span>Video contract</span><strong>${escapeHtml(canonical.teacher.required ? UI_LOCALE.common.required : UI_LOCALE.common.optional)}</strong></div>
+              <div class="kv"><span>Источник runtime</span><strong>${escapeHtml(canonical.teacher.selected ? canonical.teacher.label : 'не выбран')}</strong></div>
+              <div class="kv"><span>Контракт видео</span><strong>${escapeHtml(canonical.teacher.required ? UI_LOCALE.common.required : UI_LOCALE.common.optional)}</strong></div>
               <div class="kv"><span>Состояние</span><strong>${escapeHtml(teacherStateText)}</strong></div>
               <div class="kv"><span>Источник</span><strong>${escapeHtml(canonical.teacher.detail)}</strong></div>
             </div>
@@ -4515,15 +5006,15 @@ export class CsiOperatorApp {
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.operationalReady)}</span><strong>${escapeHtml(canonical.videoChecked ? formatBoolean(Boolean(preflight.ok && canonical.videoAvailable)) : 'нет')}</strong></div>
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.freeformNodesActive)}</span><strong>${escapeHtml(freeformActive ? `${activeNodes}/${Math.max(activeNodes, DEFAULT_VISIBLE_NODE_COUNT)}` : `${canonical.readyNodes}/${canonical.totalNodes}`)}</strong></div>
             </div>
-            <div class="panel__footer">${escapeHtml(recording.preflightError || preflight.error || (preflight.ok ? 'Preflight подтвердил узлы и video-backed teacher source.' : 'Без preflight start остаётся заблокирован.'))}</div>
+            <div class="panel__footer">${escapeHtml(recording.preflightError || preflight.error || (preflight.ok ? 'Предпроверка подтвердила узлы и источник teacher с видео.' : 'Без предпроверки старт остаётся заблокирован.'))}</div>
           </article>
 
           <article class="panel">
-            <div class="panel__eyebrow">Truth layer</div>
+            <div class="panel__eyebrow">Слой truth</div>
             <div class="kv-list">
               <div class="kv"><span>Статус</span><strong>${escapeHtml(truthStateText)}</strong></div>
-              <div class="kv"><span>Live trust</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.trust?.label || 'unknown'))}</strong></div>
-              <div class="kv"><span>Support context</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.supportPath?.contextValidity || 'unknown'))}</strong></div>
+              <div class="kv"><span>Живое доверие</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.trust?.label || 'unknown'))}</strong></div>
+              <div class="kv"><span>Support‑контекст</span><strong>${escapeHtml(displayToken(this.snapshot?.live?.supportPath?.contextValidity || 'unknown'))}</strong></div>
               <div class="kv"><span>Активные источники</span><strong>${escapeHtml(`${Math.max(Number(this.snapshot?.live?.topology?.sourceCount) || 0, freeformActive ? activeNodes : canonical.readyNodes)}/${Math.max(Number(this.snapshot?.live?.topology?.sourceCount) || 0, freeformActive ? activeNodes : canonical.readyNodes, DEFAULT_VISIBLE_NODE_COUNT)}`)}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(canonical.truth.summary)}</div>
@@ -4537,18 +5028,18 @@ export class CsiOperatorApp {
               <div class="kv"><span>${escapeHtml(UI_LOCALE.capture.freeformRoleHint)}</span><strong>${escapeHtml(roleHintText)}</strong></div>
               <div class="kv"><span>Прошло</span><strong>${escapeHtml(freeformActive ? formatDurationCompact(status.elapsed_sec) : 'до явной остановки')}</strong></div>
             </div>
-            <div class="panel__footer">${escapeHtml(freeformActive ? 'Во время active session truth-layer отслеживается отдельно и больше не считается автоматически валидным.' : 'Канонический start открывается только после честного preflight и teacher source check.')}</div>
+            <div class="panel__footer">${escapeHtml(freeformActive ? 'Во время активной сессии слой truth отслеживается отдельно и больше не считается автоматически валидным.' : 'Канонический старт открывается только после честной предпроверки и проверки источника teacher.')}</div>
           </article>
 
           <article class="panel">
-            <div class="panel__eyebrow">Post-start CSI guard</div>
+            <div class="panel__eyebrow">CSI-guard после старта</div>
             <div class="kv-list">
               <div class="kv"><span>Статус</span><strong>${escapeHtml(getStartupSignalGuardLabel(startupSignalGuard))}</strong></div>
-              <div class="kv"><span>Grace</span><strong>${escapeHtml(formatDurationCompact(startupSignalGuard.thresholds.graceSec))}</strong></div>
-              <div class="kv"><span>Min nodes</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minActiveCoreNodes))}</strong></div>
-              <div class="kv"><span>Min packets</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPackets))}</strong></div>
-              <div class="kv"><span>Min pps</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPps, 1))} pps</strong></div>
-              <div class="kv"><span>Факт</span><strong>${escapeHtml(`${formatNumber(startupSignalGuard.metrics.activeCoreNodes ?? 0)} nodes / ${formatNumber(startupSignalGuard.metrics.packets ?? 0)} packets / ${formatNumber(startupSignalGuard.metrics.pps, 1)} pps`)}</strong></div>
+              <div class="kv"><span>Пауза</span><strong>${escapeHtml(formatDurationCompact(startupSignalGuard.thresholds.graceSec))}</strong></div>
+              <div class="kv"><span>Мин. узлов</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minActiveCoreNodes))}</strong></div>
+              <div class="kv"><span>Мин. пакетов</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPackets))}</strong></div>
+              <div class="kv"><span>Мин. pps</span><strong>${escapeHtml(formatNumber(startupSignalGuard.thresholds.minPps, 1))} pps</strong></div>
+              <div class="kv"><span>Факт</span><strong>${escapeHtml(`${formatNumber(startupSignalGuard.metrics.activeCoreNodes ?? 0)} узлов / ${formatNumber(startupSignalGuard.metrics.packets ?? 0)} пакетов / ${formatNumber(startupSignalGuard.metrics.pps, 1)} pps`)}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(startupSignalGuard.reason)}</div>
           </article>
@@ -4558,16 +5049,16 @@ export class CsiOperatorApp {
 
         <div class="manual-recorder__grid">
           <label class="manual-recorder__field">
-            <span>Teacher source</span>
+            <span>Источник teacher</span>
             <select
               class="manual-recorder__input"
               data-role="teacher-source-field"
               data-field="selectedKind"
               ${disableForm ? 'disabled' : ''}
             >
-              <option value="${TEACHER_SOURCE_KIND.PIXEL_RTSP}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.PIXEL_RTSP ? 'selected' : ''}>Pixel RTSP (strongest)</option>
-              <option value="${TEACHER_SOURCE_KIND.MAC_CAMERA}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.MAC_CAMERA ? 'selected' : ''}>Mac Camera (fallback)</option>
-              ${showLegacyTeacherSource ? `<option value="${TEACHER_SOURCE_KIND.NONE}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.NONE ? 'selected' : ''}>none (legacy/degraded)</option>` : ''}
+              <option value="${TEACHER_SOURCE_KIND.PIXEL_RTSP}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.PIXEL_RTSP ? 'selected' : ''}>Pixel RTSP (основной)</option>
+              <option value="${TEACHER_SOURCE_KIND.MAC_CAMERA}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.MAC_CAMERA ? 'selected' : ''}>Камера Mac (резерв)</option>
+              ${showLegacyTeacherSource ? `<option value="${TEACHER_SOURCE_KIND.NONE}" ${selectedTeacherKind === TEACHER_SOURCE_KIND.NONE ? 'selected' : ''}>none (архивный/деградированный)</option>` : ''}
             </select>
           </label>
 
@@ -4605,7 +5096,7 @@ export class CsiOperatorApp {
           `}
 
           <div class="manual-recorder__field">
-            <span>Teacher contract</span>
+            <span>Контракт teacher</span>
             <div class="manual-recorder__input manual-recorder__input--locked">${escapeHtml(teacherChoiceHint)}</div>
           </div>
 
@@ -4673,19 +5164,19 @@ export class CsiOperatorApp {
         </div>
 
         <div class="panel__footer manual-recorder__selection-note freeform-recorder__selection-note--role">
-          ${escapeHtml(`One-person default: ${getFreeformRoleHintText(1)}. Текущий выбор: ${roleHintText}`)}
+          ${escapeHtml(`Одна персона по умолчанию: ${getFreeformRoleHintText(1)}. Текущий выбор: ${roleHintText}`)}
         </div>
         ${!showLegacyTeacherSource ? `
           <div class="panel__footer manual-recorder__selection-note">
-            <button type="button" class="capture-pack__button capture-pack__button--ghost" data-action="toggle-legacy-teacher-source" ${disableForm ? 'disabled' : ''}>Показать legacy source none</button>
+            <button type="button" class="capture-pack__button capture-pack__button--ghost" data-action="toggle-legacy-teacher-source" ${disableForm ? 'disabled' : ''}>Показать архивный source none</button>
           </div>
         ` : `
           <div class="panel__footer manual-recorder__selection-note">
-            ${escapeHtml('Legacy source none показан только как advanced/archive option. Для канонического старта нужен video-backed teacher source.')}
+            ${escapeHtml('Архивный source none показан только как опция advanced. Для канонического старта нужен источник teacher с видео.')}
           </div>
         `}
         <div class="panel__footer manual-recorder__selection-note">
-          ${escapeHtml(`${UI_LOCALE.capture.freeformLabelAuto} Video-backed teacher source обязателен для канонического старта.`)}
+          ${escapeHtml(`${UI_LOCALE.capture.freeformLabelAuto} Источник teacher с видео обязателен для канонического старта.`)}
         </div>
 
         <div class="manual-recorder__toggles">
@@ -4720,7 +5211,7 @@ export class CsiOperatorApp {
 
         ${blockReasons.length ? `
           <div class="recording-honesty-note recording-honesty-note--${escapeHtml(freeformActive ? canonical.truth.tone : 'warn')}">
-            <strong>${escapeHtml(freeformActive ? 'Honest session state' : 'Почему start сейчас заблокирован')}</strong>
+            <strong>${escapeHtml(freeformActive ? 'Честное состояние сессии' : 'Почему старт сейчас заблокирован')}</strong>
             <ul class="recording-honesty-list">
               ${blockReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}
             </ul>
@@ -4793,7 +5284,7 @@ export class CsiOperatorApp {
     if (recordingMode === 'freeform') {
       blockedReasons.push('Сейчас идёт freeform-запись. Few-shot calibration ждёт завершения записи.');
     } else if (recordingMode === 'guided') {
-      blockedReasons.push('Сейчас активен legacy guided-пакет. Few-shot calibration ждёт освобождения backend.');
+      blockedReasons.push('Сейчас активен архивный guided‑пакет. Few‑shot calibration ждёт освобождения backend.');
     } else if (recordingMode === 'manual') {
       blockedReasons.push('Сейчас идёт ручная запись. Few-shot calibration ждёт освобождения backend.');
     }
@@ -4803,58 +5294,58 @@ export class CsiOperatorApp {
 
     const currentStep = fewshot.currentStep || null;
     const fitResult = fewshot.fitResult || null;
-    const runtimeWindowNote = 'Текущий shadow backend собирает окна на native cadence runtime и не гарантирует ровно 10 research-окон на шаг.';
+  const runtimeWindowNote = 'Текущий shadow backend собирает окна на native cadence runtime и не гарантирует ровно 10 research‑окон на шаг.';
     const researchTransitionNote = 'Переходный шаг нужен для будущего few-shot storage path. Сейчас он идёт как guided cue и НЕ попадает в текущий centroid fit.';
 
     return `
       <article class="panel">
-        <div class="panel__eyebrow">Few-shot guided calibration</div>
+        <div class="panel__eyebrow">Руководимая few-shot калибровка</div>
         <div class="panel__headline">${escapeHtml(protocol.name)}</div>
-        <div class="panel__text">Live-геометрия уже пересобрана в <strong>center</strong> и <strong>door_passage</strong>. Deep здесь не используется. Этот UI пока не меняет production `V20` и работает только как shadow calibration packet.</div>
+        <div class="panel__text">Live‑геометрия уже пересобрана в <strong>center</strong> и <strong>door_passage</strong>. Deep здесь не используется. Этот UI пока не меняет production V20 и работает только как shadow‑калибровка.</div>
 
         <div class="hero-tags">
-          ${renderStatusPill('shadow-only', 'warn')}
+          ${renderStatusPill('только shadow', 'warn')}
           ${renderStatusPill(`ожидаемая LODO BA ${formatNumber(protocol.expectedDateLodoBa, 2)}`, 'ok')}
           ${renderStatusPill(`окна: ${formatNumber(protocol.totalWindows)}`, 'info')}
           ${renderStatusPill(`время: ${formatDurationCompact(protocol.totalDurationSec)}`, 'info')}
           ${fewshotActive ? renderStatusPill(`идёт ${escapeHtml(fewshot.status)}`, 'risk') : renderStatusPill('готов к старту', canStart ? 'ok' : 'warn')}
-          ${renderStatusPill(`live nodes: ${formatNumber(liveNodes)}`, liveNodes >= 3 ? 'ok' : 'warn')}
+          ${renderStatusPill(`живые узлы: ${formatNumber(liveNodes)}`, liveNodes >= 3 ? 'ok' : 'warn')}
         </div>
 
         <div class="surface-grid surface-grid--three manual-recorder__status-grid">
           <article class="panel">
-            <div class="panel__eyebrow">Runtime boundary</div>
+            <div class="panel__eyebrow">Граница runtime</div>
             <div class="kv-list">
-              <div class="kv"><span>Production</span><strong>V20 occupancy</strong></div>
-              <div class="kv"><span>Live geometry</span><strong>center vs door_passage</strong></div>
-              <div class="kv"><span>Research target</span><strong>${escapeHtml(formatNumber(protocol.totalWindows))} окон / ${escapeHtml(formatDurationCompact(protocol.totalDurationSec))}</strong></div>
-              <div class="kv"><span>Current runtime support</span><strong>shadow centroid only</strong></div>
+              <div class="kv"><span>Боевой режим</span><strong>V20 occupancy</strong></div>
+              <div class="kv"><span>Живая геометрия</span><strong>center vs door_passage</strong></div>
+              <div class="kv"><span>Цель исследования</span><strong>${escapeHtml(formatNumber(protocol.totalWindows))} окон / ${escapeHtml(formatDurationCompact(protocol.totalDurationSec))}</strong></div>
+              <div class="kv"><span>Текущий runtime support</span><strong>только shadow centroid</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(runtimeWindowNote)}</div>
           </article>
 
           <article class="panel">
-            <div class="panel__eyebrow">Shadow centroid backend</div>
+            <div class="panel__eyebrow">Backend shadow centroid</div>
             <div class="kv-list">
               <div class="kv"><span>Статус</span><strong>${escapeHtml(zoneShadow.status || 'not_calibrated')}</strong></div>
               <div class="kv"><span>Качество</span><strong>${escapeHtml(zoneShadow.calibrationQuality || 'not_calibrated')}</strong></div>
-              <div class="kv"><span>Center windows</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.center, 0))}</strong></div>
-              <div class="kv"><span>Door windows</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.door, 0))}</strong></div>
+              <div class="kv"><span>Окна center</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.center, 0))}</strong></div>
+              <div class="kv"><span>Окна door</span><strong>${escapeHtml(formatNumber(zoneShadow.nCalWindows?.door, 0))}</strong></div>
               <div class="kv"><span>Последняя зона</span><strong>${escapeHtml(displayFewshotZone(zoneShadow.zone || 'unknown'))}</strong></div>
-              <div class="kv"><span>Confidence</span><strong>${zoneShadow.confidence != null ? escapeHtml(formatNumber(zoneShadow.confidence, 2)) : 'ещё нет окна'}</strong></div>
+              <div class="kv"><span>Уверенность</span><strong>${zoneShadow.confidence != null ? escapeHtml(formatNumber(zoneShadow.confidence, 2)) : 'ещё нет окна'}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(zoneShadow.rejectionReason || 'Текущий backend использует только явные шаги center/door и не подменяет production verdict.')}</div>
           </article>
 
           <article class="panel">
-            <div class="panel__eyebrow">Run state</div>
+            <div class="panel__eyebrow">Состояние прогона</div>
             <div class="kv-list">
               <div class="kv"><span>Протокол</span><strong>${escapeHtml(protocol.shortLabel)}</strong></div>
               <div class="kv"><span>Статус</span><strong>${escapeHtml(fewshot.status || 'idle')}</strong></div>
               <div class="kv"><span>Текущий шаг</span><strong>${escapeHtml(currentStep ? `${currentStep.index + 1}/${currentStep.totalSteps} · ${currentStep.label}` : 'не выбран')}</strong></div>
               <div class="kv"><span>Таймер</span><strong>${escapeHtml(currentStep && fewshot.stepEndsAt ? formatCountdown(fewshot.stepEndsAt) : (fewshot.status === 'paused' ? formatCountdown(fewshot.pauseUntil) : 'не запущен'))}</strong></div>
-              <div class="kv"><span>Fit</span><strong>${escapeHtml(fitResult ? (fitResult.ok === false ? 'ошибка' : 'готово') : 'ещё нет')}</strong></div>
-              <div class="kv"><span>Last error</span><strong>${escapeHtml(fewshot.lastError || 'нет')}</strong></div>
+              <div class="kv"><span>Подгонка</span><strong>${escapeHtml(fitResult ? (fitResult.ok === false ? 'ошибка' : 'готово') : 'ещё нет')}</strong></div>
+              <div class="kv"><span>Последняя ошибка</span><strong>${escapeHtml(fewshot.lastError || 'нет')}</strong></div>
             </div>
             <div class="panel__footer">${escapeHtml(fitResult?.error || (fitResult ? `zones=${(fitResult.zones_calibrated || []).join(', ') || 'n/a'}` : researchTransitionNote))}</div>
           </article>
@@ -4878,7 +5369,7 @@ export class CsiOperatorApp {
             data-action="fewshot-calibration-stop"
             ${fewshotActive ? '' : 'disabled'}
           >
-            Остановить calibration
+            Остановить калибровку
           </button>
           <button
             type="button"
@@ -4886,13 +5377,13 @@ export class CsiOperatorApp {
             data-action="fewshot-calibration-reset"
             ${fewshotActive ? 'disabled' : ''}
           >
-            Сбросить shadow calibration
+            Сбросить shadow‑калибровку
           </button>
         </div>
 
         ${blockedReasons.length ? `
           <div class="recording-honesty-note recording-honesty-note--warn">
-            <strong>Почему few-shot start сейчас заблокирован</strong>
+            <strong>Почему старт few-shot сейчас заблокирован</strong>
             <ul class="recording-honesty-list">
               ${blockedReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}
             </ul>
@@ -4908,9 +5399,9 @@ export class CsiOperatorApp {
                   <span>${index + 1}</span>
                   <p>
                     <strong>${escapeHtml(step.label)}</strong><br>
-                    Зона: ${escapeHtml(displayFewshotZone(step.displayZone))} · ${escapeHtml(formatDurationCompact(step.durationSec))} · target ${escapeHtml(formatNumber(step.targetWindows))} research-окон<br>
+                    Зона: ${escapeHtml(displayFewshotZone(step.displayZone))} · ${escapeHtml(formatDurationCompact(step.durationSec))} · цель ${escapeHtml(formatNumber(step.targetWindows))} исследовательских окон<br>
                     ${escapeHtml(step.instruction)}
-                    ${step.researchOnly ? '<br><em>Research-only: не идёт в текущий centroid fit.</em>' : ''}
+                    ${step.researchOnly ? '<br><em>Только исследование: не идёт в текущую подгонку centroid.</em>' : ''}
                   </p>
                 </div>
               `).join('')}
@@ -4918,13 +5409,13 @@ export class CsiOperatorApp {
           </article>
 
           <article class="panel">
-            <div class="panel__eyebrow">Run log</div>
+            <div class="panel__eyebrow">Журнал прогона</div>
             ${fewshot.logs?.length ? `
               <div class="capture-console__log">
                 ${fewshot.logs.map((entry, index) => `
                   <div class="capture-console__entry">
                     <strong>${escapeHtml(`${index + 1}. ${entry.stepLabel}`)}</strong><br>
-                    status=${escapeHtml(entry.status || 'unknown')} · zone=${escapeHtml(displayFewshotZone(entry.displayZone || entry.captureZone || 'unknown'))}${entry.researchOnly ? ' · research-only' : ''}<br>
+                    status=${escapeHtml(entry.status || 'unknown')} · zone=${escapeHtml(displayFewshotZone(entry.displayZone || entry.captureZone || 'unknown'))}${entry.researchOnly ? ' · только исследование' : ''}<br>
                     ${entry.captureStopPayload?.windows_collected != null ? `windows=${escapeHtml(formatNumber(entry.captureStopPayload.windows_collected, 0))} · ` : ''}${entry.error ? `error=${escapeHtml(entry.error)}` : ''}
                   </div>
                 `).join('')}
@@ -4941,16 +5432,20 @@ export class CsiOperatorApp {
   renderRecordingArchive(recording) {
     const guidedOpen = this.runtimeRecordingUi.showLegacyGuided;
     const manualOpen = this.runtimeRecordingUi.showLegacyManual;
+    const showArchive = guidedOpen || manualOpen;
+
+    if (!showArchive) {
+      return '';
+    }
 
     return `
       <div class="recording-archive">
-        <div class="panel__eyebrow">Legacy / archive</div>
-        <div class="panel__headline">Старые recording branches убраны из primary path</div>
-        <div class="panel__text">Motion-only guided packs и manual compatibility recorder сохранены для истории и аварийных кейсов, но больше не выглядят как канонический operator flow.</div>
+        <div class="panel__eyebrow">Архивный режим</div>
+        <div class="panel__headline">Старые ветки записи (не основной путь)</div>
+          <div class="panel__text">Показывается только по запросу. Канонический путь — guided и freeform с видео.</div>
         <div class="hero-tags">
-          ${renderStatusPill('guided = legacy motion-only', 'warn')}
-          ${renderStatusPill('manual = compatibility path', 'warn')}
-          ${renderStatusPill('не primary по умолчанию', 'ok')}
+          ${renderStatusPill('guided = архивный', 'warn')}
+          ${renderStatusPill('manual = совместимость', 'warn')}
         </div>
         <div class="capture-console__actions recording-archive__actions">
           <button
@@ -4958,14 +5453,14 @@ export class CsiOperatorApp {
             class="capture-pack__button capture-pack__button--ghost"
             data-action="toggle-legacy-guided"
           >
-            ${escapeHtml(guidedOpen ? 'Скрыть legacy guided packs' : 'Показать legacy guided packs')}
+            ${escapeHtml(guidedOpen ? 'Скрыть архивные guided' : 'Показать архивные guided')}
           </button>
           <button
             type="button"
             class="capture-pack__button capture-pack__button--ghost"
             data-action="toggle-legacy-manual"
           >
-            ${escapeHtml(manualOpen ? 'Скрыть legacy manual recorder' : 'Показать legacy manual recorder')}
+            ${escapeHtml(manualOpen ? 'Скрыть архивный manual' : 'Показать архивный manual')}
           </button>
         </div>
 
@@ -4973,8 +5468,8 @@ export class CsiOperatorApp {
           <div class="recording-archive__section">
             <div class="surface-grid surface-grid--two">
               <article class="panel">
-                <div class="panel__eyebrow">Legacy guided packs</div>
-                <div class="panel__text">Эти пакеты исторически полезны, но они не video-backed by default и поэтому больше не являются основным операторским путём.</div>
+                <div class="panel__eyebrow">Архивные guided‑пакеты</div>
+                <div class="panel__text">Исторические пакеты без video‑backed по умолчанию.</div>
                 <div class="capture-pack-grid">
                   ${GUIDED_CAPTURE_PACKS.map((pack) => this.renderGuidedCapturePackCard(pack, recording)).join('')}
                 </div>
@@ -5098,10 +5593,10 @@ export class CsiOperatorApp {
         <article class="panel">
           <div class="panel__eyebrow">Экспериментальная диагностика</div>
           <div class="kv-list">
-            <div class="kv"><span>Binary</span><strong>${escapeHtml(displayToken(secondaryRuntime.binary || 'unknown'))}</strong></div>
-            <div class="kv"><span>Binary confidence</span><strong>${escapeHtml(formatPercent(secondaryRuntime.binaryConfidence, 0))}</strong></div>
-            <div class="kv"><span>Coarse</span><strong>${escapeHtml(displayToken(secondaryRuntime.coarse || 'unknown'))}</strong></div>
-            <div class="kv"><span>Coarse confidence</span><strong>${escapeHtml(formatPercent(secondaryRuntime.coarseConfidence, 0))}</strong></div>
+            <div class="kv"><span>Бинарный</span><strong>${escapeHtml(displayToken(secondaryRuntime.binary || 'unknown'))}</strong></div>
+            <div class="kv"><span>Уверенность binary</span><strong>${escapeHtml(formatPercent(secondaryRuntime.binaryConfidence, 0))}</strong></div>
+            <div class="kv"><span>Грубый</span><strong>${escapeHtml(displayToken(secondaryRuntime.coarse || 'unknown'))}</strong></div>
+            <div class="kv"><span>Уверенность coarse</span><strong>${escapeHtml(formatPercent(secondaryRuntime.coarseConfidence, 0))}</strong></div>
           </div>
           <div class="panel__footer">Эти поля остаются debug-only и не подменяют primary motion verdict.</div>
         </article>
@@ -5121,7 +5616,7 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Operator workflow</div>
+          <div class="panel__eyebrow">Операторский порядок</div>
           <div class="workflow-list">
             ${AGENT7_OPERATOR_TRUTH.operatorWorkflow.map((item, index) => `
               <div class="workflow-item">

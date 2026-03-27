@@ -33,6 +33,7 @@ from typing import Any, Optional
 from .recording_truth_hardening import (
     build_truth_hardening_report,
     build_zone_review_autowire_status,
+    normalize_motion_type,
 )
 from .csi_node_inventory import CORE_NODE_IPS, NODE_IPS, NODE_NAMES
 
@@ -415,7 +416,7 @@ class CsiRecordingService:
                 "Pass explicit person_count to avoid this warning.",
                 label,
             )
-        self.motion_type = motion_type
+        self.motion_type = normalize_motion_type(motion_type, person_count=person_count)
         self.notes = notes
 
         self.teacher_source_kind = teacher_cfg["kind"]
@@ -1595,13 +1596,17 @@ class CsiRecordingService:
 
     def get_status(self) -> dict:
         """Get recording status for API/UI."""
+        last_stop_result = self._last_stop_result
+        last_session_summary = self._session_summary
         if not self.recording:
             return {
                 "recording": False,
                 "preflight": self._preflight,
                 "startup_signal_guard": self._startup_signal_guard,
-                "last_result": self._last_stop_result,
-                "last_session_summary": self._session_summary,
+                "last_result": last_stop_result,
+                "lastStopResult": last_stop_result,
+                "last_session_summary": last_session_summary,
+                "lastSessionSummary": last_session_summary,
             }
 
         elapsed = time.time() - self._session_start
@@ -1633,6 +1638,10 @@ class CsiRecordingService:
             "node_packets": dict(self._node_packet_counts),
             "preflight": self._preflight,
             "startup_signal_guard": self._startup_signal_guard,
+            "last_result": last_stop_result,
+            "lastStopResult": last_stop_result,
+            "last_session_summary": last_session_summary,
+            "lastSessionSummary": last_session_summary,
             "teacher_status": {
                 "ready": self._teacher_ready,
                 "degraded": self._teacher_degraded,

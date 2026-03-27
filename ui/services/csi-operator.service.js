@@ -31,15 +31,21 @@ const DEFAULT_GARAGE_LAYOUT = {
     { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
     { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.105', xMeters: 0.00, yMeters: 3.50, zone: 'center' },
-    { nodeId: 'node06', ip: '192.168.1.106', xMeters: -1.50, yMeters: 4.35, zone: 'center' },
-    { nodeId: 'node07', ip: '192.168.1.107', xMeters: 1.50, yMeters: 3.70, zone: 'center' }
+    { nodeId: 'node05', ip: '192.168.1.33',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.1.77',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.1.41',  xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
 const CSI_ENDPOINTS = API_CONFIG?.ENDPOINTS?.CSI || {};
 const CSI_STATUS_ENDPOINT = CSI_ENDPOINTS.STATUS || '/api/v1/csi/status';
 const CSI_MODELS_ENDPOINT = CSI_ENDPOINTS.MODELS || '/api/v1/csi/models';
 const CSI_MODEL_SELECT_ENDPOINT = CSI_ENDPOINTS.MODEL_SELECT || '/api/v1/csi/model/select';
+const CSI_VALIDATION_ENDPOINTS = CSI_ENDPOINTS.VALIDATION || {
+  STATUS: '/api/v1/csi/validation/status',
+  RESOLVE: '/api/v1/csi/validation/resolve',
+  BATCH_APPROVE: '/api/v1/csi/validation/batch-approve',
+  SEGMENT: '/api/v1/csi/validation/segment/{segment_id}'
+};
 const CSI_ZONE_ENDPOINTS = CSI_ENDPOINTS.ZONE || {
   STATUS: '/api/v1/csi/zone/status',
   START: '/api/v1/csi/zone/calibrate/start',
@@ -74,7 +80,8 @@ const DEFAULT_POLLING = {
   info: 60000,
   runtimeModels: 60000,
   forensicRuns: 30000,
-  recording: 2000
+  recording: 2000,
+  validation: 15000
 };
 const STARTUP_SIGNAL_GUARD_DEFAULTS = {
   graceSec: 6,
@@ -166,7 +173,7 @@ function buildFreeformNotes(freeform) {
   const parts = [
     'mode=freeform',
     `person_count=${personCount}`,
-    'motion_type=free_motion',
+    'motion_type=freeform_single_person',
     `role_hint=${roleHint}`
   ];
   const extraNotes = String(freeform?.notes || '').trim();
@@ -188,7 +195,7 @@ function buildFreeformStopSummary(result, recording) {
     lastChunk: result?.last_chunk || null,
     withVideo: true,
     personCount: Math.max(1, Number(status.person_count || freeform.personCount) || 1),
-    motionType: status.motion_type || 'free_motion',
+    motionType: status.motion_type || 'freeform_single_person',
     stoppedAt: nowIso()
   };
 }
@@ -225,8 +232,8 @@ function normalizeStartupSignalGuard(rawGuard, recordingStatus = null, lastStopR
       || (deadOnStart
         ? 'CSI сигнал не пошёл. Запись остановлена.'
         : passed
-          ? 'startup guard passed'
-          : 'startup guard pending'),
+          ? 'проверка старта пройдена'
+          : 'проверка старта в ожидании'),
     thresholds: {
       graceSec: safeNumber(guard.grace_sec, safeNumber(guard.graceSec, STARTUP_SIGNAL_GUARD_DEFAULTS.graceSec)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.graceSec,
       minActiveCoreNodes: safeNumber(guard.min_active_core_nodes, safeNumber(guard.minActiveCoreNodes, STARTUP_SIGNAL_GUARD_DEFAULTS.minActiveCoreNodes)) ?? STARTUP_SIGNAL_GUARD_DEFAULTS.minActiveCoreNodes,
@@ -243,10 +250,10 @@ function normalizeStartupSignalGuard(rawGuard, recordingStatus = null, lastStopR
     note: guard.note
       || guard.summary
       || (deadOnStart
-        ? 'Auto-stop по startup_signal_guard: CSI dead on start.'
+        ? 'Автостоп по startup_signal_guard: CSI dead on start.'
         : passed
-          ? 'startup guard passed'
-          : 'startup guard waiting'),
+          ? 'проверка старта пройдена'
+          : 'проверка старта в ожидании'),
     raw: guard
   };
 }
@@ -277,6 +284,25 @@ function normalizeRecordingStopResult(result, recordingStatus = null) {
   };
 }
 
+function getRecordingLastStopResult(recording) {
+  return recording?.lastStopResult
+    || recording?.status?.lastStopResult
+    || recording?.status?.last_result
+    || null;
+}
+
+function getRecordingLastSessionSummary(recording) {
+  return recording?.freeform?.lastSummary
+    || recording?.status?.lastSessionSummary
+    || recording?.status?.last_session_summary
+    || null;
+}
+
+function isFreeformSessionSummary(summary) {
+  const motionType = String(summary?.motion_type || summary?.motionType || '').trim();
+  return motionType === 'free_motion' || motionType === 'freeform_single_person';
+}
+
 function inferActiveRecordingMode(recording) {
   const status = recording?.status;
   if (!status?.recording) {
@@ -285,7 +311,10 @@ function inferActiveRecordingMode(recording) {
   if (ACTIVE_GUIDED_STATUSES.includes(recording?.guided?.status || 'idle')) {
     return 'guided';
   }
-  if (recording?.activeMode === 'freeform' || (status?.motion_type === 'free_motion' && status?.with_video)) {
+  if (
+    recording?.activeMode === 'freeform'
+    || ((status?.motion_type === 'free_motion' || status?.motion_type === 'freeform_single_person') && status?.with_video)
+  ) {
     return 'freeform';
   }
   if (recording?.activeMode === 'manual') {
@@ -352,7 +381,7 @@ function buildTeacherSourceContract(
 
   if (effectiveKind === TEACHER_SOURCE_KINDS.NONE) {
     if (strictVideoRequired && !allowLegacyNone) {
-      contract.error = 'video_required=true требует явный teacher source вместо legacy none.';
+      contract.error = 'video_required=true требует явный источник teacher вместо legacy none.';
     }
     return contract;
   }
@@ -361,7 +390,7 @@ function buildTeacherSourceContract(
     contract.teacherSourceUrl = String(teacherSource.pixelRtspUrl || DEFAULT_PIXEL_RTSP_URL).trim();
     contract.teacherSourceName = String(teacherSource.pixelRtspName || DEFAULT_PIXEL_RTSP_NAME).trim() || DEFAULT_PIXEL_RTSP_NAME;
     if (!contract.teacherSourceUrl) {
-      contract.error = 'Для Pixel RTSP нужен явный teacher_source_url.';
+      contract.error = 'Для Pixel RTSP нужен явный URL teacher-источника.';
     }
     return contract;
   }
@@ -370,11 +399,11 @@ function buildTeacherSourceContract(
     contract.teacherDevice = String(teacherSource.macDevice || DEFAULT_MAC_CAMERA_DEVICE).trim() || DEFAULT_MAC_CAMERA_DEVICE;
     contract.teacherDeviceName = String(teacherSource.macDeviceName || DEFAULT_MAC_CAMERA_DEVICE_NAME).trim()
       || DEFAULT_MAC_CAMERA_DEVICE_NAME;
-    contract.teacherSourceName = 'Mac Camera';
+    contract.teacherSourceName = 'Камера Mac';
     return contract;
   }
 
-  contract.error = `Неподдерживаемый teacher source: ${effectiveKind}`;
+  contract.error = `Неподдерживаемый источник teacher: ${effectiveKind}`;
   return contract;
 }
 
@@ -824,6 +853,8 @@ function buildMotionRuntime(csiPayload, posePayload) {
     packetsPerSecond: safeNumber(csiPayload?.pps),
     windowAgeSec: safeNumber(csiPayload?.window_age_sec),
     targetZone: csiPayload?.target_zone || 'unknown',
+    zoneProbabilities: csiPayload?.zone_probabilities || null,
+    zoneModel: csiPayload?.zone_model || null,
     targetX: safeNumber(csiPayload?.target_x),
     targetY: safeNumber(csiPayload?.target_y),
     modelVersion: csiPayload?.model_version || 'unknown',
@@ -952,6 +983,39 @@ function buildV19ShadowRuntime(csiPayload) {
     blScVarDevMax: safeNumber(shadow?.bl_sc_var_dev_max),
     gateConsecBelow: shadow?.gate_consec_below ?? 0,
     gateConsecAbove: shadow?.gate_consec_above ?? 0,
+  };
+}
+
+function buildV27Binary7NodeRuntime(csiPayload) {
+  const shadow = csiPayload?.v26_shadow || {};
+  const binary = typeof shadow?.binary === 'string'
+    ? shadow.binary
+    : null;
+  const occupiedProbability = safeNumber(shadow?.binary_proba);
+  const emptyProbability = occupiedProbability != null
+    ? clamp(1 - occupiedProbability, 0, 1)
+    : null;
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(binary);
+  const status = shadow?.status
+    || (binary ? 'shadow_live' : (loaded ? 'awaiting_first_window' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.v26_shadow),
+    sourceField: 'v26_shadow',
+    track: shadow?.track || 'V26_binary_7node',
+    candidateName: 'v27_binary_7node',
+    loaded,
+    status,
+    binary,
+    predictedClass: binary,
+    occupiedProbability,
+    emptyProbability,
+    threshold: safeNumber(shadow?.threshold),
+    agreeBinary: shadow?.agree_binary ?? null,
+    inferenceMs: safeNumber(shadow?.inference_ms),
+    windowT: safeNumber(shadow?.window_t)
   };
 }
 
@@ -1331,7 +1395,7 @@ function deriveLastMeaningfulEvent(csiPayload, posePayload, support, operatorPre
       label: csiPayload.motion_state,
       ageSec: motionAge,
       timestamp: null,
-      detail: detail || 'motion runtime active'
+      detail: detail || 'motion runtime активен'
     };
   }
 
@@ -1391,7 +1455,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'offline',
       tone: 'risk',
-      summary: 'CSI runtime status недоступен.'
+      summary: 'Статус CSI runtime недоступен.'
     };
   }
 
@@ -1407,7 +1471,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'degraded',
       tone: 'risk',
-      summary: 'Motion-only runtime поднят, но модель не загружена.'
+      summary: 'Runtime только по движению поднят, но модель не загружена.'
     };
   }
 
@@ -1420,7 +1484,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'degraded',
       tone: 'warn',
-      summary: 'Motion-only runtime отвечает, но окно CSI уже несвежее.'
+      summary: 'Runtime только по движению отвечает, но окно CSI уже несвежее.'
     };
   }
 
@@ -1428,7 +1492,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'degraded',
       tone: 'warn',
-      summary: 'Motion-only runtime жив, но активных узлов меньше трёх.'
+      summary: 'Runtime только по движению жив, но активных узлов меньше трёх.'
     };
   }
 
@@ -1436,7 +1500,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'degraded',
       tone: 'warn',
-      summary: 'Motion-only runtime жив, но packet-rate слишком низкий.'
+      summary: 'Runtime только по движению жив, но packet-rate слишком низкий.'
     };
   }
 
@@ -1444,7 +1508,7 @@ function deriveTrust(csiPayload, support) {
     return {
       label: 'topology_mismatch',
       tone: 'risk',
-      summary: 'Motion-only runtime жив, но support-топология не совпадает с frozen-контрактом.'
+      summary: 'Runtime только по движению жив, но support-топология не совпадает с frozen-контрактом.'
     };
   }
 
@@ -1452,11 +1516,11 @@ function deriveTrust(csiPayload, support) {
   return {
     label: 'ready',
     tone: 'ok',
-    summary: `Motion-runtime свежий${confidence != null ? `, уверенность ${confidence.toFixed(2)}` : ''}; семантика entry/exit остаётся только support-слоем.`
+    summary: `Motion-runtime свежий${confidence != null ? `, уверенность ${confidence.toFixed(2)}` : ''}; семантика вход/выход остаётся только support-слоем.`
   };
 }
 
-function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shadow) {
+function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow) {
   const experimentalAvailable = csiPayload && (
     (csiPayload.binary && csiPayload.binary !== 'unknown')
     || (csiPayload.coarse && csiPayload.coarse !== 'unknown')
@@ -1470,43 +1534,53 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shado
 
   return [
     {
-      label: 'Motion-only runtime',
+      label: 'Runtime только по движению',
       status: csiPayload?.running && csiPayload?.model_loaded ? 'healthy' : 'failed',
       mode: csiPayload?.motion_state || 'unknown',
       role: 'active_primary'
     },
     {
-      label: 'Track B shadow',
+      label: 'Track B тень',
       status: trackBStatus,
       mode: trackBMode,
       role: 'shadow_candidate'
     },
     {
-      label: 'Coordinate regressor',
+      label: 'Координатный регрессор',
       status: metadata?.coordinate_runtime_status || 'unknown',
       mode: metadata?.coordinate_model_source || 'unknown',
       role: 'active_reference'
     },
     {
-      label: 'Binary/coarse diagnostics',
+      label: 'Бинарная/coarse диагностика',
       status: experimentalAvailable ? 'healthy' : 'inactive',
       mode: experimentalAvailable ? 'experimental_only' : 'unknown',
       role: 'active_diagnostic'
     },
     {
-      label: 'Entry/exit shadow core',
+      label: 'Ядро shadow вход/выход',
       status: support?.candidate_status || support?.status || 'unknown',
       mode: support?.support_only ? 'support_only' : 'active',
       role: 'support_path'
     },
     {
-      label: 'V19 V23-features shadow',
+      label: 'V19 shadow по V23-features',
       status: v19Shadow?.loaded
         ? (v19Shadow?.predictedClass ? 'healthy' : 'inactive')
         : (v19Shadow?.status === 'not_loaded' ? 'failed' : 'inactive'),
       mode: v19Shadow?.predictedClass
         ? `shadow_${String(v19Shadow.predictedClass).toLowerCase()}`
         : (v19Shadow?.status || 'unknown'),
+      role: 'shadow_candidate'
+    },
+    {
+      label: 'V27 binary 7-node candidate',
+      status: v27Binary7NodeShadow?.loaded
+        ? (v27Binary7NodeShadow?.binary ? 'healthy' : 'inactive')
+        : (v27Binary7NodeShadow?.status === 'not_loaded' ? 'failed' : 'inactive'),
+      mode: v27Binary7NodeShadow?.binary
+        ? `binary_${String(v27Binary7NodeShadow.binary).toLowerCase()}`
+        : (v27Binary7NodeShadow?.status || 'unknown'),
       role: 'shadow_candidate'
     },
     {
@@ -1594,6 +1668,7 @@ function normalizeSnapshot(state, service = null) {
   const trackBShadow = buildTrackBShadowRuntime(csi);
   const v15Shadow = buildV15ShadowRuntime(csi);
   const v19Shadow = buildV19ShadowRuntime(csi);
+  const v27Binary7NodeShadow = buildV27Binary7NodeRuntime(csi);
   const garageRatioV2Shadow = buildGarageRatioV2ShadowRuntime(csi);
   const zoneCalibrationShadow = buildZoneCalibrationShadow(csi);
   const baselineStatus = buildBaselineStatus(csi);
@@ -1610,6 +1685,8 @@ function normalizeSnapshot(state, service = null) {
   );
   const cachedRunIds = service ? Array.from(service.forensicDetailCache.keys()) : [];
   const inflightRunIds = service ? Array.from(service.forensicDetailRequests.keys()) : [];
+  const lastSessionSummary = getRecordingLastSessionSummary(state.recording);
+  const freeformSummary = isFreeformSessionSummary(lastSessionSummary) ? lastSessionSummary : null;
 
   return {
     now: new Date().toISOString(),
@@ -1629,7 +1706,7 @@ function normalizeSnapshot(state, service = null) {
             message: lastStopResult.message,
             stopReason: lastStopResult.stopReason,
             guard: startupSignalGuard
-          }
+        }
         : null,
       teacherSource: {
         ...(state.recording.teacherSource || buildTeacherSourceState())
@@ -1639,8 +1716,8 @@ function normalizeSnapshot(state, service = null) {
       },
       freeform: {
         ...state.recording.freeform,
-        lastSummary: state.recording.freeform?.lastSummary
-          ? { ...state.recording.freeform.lastSummary }
+        lastSummary: freeformSummary
+          ? { ...freeformSummary }
           : null
       },
       guided: {
@@ -1670,6 +1747,13 @@ function normalizeSnapshot(state, service = null) {
         inflightRunIds
       }
     },
+    validation: {
+      ...state.validation,
+      status: state.validation.status ? { ...state.validation.status } : null,
+      selectedSegmentDetail: state.validation.selectedSegmentDetail
+        ? { ...state.validation.selectedSegmentDetail }
+        : null
+    },
     live: {
       trust: deriveTrust(csi, support),
       failureSignal: deriveFailureSignal(pose, support),
@@ -1680,6 +1764,7 @@ function normalizeSnapshot(state, service = null) {
       v7Shadow: v15Shadow,
       v15Shadow,
       v8Shadow: v15Shadow,
+      v27Binary7NodeShadow,
       garageRatioV2Shadow,
       zoneCalibrationShadow,
       operatorPresence,
@@ -1761,7 +1846,7 @@ function normalizeSnapshot(state, service = null) {
       signalQuality,
       shadowDiagnostics: buildShadowDiagnostics(metadata),
       multiPersonEstimate: buildMultiPersonEstimate(csi),
-      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow)
+      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow)
     }
   };
 }
@@ -1796,6 +1881,14 @@ export class CsiOperatorService {
         selectedRunError: null,
         loadingManifest: false,
         loadingRun: false
+      },
+      validation: {
+        status: null,
+        loadedAt: null,
+        loading: false,
+        error: null,
+        selectedSegmentId: null,
+        selectedSegmentDetail: null
       }
     };
     this.subscribers = new Set();
@@ -2171,6 +2264,7 @@ export class CsiOperatorService {
     this.schedule('runtimeModels', DEFAULT_POLLING.runtimeModels, () => this.refreshRuntimeModels());
     this.schedule('recording', DEFAULT_POLLING.recording, () => this.refreshRecordingStatus());
     this.schedule('forensicRuns', DEFAULT_POLLING.forensicRuns, () => this.refreshForensicRuns());
+    this.schedule('validation', DEFAULT_POLLING.validation, () => this.refreshValidationStatus());
   }
 
   stop() {
@@ -2204,7 +2298,8 @@ export class CsiOperatorService {
       this.refreshPose(force),
       this.refreshRuntimeModels(force),
       this.refreshRecordingStatus(force),
-      this.refreshForensicRuns(force)
+      this.refreshForensicRuns(force),
+      this.refreshValidationStatus(force)
     ]);
   }
 
@@ -2292,6 +2387,88 @@ export class CsiOperatorService {
     } finally {
       runtimeModels.loading = false;
       this.emit();
+    }
+  }
+
+  async refreshValidationStatus(force = false) {
+    const validation = this.state.validation;
+    if (validation.loading && !force) {
+      return validation.status;
+    }
+    validation.loading = true;
+    if (force) {
+      validation.error = null;
+    }
+    this.emit();
+    try {
+      const payload = await apiService.get(
+        CSI_VALIDATION_ENDPOINTS.STATUS,
+        force ? { _: Date.now() } : {}
+      );
+      validation.status = payload || null;
+      validation.loadedAt = new Date().toISOString();
+      validation.error = null;
+      return validation.status;
+    } catch (error) {
+      validation.error = error.message;
+      return validation.status;
+    } finally {
+      validation.loading = false;
+      this.emit();
+    }
+  }
+
+  async fetchValidationSegmentDetail(segmentId) {
+    if (!segmentId) {
+      return null;
+    }
+    try {
+      const payload = await apiService.get(
+        CSI_VALIDATION_ENDPOINTS.SEGMENT,
+        { segment_id: segmentId, _: Date.now() }
+      );
+      this.state.validation.selectedSegmentDetail = payload || null;
+      this.state.validation.selectedSegmentId = segmentId;
+      this.emit();
+      return payload;
+    } catch (error) {
+      this.state.validation.error = error.message;
+      this.emit();
+      return null;
+    }
+  }
+
+  async resolveValidationSegment(segmentId, resolution, operatorNote = null) {
+    if (!segmentId || !resolution) {
+      return { ok: false, error: 'segment_id/resolution required' };
+    }
+    try {
+      await apiService.post(CSI_VALIDATION_ENDPOINTS.RESOLVE, {
+        segment_id: segmentId,
+        resolution,
+        operator_note: operatorNote
+      });
+      await this.refreshValidationStatus(true);
+      return { ok: true };
+    } catch (error) {
+      this.state.validation.error = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async batchApproveValidated({ recordingId = null, dryRun = false } = {}) {
+    try {
+      const payload = await apiService.post(CSI_VALIDATION_ENDPOINTS.BATCH_APPROVE, {
+        recording_id: recordingId,
+        dry_run: dryRun
+      });
+      await this.refreshValidationStatus(true);
+      return payload;
+    } catch (error) {
+      this.state.validation.error = error.message;
+      this.emit();
+      return { ok: false, error: error.message };
     }
   }
 
@@ -2408,13 +2585,13 @@ export class CsiOperatorService {
     }
 
     if (activeMode || recording.status?.recording) {
-      recording.actionError = 'Сначала заверши активную запись или legacy guided/manual branch.';
+      recording.actionError = 'Сначала заверши активную запись или legacy guided/manual ветку.';
       this.emit();
       return { ok: false, error: recording.actionError };
     }
 
     if (!this.state.csi?.running || !this.state.csi?.model_loaded) {
-      recording.actionError = 'CSI runtime не готов. Сначала подними live runtime.';
+      recording.actionError = 'CSI runtime не готов. Сначала подними живой runtime.';
       this.emit();
       return { ok: false, error: recording.actionError };
     }
@@ -2858,6 +3035,22 @@ export class CsiOperatorService {
         CSI_RECORD_ENDPOINTS.STATUS,
         force ? { _: Date.now() } : {}
       );
+      const lastStopResultPayload = getRecordingLastStopResult(this.state.recording);
+      const lastSessionSummaryPayload = getRecordingLastSessionSummary(this.state.recording);
+      const freeformSummaryPayload = isFreeformSessionSummary(lastSessionSummaryPayload)
+        ? lastSessionSummaryPayload
+        : null;
+      if (lastStopResultPayload) {
+        this.state.recording.lastStopResult = normalizeRecordingStopResult(
+          lastStopResultPayload,
+          this.state.recording.status
+        );
+      }
+      if (freeformSummaryPayload) {
+        this.state.recording.freeform.lastSummary = {
+          ...freeformSummaryPayload
+        };
+      }
       this.state.recording.activeMode = inferActiveRecordingMode(this.state.recording);
       const normalizedStopResult = normalizeRecordingStopResult(
         this.state.recording.lastStopResult,
@@ -3085,7 +3278,7 @@ export class CsiOperatorService {
     }
 
     if (!preflight.video?.available) {
-      recording.actionError = 'Freeform-режим требует обязательное видео, но video preflight не пройден.';
+      recording.actionError = 'Freeform-режим требует обязательного видео, но предпроверка видео не пройдена.';
       this.emit();
       return { ok: false, error: recording.actionError };
     }
@@ -3102,7 +3295,7 @@ export class CsiOperatorService {
         chunk_sec: Number(freeform.chunkSec || 60),
         with_video: true,
         person_count: personCount,
-        motion_type: 'free_motion',
+        motion_type: 'freeform_single_person',
         notes,
         voice_prompt: false,
         skip_preflight: false
@@ -3131,7 +3324,7 @@ export class CsiOperatorService {
   async startGuidedCapturePack(packId, options = {}) {
     const pack = getGuidedCapturePack(packId || this.state.recording.selectedPackId);
     if (!pack) {
-      this.state.recording.actionError = 'Guided pack не найден.';
+      this.state.recording.actionError = 'guided-пакет не найден.';
       this.emit();
       return { ok: false, error: this.state.recording.actionError };
     }
@@ -3139,7 +3332,7 @@ export class CsiOperatorService {
     const recording = this.state.recording;
     const currentGuided = recording.guided;
     if (ACTIVE_GUIDED_STATUSES.includes(currentGuided.status)) {
-      recording.actionError = 'Guided run уже активен.';
+      recording.actionError = 'guided-запуск уже активен.';
       this.emit();
       return { ok: false, error: recording.actionError };
     }
@@ -3157,7 +3350,7 @@ export class CsiOperatorService {
         packId: pack.id,
         status: 'preflight_failed',
         completedAt: nowIso(),
-        lastError: preflight?.error || recording.preflightError || 'Preflight не пройден.',
+        lastError: preflight?.error || recording.preflightError || 'Предпроверка не пройдена.',
         sequencePhase: null,
         countdownValue: null,
         currentStep: null,
@@ -3206,7 +3399,7 @@ export class CsiOperatorService {
     const guided = recording.guided;
 
     if (!pack || guided.runToken !== runToken) {
-      return { ok: false, error: 'Guided pack устарел.' };
+      return { ok: false, error: 'guided-пакет устарел.' };
     }
 
     const step = pack.steps[stepIndex];
@@ -3404,7 +3597,7 @@ export class CsiOperatorService {
     const recording = this.state.recording;
     const guided = recording.guided;
     if (!guided.packId) {
-      return { ok: false, error: 'Guided run не активен.' };
+      return { ok: false, error: 'guided-запуск не активен.' };
     }
 
     this.clearGuidedTimers();

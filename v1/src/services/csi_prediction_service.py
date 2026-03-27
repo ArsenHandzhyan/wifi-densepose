@@ -55,7 +55,8 @@ TRACK_B_IP_ORDER = [
     "192.168.1.101",  # n03
     "192.168.1.125",  # n04
 ]
-WINDOW_SEC = 5.0
+WINDOW_SEC = 2.0
+WINDOW_SLIDE_SEC = 0.5  # sliding window step (predictions every 0.5s using 2s of data)
 CSI_HEADER = 20
 BUFFER_WINDOWS = 3  # keep recent history; binary smoothing is not applied here yet
 MAX_BUFFER_SEC = 30  # max seconds of packets to keep in memory
@@ -101,6 +102,9 @@ GARAGE_RATIO_NODE_ORDER = [
     ("192.168.1.117", "node02"),
     ("192.168.1.101", "node03"),
     ("192.168.1.125", "node04"),
+    ("192.168.1.33", "node05"),
+    ("192.168.1.77", "node06"),
+    ("192.168.1.41", "node07"),
 ]
 GARAGE_RATIO_NODE_NAME_BY_IP = {ip: node_name for ip, node_name in GARAGE_RATIO_NODE_ORDER}
 GARAGE_RATIO_ZONE_NAMES = ["door", "center", "deep"]
@@ -110,15 +114,15 @@ GARAGE_RATIO_CAUSAL_SMOOTH_WINDOW = 7
 GARAGE_RATIO_CAUSAL_SMOOTH_ENABLED = True
 RSSI_OFFSET = 16
 
-# ── Old-router domain-adapt shadow-mode constants (2026-03-25) ─────
-# Non-production shadow for the first candidate that no longer collapses
-# to STATIC on the old-router replay suite.
+# ── Old-router domain-adapt shadow-mode constants (2026-03-27) ─────
+# Non-production shadow now points to the gate2-passed EMPTY/STATIC
+# regularized candidate. This does not change production routing.
+OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME = "old_router_empty_static_regularization1_candidate.pkl"
 OLD_ROUTER_DOMAIN_ADAPT_MODEL_PATH = (
     PROJECT
     / "output"
-    / "train_runs"
-    / "old_router_domain_adapt_retrain1"
-    / "old_router_domain_adapt_candidate.pkl"
+    / "old_router_empty_static_regularization1"
+    / OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME
 )
 OLD_ROUTER_DOMAIN_ADAPT_SHADOW_ENABLED = True
 OLD_ROUTER_DOMAIN_ADAPT_SEQ_LEN = 7
@@ -134,6 +138,19 @@ SC_VAR_MOTION_TVAR_CEILING = 1.5
 # LODO BA=0.442, door recall=0.789. Shadow mode only initially.
 V29_CNN_MODEL_PATH = PROJECT / "output" / "train_runs" / "v29_cnn_zone_model.pt"
 V29_CNN_SHADOW_ENABLED = True
+
+# ── V30 few-shot zone calibration (2026-03-27) ────────────────────
+# v36: RF-500 on 87 multisession windows (center_vs_door_passage).
+# CV BA=1.0, FREEZE. 82 center / 5 door_passage.
+V30_FEWSHOT_MODEL_PATH = PROJECT / "output" / "train_runs" / "v39_fewshot_zone_calibration.pkl"
+V30_FEWSHOT_ZONE_ENABLED = True
+V30_FEWSHOT_ZONE_NAMES = ["center", "door_passage"]
+
+# ── V26 binary 7-node shadow (2026-03-27) ──────────────────────────
+# HGB binary classifier retrained on 7-node garage data (722 windows).
+# CV balanced accuracy 0.9984. Shadow mode only — does NOT replace V20.
+V26_BINARY_7NODE_MODEL_PATH = PROJECT / "output" / "v26_binary_7node.pkl"
+V26_BINARY_SHADOW_ENABLED = True
 V29_CNN_MAX_PACKETS = 40
 V29_CNN_N_SC = 52  # subcarriers 2-53 per node
 V29_CNN_SC_START = 2
@@ -171,6 +188,8 @@ NODE_POSITIONS = {
     "192.168.1.101": (-1.50, 3.15),  # node03 — left wall, mid-garage
     "192.168.1.125": (1.50, 2.50),   # node04 — right wall, mid-garage
     "192.168.1.33":  (0.00, 3.50),   # node05 — center ceiling, door/center boundary
+    "192.168.1.77":  (-1.50, 4.35),  # node06 — left wall, center zone
+    "192.168.1.41":  (1.50, 3.70),   # node07 — right wall, center zone
 }
 GARAGE_WIDTH = 3.00   # meters
 GARAGE_HEIGHT = 7.00  # meters (was 5.0 — corrected from Garage Planner v3)
@@ -289,10 +308,11 @@ class CsiPredictionService:
         self._v8_node_baselines = {}
 
         # ── V19/V23 shadow-mode state ─────────────────────────────────
-        # V20 promoted to production (2026-03-26). Same format as V19.
-        # V20 = manifest_v18 corpus, seq_len=7, V23 features. All gates PASS.
-        # Previously: v19_v23_features_candidate.pkl
-        V19_MODEL_PATH = PROJECT / "output" / "train_runs" / "v20_manifest_v18_candidate.pkl"
+        # V21d promoted to production (2026-03-27). Same format as V20.
+        # V21d = V20 base + zone one-hot features (zone_center, zone_transition,
+        #   zone_door, zone_unknown). All gate criteria PASS, parity with V20.
+        # Previously: v20_manifest_v18_candidate.pkl
+        V19_MODEL_PATH = PROJECT / "output" / "train_runs" / "v21_dual_validated" / "v21d_candidate.pkl"
         self._v19_model_path = V19_MODEL_PATH
         self._v19_coarse_model = None
         self._v19_binary_model = None
@@ -307,6 +327,14 @@ class CsiPredictionService:
         self._v19_gate_state = False            # current gate state (sticky)
         self._v19_history: list[dict] = []
         self._v19_warmup_windows = 0
+
+        # ── V26 binary 7-node shadow state ────────────────────────────
+        self._v26_model = None
+        self._v26_features: list[str] = []
+        self._v26_threshold = 0.50
+        self._v26_loaded = False
+        self._v26_shadow: dict = {}
+        self._v26_history: list[dict] = []
 
         # ── Garage ratio V2 shadow candidate ─────────────────────────
         self._garage_ratio_v2_bundle = None
@@ -342,6 +370,17 @@ class CsiPredictionService:
         self._v29_cnn_loaded = False
         self._v29_cnn_shadow: dict = {}
         self._v29_cnn_history: list[dict] = []
+
+        # ── V30 fewshot zone production state ──────────────────────────
+        self._v30_fewshot_model = None
+        self._v30_fewshot_scaler = None
+        self._v30_fewshot_feature_keys: list[str] = []
+        self._v30_fewshot_loaded = False
+        self._v30_fewshot_shadow: dict = {}
+        self._v30_fewshot_history: list[dict] = []
+        self._v30_fewshot_confirmed_zone: str = ""  # hysteresis: last confirmed zone
+        self._v30_fewshot_pending_zone: str = ""     # candidate zone waiting for confirmation
+        self._v30_fewshot_pending_count: int = 0     # consecutive windows candidate has led
 
         # ── Zone calibration shadow state (per-session centroid) ────────
         # Shadow-only zone predictions from per-session NearestCentroid.
@@ -925,6 +964,144 @@ class CsiPredictionService:
             logger.error("V29 CNN zone inference failed: %s", e)
             return None
 
+    # ── V30 fewshot zone prediction (production) ────────────────────
+
+    def _load_v30_fewshot(self) -> bool:
+        """Load V30 fewshot zone calibration model (HGB + scaler)."""
+        if self._v30_fewshot_loaded:
+            return True
+        if not V30_FEWSHOT_ZONE_ENABLED:
+            return False
+        if not V30_FEWSHOT_MODEL_PATH.exists():
+            logger.warning("V30 fewshot: model not found at %s", V30_FEWSHOT_MODEL_PATH)
+            return False
+        try:
+            import pickle
+            with V30_FEWSHOT_MODEL_PATH.open("rb") as fh:
+                bundle = pickle.load(fh)
+            self._v30_fewshot_model = bundle["model"]
+            self._v30_fewshot_scaler = bundle["scaler"]
+            self._v30_fewshot_feature_keys = bundle["feature_keys"]
+            self._v30_fewshot_loaded = True
+            logger.info(
+                "V30 fewshot zone loaded: %d features, classes=%s",
+                len(self._v30_fewshot_feature_keys),
+                list(self._v30_fewshot_model.classes_),
+            )
+            return True
+        except Exception as e:
+            logger.error("V30 fewshot zone load failed: %s", e)
+            return False
+
+    def _predict_v30_fewshot_zone(self, feat_dict: dict, w_end: float) -> dict | None:
+        """Run V34 fewshot zone prediction. Uses per-node AMP/motion features."""
+        if not self._v30_fewshot_loaded:
+            if not self._load_v30_fewshot():
+                return None
+        try:
+            t0 = time.perf_counter()
+            row = []
+            for k in self._v30_fewshot_feature_keys:
+                v = feat_dict.get(k, 0.0)
+                try:
+                    row.append(float(v) if v is not None else 0.0)
+                except (TypeError, ValueError):
+                    row.append(0.0)
+
+            x = np.array([row])
+            xs = self._v30_fewshot_scaler.transform(x)
+            pred = self._v30_fewshot_model.predict(xs)[0]
+
+            # Get probabilities
+            probs_dict = {}
+            if hasattr(self._v30_fewshot_model, "predict_proba"):
+                proba = self._v30_fewshot_model.predict_proba(xs)[0]
+                classes = list(self._v30_fewshot_model.classes_)
+                probs_dict = {
+                    str(classes[i]): round(float(proba[i]), 4)
+                    for i in range(len(classes))
+                }
+            inference_ms = (time.perf_counter() - t0) * 1000
+
+            # ── Hysteresis: smooth + require N consecutive wins to switch zone ──
+            SMOOTH_N = 5          # averaging window
+            HYSTERESIS_N = 3      # consecutive windows new zone must lead
+            HYSTERESIS_MARGIN = 0.0  # no margin — any lead counts
+
+            raw_shadow = {
+                "t": w_end,
+                "model": "v30_fewshot",
+                "zone": str(pred),
+                "probabilities": probs_dict,
+                "inference_ms": round(inference_ms, 2),
+            }
+            self._v30_fewshot_history.append(raw_shadow)
+            if len(self._v30_fewshot_history) > 60:
+                self._v30_fewshot_history = self._v30_fewshot_history[-60:]
+
+            # Average probabilities over recent windows
+            recent = self._v30_fewshot_history[-SMOOTH_N:]
+            if len(recent) >= 3 and all(h.get("probabilities") for h in recent):
+                all_classes = list(recent[-1]["probabilities"].keys())
+                avg_probs = {}
+                for cls in all_classes:
+                    avg_probs[cls] = round(
+                        sum(h["probabilities"].get(cls, 0.0) for h in recent) / len(recent), 4
+                    )
+            else:
+                avg_probs = probs_dict
+
+            smoothed_winner = max(avg_probs, key=avg_probs.get)
+
+            # Initialize confirmed zone on first prediction
+            if not self._v30_fewshot_confirmed_zone:
+                self._v30_fewshot_confirmed_zone = smoothed_winner
+
+            # Hysteresis logic
+            if smoothed_winner == self._v30_fewshot_confirmed_zone:
+                # Same as confirmed — reset pending
+                self._v30_fewshot_pending_zone = ""
+                self._v30_fewshot_pending_count = 0
+            else:
+                # Different zone is leading — check margin
+                confirmed_prob = avg_probs.get(self._v30_fewshot_confirmed_zone, 0)
+                winner_prob = avg_probs.get(smoothed_winner, 0)
+                if winner_prob - confirmed_prob > HYSTERESIS_MARGIN:
+                    if smoothed_winner == self._v30_fewshot_pending_zone:
+                        self._v30_fewshot_pending_count += 1
+                    else:
+                        self._v30_fewshot_pending_zone = smoothed_winner
+                        self._v30_fewshot_pending_count = 1
+
+                    if self._v30_fewshot_pending_count >= HYSTERESIS_N:
+                        self._v30_fewshot_confirmed_zone = smoothed_winner
+                        self._v30_fewshot_pending_zone = ""
+                        self._v30_fewshot_pending_count = 0
+                else:
+                    self._v30_fewshot_pending_count = 0
+
+            output_zone = self._v30_fewshot_confirmed_zone
+
+            shadow = {
+                "t": w_end,
+                "model": "v30_fewshot",
+                "zone": output_zone,
+                "probabilities": avg_probs,
+                "inference_ms": round(inference_ms, 2),
+            }
+            self._v30_fewshot_shadow = shadow
+
+            logger.info(
+                "V30 FEWSHOT ZONE: %s (raw=%s pending=%s/%d) probs=%s %.1fms",
+                output_zone, smoothed_winner,
+                self._v30_fewshot_pending_zone, self._v30_fewshot_pending_count,
+                avg_probs, inference_ms,
+            )
+            return shadow
+        except Exception as e:
+            logger.error("V30 fewshot zone inference failed: %s", e)
+            return None
+
     # ── V7 warehouse-bound canonical shadow-mode methods ────────────
 
     def _load_v15_shadow(self) -> bool:
@@ -1057,7 +1234,7 @@ class CsiPredictionService:
     # ── V19/V23 shadow methods ──────────────────────────────────────
 
     def _load_v19_shadow(self) -> bool:
-        """Load V19 model (V23 enhanced features) for shadow inference."""
+        """Load V21d model (V23 + zone features) for production inference."""
         if self._v19_loaded:
             return True
         if not self._v19_model_path.exists():
@@ -1132,16 +1309,113 @@ class CsiPredictionService:
 
         return out
 
+    # ── V26 binary 7-node shadow methods ────────────────────────────
+
+    def _load_v26_shadow(self) -> bool:
+        """Load V26 binary model (7-node garage HGB)."""
+        if self._v26_loaded:
+            return True
+        if not V26_BINARY_7NODE_MODEL_PATH.exists():
+            return False
+        try:
+            with V26_BINARY_7NODE_MODEL_PATH.open("rb") as fh:
+                bundle = pickle.load(fh)
+            self._v26_model = bundle["model"]
+            self._v26_features = bundle["feature_columns"]
+            self._v26_threshold = 0.50  # hardcoded: separates rats (~0.15) from humans (>0.97)
+            self._v26_loaded = True
+            logger.info(
+                "V26 shadow loaded: features=%d, threshold=%.3f, version=%s",
+                len(self._v26_features), self._v26_threshold,
+                bundle.get("version", "?"),
+            )
+            return True
+        except Exception as e:
+            logger.error("V26 shadow load failed: %s", e)
+            return False
+
+    def _shadow_predict_v26(self, feat_dict: dict, w_end: float,
+                            track_a_binary: str) -> dict | None:
+        """Run V26 binary shadow inference. Single-window, no sequence buffer."""
+        if not V26_BINARY_SHADOW_ENABLED:
+            return None
+        if not self._v26_loaded:
+            if not self._load_v26_shadow():
+                return None
+        try:
+            X = np.array(
+                [[float(feat_dict.get(f, 0) or 0) for f in self._v26_features]],
+                dtype=np.float32,
+            )
+            X = np.nan_to_num(X, nan=0, posinf=0, neginf=0)
+
+            t0 = time.perf_counter()
+            proba = self._v26_model.predict_proba(X)[0]
+            inference_ms = (time.perf_counter() - t0) * 1000
+
+            # proba[1] = P(occupied)
+            p_occ = float(proba[1]) if len(proba) > 1 else float(proba[0])
+            binary_label = "occupied" if p_occ >= self._v26_threshold else "empty"
+
+            shadow = {
+                "track": "V26_binary_7node",
+                "binary": binary_label,
+                "binary_proba": round(p_occ, 4),
+                "threshold": self._v26_threshold,
+                "agree_binary": binary_label == track_a_binary,
+                "inference_ms": round(inference_ms, 2),
+                "window_t": round(w_end, 2),
+            }
+            self._v26_shadow = shadow
+            self._v26_history.append(shadow)
+            if len(self._v26_history) > 50:
+                self._v26_history = self._v26_history[-30:]
+
+            logger.debug(
+                "V26 SHADOW: %s P(occ)=%.4f agree=%s %.1fms",
+                binary_label, p_occ, shadow["agree_binary"], inference_ms,
+            )
+            return shadow
+        except Exception as e:
+            logger.warning("V26 shadow predict error: %s", e)
+            return None
+
+    def _add_v21d_zone_features(self, feat_dict: dict) -> dict:
+        """Add V21d zone one-hot features based on fewshot/coordinate zone.
+
+        V21d expects 4 zone columns: zone_center, zone_transition, zone_door,
+        zone_unknown.  When a zone is known (from V30 fewshot calibration or
+        the coordinate system), exactly one is set to 1.  Otherwise default
+        to zone_unknown=1.
+        """
+        out = dict(feat_dict)
+        zone = self._v30_fewshot_confirmed_zone  # e.g. "center", "door", ""
+        zone_map = {
+            "center": "zone_center",
+            "transition": "zone_transition",
+            "door": "zone_door",
+        }
+        # Reset all zone columns
+        for col in ("zone_center", "zone_transition", "zone_door", "zone_unknown"):
+            out[col] = 0.0
+        matched = zone_map.get(zone)
+        if matched:
+            out[matched] = 1.0
+        else:
+            out["zone_unknown"] = 1.0
+        return out
+
     def _shadow_predict_v19(self, feat_dict: dict, w_end: float,
                             track_a_coarse: str, track_a_binary: str) -> dict | None:
-        """Run V19 shadow inference with V23 features. Never affects production."""
+        """Run V21d production inference with V23 + zone features."""
         if not self._v19_loaded:
             if not self._load_v19_shadow():
                 return None
 
-        # Add F2 spectral features + V23 guard features
+        # Add F2 spectral features + V23 guard features + V21d zone one-hot
         augmented = self._add_v8_f2_features(feat_dict)
         augmented = self._add_v23_guard_features(augmented)
+        augmented = self._add_v21d_zone_features(augmented)
 
         # Extract window features in correct order
         window_feats = [augmented.get(f, 0) for f in self._v19_window_features]
@@ -1180,8 +1454,8 @@ class CsiPredictionService:
             # motion-bias blind spot discovered in minipack1 eval.
             bl_amp_dev_max = float(augmented.get("x_baseline_amp_dev_max", 999))
             bl_sc_var_dev_max = float(augmented.get("x_baseline_sc_var_dev_max", 999))
-            V19_EMPTY_GATE_AMP = 1.2   # stddevs from baseline
-            V19_EMPTY_GATE_SC = 1.3    # stddevs (raised: 1.0 too tight for post-door transients)
+            V19_EMPTY_GATE_AMP = 0.5   # stddevs from baseline (lowered: 1.2→0.5 to catch static person)
+            V19_EMPTY_GATE_SC = 0.6    # stddevs (lowered: 1.3→0.6 — static person gives ~0.6σ deviation)
             V19_GATE_HYSTERESIS = 4    # consecutive windows required to switch state
             empty_gate_fired = False
             raw_coarse_pred = coarse_pred  # preserve original for telemetry
@@ -1412,7 +1686,8 @@ class CsiPredictionService:
             )
             self._old_router_domain_adapt_loaded = True
             logger.info(
-                "Old-router domain-adapt shadow loaded: features=%d, seq_len=%s, version=%s",
+                "Old-router domain-adapt shadow loaded: candidate=%s features=%d, seq_len=%s, version=%s",
+                OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME,
                 len(self._old_router_domain_adapt_window_features),
                 bundle.get("seq_len", OLD_ROUTER_DOMAIN_ADAPT_SEQ_LEN),
                 bundle.get("version", "?"),
@@ -1567,6 +1842,7 @@ class CsiPredictionService:
             shadow = {
                 "t": w_end,
                 "track": "old_router_domain_adapt_shadow",
+                "candidate_name": OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME,
                 "predicted_class": coarse_pred,
                 "binary": binary_label,
                 "probabilities": {
@@ -2403,6 +2679,26 @@ class CsiPredictionService:
         for ni in range(4):
             feat[f"n{ni}_delta"] = 0  # simplified for live
 
+        # ── V38: Drift-invariant features ──────────────────────────────
+        # Normalized amp share: amp_i / sum(all amps) — cancels multiplicative drift
+        _ALL_NODES = ["node01", "node02", "node03", "node04", "node05", "node06", "node07"]
+        total_amp = sum(feat.get(f"csi_{n}_amp_mean", 0.0) for n in _ALL_NODES)
+        if total_amp > 0:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_amp_norm"] = feat.get(f"csi_{nn}_amp_mean", 0.0) / total_amp
+        else:
+            for nn in _ALL_NODES:
+                feat[f"csi_{nn}_amp_norm"] = 0.0
+
+        # Inter-node ratios for key pairs
+        _eps = 0.01
+        for ni_name, nj_name in [("node01", "node05"), ("node01", "node03"),
+                                   ("node06", "node05"), ("node01", "node07"),
+                                   ("node03", "node05")]:
+            ai = feat.get(f"csi_{ni_name}_amp_mean", 0.0)
+            aj = feat.get(f"csi_{nj_name}_amp_mean", 0.0)
+            feat[f"ratio_{ni_name}_{nj_name}"] = ai / (aj + _eps)
+
         return feat, active_nodes, sum(len(p) for p in self._packets.values() if any(t_start <= t < t_end for t, _, _, _ in p))
 
     # ── Prediction ────────────────────────────────────────────────────
@@ -2418,10 +2714,11 @@ class CsiPredictionService:
             return
 
         now = time.time() - self._start_time
-        w_end = int(now / WINDOW_SEC) * WINDOW_SEC
+        # Sliding window: step by WINDOW_SLIDE_SEC, use WINDOW_SEC of data
+        w_end = int(now / WINDOW_SLIDE_SEC) * WINDOW_SLIDE_SEC
         w_start = w_end - WINDOW_SEC
 
-        if w_end <= self._last_window_time or w_end < WINDOW_SEC:
+        if w_end <= self._last_window_time or w_start < 0:
             return
 
         self._last_window_time = w_end
@@ -3222,28 +3519,51 @@ class CsiPredictionService:
         except Exception as e:
             logger.debug("Old-router domain-adapt shadow skipped: %s", e)
 
-        # ── V20 production override (promoted 2026-03-26) ──
-        # V20 runs through the V19 pipeline (same format: seq_len=7, V23 features).
-        # When V20 produces a prediction, it OVERRIDES V25 production output.
+        # ── V21d production override (promoted 2026-03-27) ──
+        # V21d runs through the V19 pipeline (same format: seq_len=7, V23 + zone features).
+        # When V21d produces a prediction, it OVERRIDES V25 production output.
         try:
             v19_shadow = self._shadow_predict_v19(feat, w_end, coarse_label, binary_label)
             if v19_shadow is not None:
-                # V20 production override: update production output
+                # V21d production override: update production output
                 v20_coarse = v19_shadow["predicted_class"].lower()
                 v20_binary = v19_shadow["binary"]
                 v20_binary_conf = float(v19_shadow.get("binary_proba", binary_conf))
+                # V30 fewshot zone — PRODUCTION zone override (BA=0.966)
+                v30_result = self._predict_v30_fewshot_zone(feat, w_end)
+                v30_zone = v30_result["zone"] if v30_result else None
+                v30_probs = v30_result["probabilities"] if v30_result else None
+
+                # Fallback to V29 CNN if V30 unavailable
+                if v30_zone is None:
+                    v29_zone = self._v29_cnn_shadow.get("zone") if self._v29_cnn_shadow.get("t") == w_end else None
+                    v29_probs = self._v29_cnn_shadow.get("probabilities") if v29_zone else None
+                    prod_zone = v29_zone
+                    prod_zone_probs = v29_probs
+                    prod_zone_model = "v29_cnn" if v29_zone else None
+                else:
+                    prod_zone = v30_zone
+                    prod_zone_probs = v30_probs
+                    prod_zone_model = "v30_fewshot"
+
                 self.current.update({
                     "binary": v20_binary,
                     "binary_confidence": round(v20_binary_conf, 3),
                     "coarse": v20_coarse,
-                    "model_version": "v20",
-                    "model_id": "v20_manifest_v18_candidate.pkl",
+                    "model_version": "v21d",
+                    "model_id": "v21d_candidate.pkl",
+                    "zone": prod_zone,
+                    "zone_probabilities": prod_zone_probs,
+                    "zone_model": prod_zone_model,
                 })
+                # Override target_zone with fewshot zone when available
+                if prod_zone:
+                    self.current["target_zone"] = prod_zone
                 # Update telemetry variables for downstream logging
                 binary_label = v20_binary
                 coarse_label = v20_coarse
                 binary_conf = v20_binary_conf
-                logger.debug("V20 production override: binary=%s coarse=%s", v20_binary, v20_coarse)
+                logger.debug("V21d production override: binary=%s coarse=%s", v20_binary, v20_coarse)
 
                 try:
                     v19_path = PROJECT / "temp" / "v20_production_telemetry.ndjson"
@@ -3268,6 +3588,9 @@ class CsiPredictionService:
                             "v20_bl_sc_dev": v19_shadow.get("bl_sc_var_dev_max"),
                             "v20_gate_consec_below": v19_shadow.get("gate_consec_below", 0),
                             "v20_gate_consec_above": v19_shadow.get("gate_consec_above", 0),
+                            "v30_zone": v30_zone,
+                            "v30_zone_probs": v30_probs,
+                            "v30_zone_model": prod_zone_model,
                         }
                         vf.write(json.dumps(v19_entry) + "\n")
                 except Exception:
@@ -3289,6 +3612,62 @@ class CsiPredictionService:
         except Exception as e:
             logger.debug("V19 shadow skipped: %s", e)
 
+        # ── V30 fewshot zone — independent of V19 (moved out 2026-03-27) ──
+        try:
+            v30_result = self._predict_v30_fewshot_zone(feat, w_end)
+            if v30_result:
+                v30_zone = v30_result["zone"]
+                v30_probs = v30_result["probabilities"]
+                self.current.update({
+                    "zone": v30_zone,
+                    "zone_probabilities": v30_probs,
+                    "zone_model": "v30_fewshot",
+                })
+                if v30_zone:
+                    self.current["target_zone"] = v30_zone
+        except Exception as e:
+            logger.debug("V30 fewshot zone skipped: %s", e)
+
+        # ── V26 binary 7-node production override (promoted 2026-03-27) ──
+        # V26 = HGB binary retrained on 7-node garage data (CV BA=0.9984).
+        # Overrides V20 binary output only. Coarse stays from V20.
+        try:
+            v26_shadow = self._shadow_predict_v26(feat, w_end, binary_label)
+            if v26_shadow is not None:
+                # V26 production override: binary only
+                v26_binary = v26_shadow["binary"]
+                v26_conf = v26_shadow["binary_proba"]
+                v20_binary_before = binary_label
+                self.current.update({
+                    "binary": v26_binary,
+                    "binary_confidence": round(v26_conf if v26_binary == "occupied" else 1.0 - v26_conf, 3),
+                    "model_version": "v26",
+                    "model_id": "v26_binary_7node.pkl",
+                })
+                binary_label = v26_binary
+                binary_conf = v26_conf
+                logger.debug("V26 production override: %s→%s P(occ)=%.4f",
+                             v20_binary_before, v26_binary, v26_conf)
+
+                try:
+                    v26_path = PROJECT / "temp" / "v26_production_telemetry.ndjson"
+                    with open(v26_path, "a") as vf:
+                        v26_entry = {
+                            "ts": time.time(),
+                            "window_t": w_end,
+                            "v26_binary": v26_shadow["binary"],
+                            "v26_binary_proba": v26_shadow["binary_proba"],
+                            "v26_agree_v20": v26_shadow["agree_binary"],
+                            "v26_ms": v26_shadow["inference_ms"],
+                            "v20_binary": v20_binary_before,
+                            "v20_coarse": coarse_label,
+                        }
+                        vf.write(json.dumps(v26_entry) + "\n")
+                except Exception:
+                    pass  # telemetry must never crash
+        except Exception as e:
+            logger.debug("V26 shadow skipped: %s", e)
+
         # Prune old packets
         cutoff = now - MAX_BUFFER_SEC
         for ip in list(self._packets.keys()):
@@ -3296,9 +3675,36 @@ class CsiPredictionService:
 
     # ── UDP listener ──────────────────────────────────────────────────
 
+    def _handle_keepalive(self, data: bytes, addr: tuple) -> bool:
+        """Detect and handle keepalive packets from ESP32 nodes.
+
+        Keepalive format: {"keepalive":1,"node":"nodeXX","t":12345}
+        Returns True if packet was a keepalive (caller should skip CSI parsing).
+        """
+        # Quick check: keepalive packets are short JSON starting with '{'
+        if len(data) < 5 or len(data) > 256 or data[0:1] != b"{":
+            return False
+        try:
+            msg = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if "keepalive" not in msg:
+            return False
+
+        ip = addr[0]
+        now_mono = time.monotonic()
+        self._node_last_seen[ip] = now_mono
+        node_name = msg.get("node", ip)
+        logger.debug("Keepalive from %s (%s)", node_name, ip)
+        return True
+
     def _handle_raw_packet(self, data: bytes, addr: tuple):
         """Process one incoming raw UDP CSI packet from ESP32 node."""
         ip = addr[0]
+
+        # Detect keepalive packets before any CSI processing
+        if self._handle_keepalive(data, addr):
+            return
 
         # Feed to recording service BEFORE filtering — shadow nodes (e.g. node05)
         # are recorded but not used for inference.
@@ -3315,6 +3721,12 @@ class CsiPredictionService:
         # Raw binary CSI — same format as capture scripts expect
         rssi, amp, phase = self._parse_csi_raw(data)
         if amp is None:
+            if not getattr(self, '_raw_parse_fail_logged', False):
+                import struct
+                magic = struct.unpack('<I', data[:4])[0] if len(data) >= 4 else 0
+                logger.warning("CSI raw parse failed: ip=%s len=%d magic=0x%08x first20=%s",
+                               ip, len(data), magic, data[:20].hex() if len(data) >= 20 else data.hex())
+                self._raw_parse_fail_logged = True
             return
         if self._start_time is None:
             self._start_time = time.time()
@@ -3369,6 +3781,11 @@ class CsiPredictionService:
     def _handle_csv_packet(self, data: bytes, addr: tuple):
         """Process CSV CSI_DATA packet from ESP32-S3 nodes (firmware v2.0)."""
         ip = addr[0]
+
+        # Detect keepalive packets before CSV parsing
+        if self._handle_keepalive(data, addr):
+            return
+
         try:
             line = data.decode("utf-8", errors="replace").strip()
         except Exception:
@@ -3462,15 +3879,102 @@ class CsiPredictionService:
         self._running = False
         logger.info("CSI UDP listener stopped")
 
-    async def prediction_loop(self, interval: float = 2.0):
+    async def prediction_loop(self, interval: float = 0.3):
         """Run predictions at regular intervals."""
         while self._running:
             try:
                 self.predict_window()
                 self._estimate_multi_person()
+                self._voice_announce()
             except Exception as e:
                 logger.error(f"Prediction error: {e}")
             await asyncio.sleep(interval)
+
+    # ── Voice announcements (ElevenLabs TTS) ─────────────────────────
+
+    _voice_enabled: bool = False
+    _voice_last_binary: str = ""
+    _voice_last_zone: str = ""
+    _voice_last_announce_t: float = 0.0
+    _voice_cooldown_sec: float = 8.0  # minimum seconds between announcements
+
+    def voice_start(self) -> dict:
+        """Enable real-time voice announcements."""
+        self._voice_enabled = True
+        self._voice_last_binary = ""
+        self._voice_last_zone = ""
+        self._voice_last_announce_t = 0.0
+        # Pre-cache common phrases
+        try:
+            from .tts_service import get_tts_service
+            tts = get_tts_service()
+            if tts.available:
+                tts.precache([
+                    "Гараж пуст.",
+                    "Обнаружен человек в зоне двери.",
+                    "Обнаружен человек в центре.",
+                    "Человек перешёл в зону двери.",
+                    "Человек перешёл в центр.",
+                    "Человек ушёл. Гараж пуст.",
+                ])
+                return {"status": "started", "tts_available": True, "voice": tts._resolved_voice_name}
+            return {"status": "started", "tts_available": False, "fallback": "macOS say"}
+        except Exception as e:
+            logger.warning("Voice start: TTS init failed: %s", e)
+            return {"status": "started", "tts_available": False, "error": str(e)}
+
+    def voice_stop(self) -> dict:
+        """Disable voice announcements."""
+        self._voice_enabled = False
+        try:
+            from .tts_service import get_tts_service
+            get_tts_service().stop()
+        except Exception:
+            pass
+        return {"status": "stopped"}
+
+    def _voice_announce(self) -> None:
+        """Announce state changes via TTS. Non-blocking."""
+        if not self._voice_enabled:
+            return
+
+        now = time.time()
+        if now - self._voice_last_announce_t < self._voice_cooldown_sec:
+            return
+
+        binary = self.current.get("binary", "unknown")
+        zone = self.current.get("zone") or ""
+
+        # Map zone names to Russian
+        zone_ru = {"door_passage": "двери", "center": "центре", "deep": "глубокой зоне", "door": "двери"}.get(zone, zone)
+
+        text = None
+
+        if binary == "occupied" and self._voice_last_binary != "occupied":
+            # Transition to occupied
+            if zone_ru:
+                text = f"Обнаружен человек в зоне {zone_ru}."
+            else:
+                text = "Обнаружен человек в гараже."
+        elif binary == "empty" and self._voice_last_binary == "occupied":
+            # Transition to empty
+            text = "Человек ушёл. Гараж пуст."
+        elif binary == "occupied" and zone != self._voice_last_zone and self._voice_last_zone and zone:
+            # Zone changed while occupied
+            text = f"Человек перешёл в зону {zone_ru}."
+
+        if text:
+            self._voice_last_announce_t = now
+            try:
+                from .tts_service import get_tts_service
+                tts = get_tts_service()
+                tts.speak(text, block=False)
+                logger.info("VOICE: %s", text)
+            except Exception as e:
+                logger.warning("Voice announce failed: %s", e)
+
+        self._voice_last_binary = binary
+        self._voice_last_zone = zone
 
     # ── Multi-person diagnostic estimator ────────────────────────────
     def _estimate_multi_person(self) -> None:
@@ -3615,6 +4119,48 @@ class CsiPredictionService:
             "recording_hint": rec_hint,
         }
 
+    def get_node_health(self) -> dict:
+        """Get per-node health status based on last-seen timestamps.
+
+        Returns a dict keyed by canonical node name (e.g. "node01") with
+        ip, last_seen_sec, and status ("online" / "degraded" / "offline").
+
+        Nodes may have multiple IPs in GARAGE_RATIO_NODE_ORDER (e.g. node05
+        has both .33 and .105).  Pick the IP with the freshest last_seen so
+        the health report reflects the actually-active address.
+        """
+        now_mono = time.monotonic()
+        # Collect best (freshest) IP per node name
+        best: dict[str, tuple[str, float | None]] = {}  # node_name → (ip, age)
+        for ip, node_name in GARAGE_RATIO_NODE_ORDER:
+            last = self._node_last_seen.get(ip)
+            age = None if last is None else (now_mono - last)
+            prev = best.get(node_name)
+            if prev is None:
+                best[node_name] = (ip, age)
+            else:
+                prev_age = prev[1]
+                # Prefer the IP that was seen (age is not None) and fresher
+                if age is not None and (prev_age is None or age < prev_age):
+                    best[node_name] = (ip, age)
+
+        result = {}
+        for node_name, (ip, age) in best.items():
+            if age is None:
+                status = "offline"
+            elif age < 30:
+                status = "online"
+            elif age < 60:
+                status = "degraded"
+            else:
+                status = "offline"
+            result[node_name] = {
+                "ip": ip,
+                "last_seen_sec": None if age is None else round(age, 1),
+                "status": status,
+            }
+        return result
+
     def get_status(self) -> dict:
         """Get current prediction status for API."""
         # Preload V8 shadow metadata for UI/debug surfaces even before the
@@ -3685,6 +4231,7 @@ class CsiPredictionService:
             status["old_router_domain_adapt_shadow"] = self._old_router_domain_adapt_shadow
         elif OLD_ROUTER_DOMAIN_ADAPT_SHADOW_ENABLED:
             status["old_router_domain_adapt_shadow"] = {
+                "candidate_name": OLD_ROUTER_DOMAIN_ADAPT_CANDIDATE_NAME,
                 "loaded": self._old_router_domain_adapt_loaded,
                 "status": "warmup" if self._old_router_domain_adapt_loaded else "not_loaded",
                 "buffer_depth": len(self._old_router_domain_adapt_window_buffer),
@@ -3693,6 +4240,15 @@ class CsiPredictionService:
                     OLD_ROUTER_DOMAIN_ADAPT_SEQ_LEN - len(self._old_router_domain_adapt_window_buffer),
                 ),
             }
+        # ── V26 binary 7-node shadow info ──────────────────────────────
+        if self._v26_loaded and self._v26_shadow:
+            status["v26_shadow"] = self._v26_shadow
+        elif V26_BINARY_SHADOW_ENABLED:
+            status["v26_shadow"] = {
+                "loaded": self._v26_loaded,
+                "status": "not_loaded",
+            }
+
         # ── Multi-person diagnostic estimate (non-production) ─────────
         status["multi_person_estimate"] = self._mp_estimate
 
@@ -3738,6 +4294,16 @@ class CsiPredictionService:
                 "model_path": str(V29_CNN_MODEL_PATH),
             }
 
+        # ── V30 fewshot zone production status ─────────────────────────
+        if self._v30_fewshot_loaded and self._v30_fewshot_shadow:
+            status["v30_fewshot_zone"] = self._v30_fewshot_shadow
+        elif V30_FEWSHOT_ZONE_ENABLED:
+            status["v30_fewshot_zone"] = {
+                "loaded": self._v30_fewshot_loaded,
+                "status": "awaiting_first_window" if self._v30_fewshot_loaded else "not_loaded",
+                "model_path": str(V30_FEWSHOT_MODEL_PATH),
+            }
+
         # ── Zone calibration shadow status (per-session centroid) ─────
         try:
             from .zone_calibration_service import zone_calibration_service as _zone_cal
@@ -3766,6 +4332,9 @@ class CsiPredictionService:
             status["coord_stabilization"] = self.current.get("coord_stabilization", {})
         except Exception:
             pass
+
+        # ── Node health (keepalive + CSI packet tracking) ─────────────
+        status["nodes"] = self.get_node_health()
 
         # ── V23: Empty baseline calibration status ────────────────────
         status["empty_baseline"] = self.get_baseline_status()

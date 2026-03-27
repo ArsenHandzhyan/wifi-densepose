@@ -24,6 +24,10 @@ from src.middleware.rate_limit import RateLimitMiddleware
 from src.middleware.error_handler import ErrorHandlingMiddleware
 from src.api.routers import pose, stream, health, fp2, csi, training
 from src.api.websocket.connection_manager import connection_manager
+from src.services.backend_instance_guard import (
+    acquire_backend_instance_lock,
+    release_backend_instance_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting WiFi-DensePose API...")
     
     try:
+        lock_info = acquire_backend_instance_lock("src.app:app")
+        logger.info("Backend instance guard acquired: %s", lock_info)
+
         # Get orchestrator from app state
         orchestrator: ServiceOrchestrator = app.state.orchestrator
         
@@ -72,6 +79,7 @@ async def lifespan(app: FastAPI):
         
         if hasattr(app.state, 'orchestrator'):
             await app.state.orchestrator.shutdown()
+        release_backend_instance_lock()
         logger.info("WiFi-DensePose API shutdown complete")
 
 

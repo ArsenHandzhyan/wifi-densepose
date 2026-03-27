@@ -49,6 +49,12 @@ export const API_CONFIG = {
       STATUS: '/api/v1/csi/status',
       MODELS: '/api/v1/csi/models',
       MODEL_SELECT: '/api/v1/csi/model/select',
+      VALIDATION: {
+        STATUS: '/api/v1/csi/validation/status',
+        RESOLVE: '/api/v1/csi/validation/resolve',
+        BATCH_APPROVE: '/api/v1/csi/validation/batch-approve',
+        SEGMENT: '/api/v1/csi/validation/segment/{segment_id}'
+      },
       ZONE: {
         STATUS: '/api/v1/csi/zone/status',
         START: '/api/v1/csi/zone/calibrate/start',

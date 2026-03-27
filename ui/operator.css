@@ -724,6 +724,25 @@ body.operator-body {
   background: linear-gradient(180deg, rgba(123, 139, 163, 0.06), rgba(123, 139, 163, 0.01));
 }
 
+.garage-map__subzone {
+  position: absolute;
+  border: 1px dashed rgba(168, 85, 247, 0.35);
+  border-radius: 4px;
+  background: rgba(168, 85, 247, 0.06);
+  pointer-events: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 4px;
+}
+
+.garage-map__subzone span {
+  color: rgba(168, 85, 247, 0.7);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .garage-map__centerline {
   position: absolute;
   background: rgba(83, 212, 255, 0.1);

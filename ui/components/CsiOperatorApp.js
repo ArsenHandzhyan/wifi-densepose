@@ -2611,7 +2611,7 @@ export class CsiOperatorApp {
             <div class="kv"><span>Узлы / packets</span><strong>${escapeHtml(formatNumber(runtimeView.nodesActive))}/${escapeHtml(formatNumber(runtimeView.totalNodes || DEFAULT_VISIBLE_NODE_COUNT))} / ${escapeHtml(formatNumber(runtimeView.packetsInWindow))}</strong></div>
             <div class="kv"><span>PPS / возраст окна</span><strong>${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} / ${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong></div>
             <div class="kv"><span>Дверь‑центр</span><strong>${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</strong></div>
-            <div class="kv"><span>Зона (V36 fewshot)</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))}${runtimeView.zoneProbabilities ? ` (${Object.entries(runtimeView.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ')})` : ''}</strong></div>
+            <div class="kv"><span>Зона (V39 fewshot)</span><strong>${escapeHtml(displayMaybeToken(runtimeView.targetZone || runtimeView.state || 'unknown'))}${runtimeView.zoneProbabilities ? ` (${Object.entries(runtimeView.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ')})` : ''}</strong></div>
             <div class="kv"><span>Координата</span><strong>${escapeHtml(formatNumber(runtimeView.targetX, 1))}, ${escapeHtml(formatNumber(runtimeView.targetY, 1))}${runtimeView.zoneModel ? ` [${escapeHtml(runtimeView.zoneModel)}]` : ''}</strong></div>
             ${runtimeView.inferenceMs != null ? `<div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(runtimeView.inferenceMs, { digits: 2, unit: ' ms' }))}</strong></div>` : ''}
             ${runtimeView.bufferDepth != null ? `<div class="kv"><span>Буфер / warmup</span><strong>${escapeHtml(formatNumber(runtimeView.bufferDepth))}/7 / ${escapeHtml(formatNumber(runtimeView.warmupRemaining))} до ready</strong></div>` : ''}
@@ -3253,19 +3253,19 @@ export class CsiOperatorApp {
     this.sections.model.innerHTML = `
       <div class="surface-grid surface-grid--four">
         <article class="panel" style="${fewshotActive ? 'border-color: rgba(34, 197, 94, 0.4); box-shadow: 0 0 12px rgba(34, 197, 94, 0.08)' : ''}">
-          <div class="panel__eyebrow">V36 fewshot zone — production zone override</div>
+          <div class="panel__eyebrow">V39 fewshot zone — production zone override</div>
           <div class="panel__headline">${escapeHtml(displayMaybeToken(fewshotActive ? fewshotZoneName : 'оффлайн'))}</div>
           <div class="kv-list">
-            <div class="kv"><span>Файл</span><strong>v36_fewshot_zone_calibration.pkl</strong></div>
-            <div class="kv"><span>Архитектура</span><strong>RandomForest-500 / 14 фич / 7 узлов</strong></div>
-            <div class="kv"><span>CV balanced accuracy</span><strong>100% (87 окон)</strong></div>
-            <div class="kv"><span>Обучающая выборка</span><strong>87 окон (multisession packet)</strong></div>
+            <div class="kv"><span>Файл</span><strong>v39_fewshot_zone_calibration.pkl</strong></div>
+            <div class="kv"><span>Архитектура</span><strong>RandomForest / 26 фич (amp_norm + ratios) / 7 узлов</strong></div>
+            <div class="kv"><span>CV balanced accuracy</span><strong>98.62% (1229 окон)</strong></div>
+            <div class="kv"><span>Обучающая выборка</span><strong>1229 окон / 3 сессии (614 center / 615 door_passage)</strong></div>
             <div class="kv"><span>Зоны</span><strong>center / door_passage</strong></div>
             <div class="kv"><span>Зона сейчас</span><strong>${escapeHtml(displayMaybeToken(fewshotZoneName))}${Object.keys(fewshotZoneProbs).length ? ' (' + Object.entries(fewshotZoneProbs).map(([k, v]) => k + ': ' + (v * 100).toFixed(0) + '%').join(' / ') + ')' : ''}</strong></div>
             <div class="kv"><span>zone_model backend</span><strong>${escapeHtml(fewshotZoneModel || 'не подключено')}</strong></div>
             <div class="kv"><span>Статус</span><strong>${fewshotActive ? 'активна / production override' : 'оффлайн (бэкенд не запущен)'}</strong></div>
           </div>
-          <div class="panel__footer">V36 — RF-500 zone-модель из multisession calibration packet (87 окон, 82 center / 5 door_passage). CV BA=1.0. Production zone override поверх Track A.</div>
+          <div class="panel__footer">V39 — RF zone-модель на 26 drift-invariant фичах (amp_norm + inter-node ratios), 1229 окон из 3 сессий. CV BA=0.9862. Production zone override поверх Track A.</div>
         </article>
 
         <article class="panel">

@@ -140,8 +140,8 @@ V29_CNN_MODEL_PATH = PROJECT / "output" / "train_runs" / "v29_cnn_zone_model.pt"
 V29_CNN_SHADOW_ENABLED = True
 
 # ── V30 few-shot zone calibration (2026-03-27) ────────────────────
-# v36: RF-500 on 87 multisession windows (center_vs_door_passage).
-# CV BA=1.0, FREEZE. 82 center / 5 door_passage.
+# v39: RF on 1229 windows (3 sessions, 26 features incl. amp_norm + ratios).
+# CV BA=0.9862. Balanced: 614 center / 615 door_passage. FREEZE.
 V30_FEWSHOT_MODEL_PATH = PROJECT / "output" / "train_runs" / "v39_fewshot_zone_calibration.pkl"
 V30_FEWSHOT_ZONE_ENABLED = True
 V30_FEWSHOT_ZONE_NAMES = ["center", "door_passage"]

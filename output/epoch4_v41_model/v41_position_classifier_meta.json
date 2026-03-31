@@ -1,0 +1,17 @@
+{
+  "version": "v44_binary_recordings_only",
+  "n_samples": 465,
+  "n_features": 56,
+  "classes": [
+    "empty",
+    "present"
+  ],
+  "cv_f1_macro": 1.0,
+  "best_model": "RF-1000",
+  "label_counts": {
+    "empty": 276,
+    "present": 189
+  },
+  "empty_files": 56,
+  "present_files": 46
+}

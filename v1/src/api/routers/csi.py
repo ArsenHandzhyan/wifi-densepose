@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import asyncio
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -15,6 +16,11 @@ from typing import Any, Optional, List
 
 from ...services.csi_prediction_service import csi_prediction_service
 from ...services.csi_recording_service import csi_recording_service
+from ...services.csi_management_probe import (
+    build_csi_probe_timeout,
+    infer_csi_status_schema,
+    probe_csi_node_status,
+)
 from ...services.recording_truth_hardening import build_truth_hardening_report
 from ...services.tts_service import get_tts_service
 from ...services.zone_calibration_service import zone_calibration_service
@@ -275,6 +281,76 @@ def _normalize_record_stop_result(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+async def _ensure_csi_runtime_started() -> dict[str, Any]:
+    """Ensure the CSI runtime is available for live control paths."""
+    try:
+        result = await csi_prediction_service.ensure_started(interval=2.0)
+    except OSError as e:
+        if "Address already in use" in str(e):
+            raise HTTPException(
+                status_code=409,
+                detail="UDP port 5005 is already in use. Stop other CSI capture processes first.",
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if result.get("ok"):
+        return result
+
+    status_name = result.get("status", "startup_failed")
+    if status_name == "model_not_loaded":
+        raise HTTPException(
+            status_code=503,
+            detail="CSI runtime model unavailable. Train or restore the runtime bundle before starting.",
+        )
+    raise HTTPException(
+        status_code=503,
+        detail=f"CSI runtime start failed: {status_name}",
+    )
+
+
+def _raise_record_start_error(result: dict[str, Any]) -> None:
+    error_code = str(result.get("error_code") or "record_start_failed")
+    message = str(result.get("error") or "Failed")
+    detail: dict[str, Any] = {
+        "error": error_code,
+        "message": message,
+    }
+    if "preflight" in result:
+        detail["preflight"] = result.get("preflight")
+    if "teacher_status" in result:
+        detail["teacher_status"] = result.get("teacher_status")
+
+    if error_code == "already_recording":
+        raise HTTPException(status_code=409, detail=detail)
+    if error_code == "invalid_teacher_config":
+        raise HTTPException(status_code=400, detail=detail)
+    raise HTTPException(status_code=503, detail=detail)
+
+
+def _raise_zone_calibration_error(result: dict[str, Any]) -> None:
+    error_code = str(result.get("error_code") or "zone_calibration_failed")
+    detail: dict[str, Any] = {
+        "error": error_code,
+        "message": str(result.get("error") or "Failed"),
+    }
+    if "active_zone" in result:
+        detail["active_zone"] = result.get("active_zone")
+    if "quality" in result:
+        detail["quality"] = result.get("quality")
+    if "zones_ready_count" in result:
+        detail["zones_ready_count"] = result.get("zones_ready_count")
+    if "zones_calibrated" in result:
+        detail["zones_calibrated"] = result.get("zones_calibrated")
+    if "min_centroid_distance" in result:
+        detail["min_centroid_distance"] = result.get("min_centroid_distance")
+
+    if error_code == "unknown_zone":
+        raise HTTPException(status_code=404, detail=detail)
+    if error_code in {"capture_in_progress", "insufficient_zone_coverage", "centroids_too_close"}:
+        raise HTTPException(status_code=409, detail=detail)
+    raise HTTPException(status_code=400, detail=detail)
+
+
 class RecordingVoiceCueRequest(BaseModel):
     at_sec: float
     text: str
@@ -321,6 +397,29 @@ async def csi_status():
     return csi_prediction_service.get_status()
 
 
+@router.get("/features")
+async def csi_features():
+    """Dump the last extracted window features for training data collection.
+
+    Returns the raw feature dict from the most recent prediction window,
+    useful for collecting labeled training data from live CSI stream.
+    """
+    feat = getattr(csi_prediction_service, '_last_window_feat', None)
+    if feat is None:
+        raise HTTPException(status_code=404, detail="No window features available yet")
+    current = csi_prediction_service.current
+    return {
+        "features": {k: float(v) if isinstance(v, (int, float)) else v for k, v in feat.items()},
+        "binary": current.get("binary", "unknown"),
+        "binary_confidence": current.get("binary_confidence", 0),
+        "coarse": current.get("coarse", "unknown"),
+        "nodes_active": current.get("nodes_active", 0),
+        "pps": current.get("pps", 0),
+        "window_time": current.get("window_time", 0),
+        "ts": time.time(),
+    }
+
+
 @router.get("/models")
 async def csi_models():
     """List runtime-ready CSI models supported by the current loader."""
@@ -329,7 +428,7 @@ async def csi_models():
     active_item = next((item for item in models if item.get("is_active")), None)
     return {
         "models": models,
-        "active_model_id": csi_prediction_service.current.get("model_id") or (active_item.get("model_id") if active_item else None),
+        "active_model_id": (active_item.get("model_id") if active_item else None) or csi_prediction_service.current.get("model_id"),
         "model_loaded": csi_prediction_service.binary_model is not None,
         "default_model_id": default_item.get("model_id") if default_item else None,
     }
@@ -462,22 +561,13 @@ async def csi_validation_batch_approve(payload: ValidationBatchApproveRequest):
 @router.post("/start")
 async def csi_start():
     """Start CSI prediction (load model + start UDP listener)."""
-    try:
-        result = await csi_prediction_service.ensure_started(interval=2.0)
-        if not result.get("ok"):
-            raise HTTPException(status_code=500, detail="Model not found. Train with scripts/train_v21_save_model.py")
-        return result
-    except OSError as e:
-        if "Address already in use" in str(e):
-            raise HTTPException(status_code=409, detail="UDP port 5005 is already in use. Stop other CSI capture processes first.")
-        raise HTTPException(status_code=500, detail=str(e))
+    return await _ensure_csi_runtime_started()
 
 
 @router.post("/stop")
 async def csi_stop():
     """Stop CSI prediction."""
-    await csi_prediction_service.stop()
-    return {"status": "stopped"}
+    return await csi_prediction_service.stop()
 
 
 @router.post("/voice/start")
@@ -494,36 +584,92 @@ async def csi_voice_stop():
 
 @router.get("/nodes")
 async def csi_nodes():
-    """Check ESP32 node health."""
+    """Check ESP32 node health across management and CSI data planes."""
     import aiohttp
     nodes = []
+    mgmt_by_ip: dict[str, dict[str, Any]] = {}
+    csi_health = csi_prediction_service.get_node_health()
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
-        for node in list_csi_nodes():
-            name = str(node["node_id"])
-            ip = str(node["ip"])
-            try:
-                async with session.get(f"http://{ip}:8080/api/v1/status") as resp:
-                    data = await resp.json()
-                    nodes.append({
-                        "name": name,
-                        "ip": ip,
-                        "status": "up",
-                        "role": node.get("role", "unknown"),
-                        "required": bool(node.get("required")),
-                        "position_known": bool(node.get("position_known")),
-                        "uptime": data.get("uptime_sec", 0),
-                        "errors": data.get("send_errors", 0),
-                    })
-            except Exception:
-                nodes.append({
-                    "name": name,
-                    "ip": ip,
-                    "status": "down",
-                    "role": node.get("role", "unknown"),
-                    "required": bool(node.get("required")),
-                    "position_known": bool(node.get("position_known")),
-                })
+    csi_nodes_list = list_csi_nodes()
+    async with aiohttp.ClientSession(timeout=build_csi_probe_timeout()) as session:
+        probe_results = await asyncio.gather(
+            *(
+                probe_csi_node_status(
+                    session,
+                    str(node["ip"]),
+                    attempts=3,
+                    retry_delay_sec=0.35,
+                )
+                for node in csi_nodes_list
+            )
+        )
+
+    for node, probe in zip(csi_nodes_list, probe_results):
+        ip = str(node["ip"])
+        if probe.get("ok"):
+            data = probe.get("data") or {}
+            mgmt_by_ip[ip] = {
+                "ok": True,
+                "uptime": data.get("uptime_sec", 0),
+                "errors": data.get("send_errors", data.get("send_errors_total", 0)),
+                "firmware": data.get("firmware_version", data.get("version", data.get("fw", "?"))),
+                "status_schema": infer_csi_status_schema(data),
+                "raw": data,
+            }
+        else:
+            mgmt_by_ip[ip] = {
+                "ok": False,
+                "error": probe.get("error"),
+                "error_type": probe.get("error_type"),
+            }
+
+    for node in csi_nodes_list:
+        name = str(node["node_id"])
+        ip = str(node["ip"])
+        mgmt = mgmt_by_ip.get(ip, {"ok": False, "error": "not_probed"})
+        stream = csi_health.get(name, {})
+        stream_status = str(stream.get("status") or "offline")
+        stream_ok = stream_status in {"online", "degraded"}
+        mgmt_ok = bool(mgmt.get("ok"))
+
+        if mgmt_ok and stream_status == "online":
+            status = "up"
+        elif mgmt_ok or stream_ok:
+            status = "degraded"
+        else:
+            status = "down"
+
+        node_payload = {
+            "name": name,
+            "ip": ip,
+            "status": status,
+            "role": node.get("role", "unknown"),
+            "required": bool(node.get("required")),
+            "position_known": bool(node.get("position_known")),
+            "management_status": "up" if mgmt_ok else "down",
+            "management_ok": mgmt_ok,
+            "stream_status": stream_status,
+            "stream_ok": stream_ok,
+            "last_seen_sec": stream.get("last_seen_sec"),
+            "split_brain": bool(stream_ok and not mgmt_ok),
+        }
+        if mgmt_ok:
+            raw = mgmt.get("raw") or {}
+            node_payload["uptime"] = mgmt.get("uptime", 0)
+            node_payload["errors"] = mgmt.get("errors", 0)
+            node_payload["firmware"] = mgmt.get("firmware", "?")
+            node_payload["status_schema"] = mgmt.get("status_schema")
+            node_payload["runtime_mode"] = raw.get("runtime_mode")
+            node_payload["connected_ssid"] = raw.get("connected_ssid")
+            node_payload["connected_bssid"] = raw.get("connected_bssid")
+            node_payload["primary_channel"] = raw.get("primary_channel")
+            node_payload["secondary_channel"] = raw.get("secondary_channel")
+            node_payload["authmode"] = raw.get("authmode")
+            node_payload["tx_power_dbm"] = raw.get("tx_power_dbm")
+            node_payload["http_restarts"] = raw.get("http_restarts")
+        else:
+            node_payload["management_error"] = mgmt.get("error")
+        nodes.append(node_payload)
 
     return {"nodes": nodes}
 
@@ -555,14 +701,7 @@ async def csi_nodes_packets():
 async def record_start(req: RecordingStartRequest):
     """Start recording CSI data (parallel with live prediction)."""
     # Ensure prediction is running (UDP listener active).
-    try:
-        result = await csi_prediction_service.ensure_started(interval=2.0)
-    except OSError as e:
-        if "Address already in use" not in str(e):
-            raise HTTPException(status_code=500, detail=str(e))
-        result = {"ok": True, "status": "already_running"}
-    if not result.get("ok"):
-        raise HTTPException(status_code=500, detail="Model not found. Train with scripts/train_v21_save_model.py")
+    await _ensure_csi_runtime_started()
 
     result = await csi_recording_service.start_recording(
         label=req.label,
@@ -584,7 +723,7 @@ async def record_start(req: RecordingStartRequest):
         voice_cues=[cue.model_dump() for cue in req.voice_cues],
     )
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed"))
+        _raise_record_start_error(result)
     return result
 
 
@@ -592,8 +731,6 @@ async def record_start(req: RecordingStartRequest):
 async def record_stop():
     """Stop recording and flush all data."""
     result = await csi_recording_service.stop_recording()
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Not recording"))
     return _normalize_record_stop_result(result)
 
 
@@ -694,6 +831,22 @@ def _run_tts_helper(command: list[str], *, block: bool = True, timeout: float = 
 
 def _spawn_tts_helper(command: list[str]) -> None:
     global _tts_helper_proc
+    with _tts_helper_lock:
+        existing = _tts_helper_proc
+        _tts_helper_proc = None
+    if existing is not None:
+        try:
+            if existing.poll() is None:
+                existing.terminate()
+                try:
+                    existing.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    existing.kill()
+                    existing.wait(timeout=2.0)
+            else:
+                existing.wait(timeout=2.0)
+        except Exception:
+            pass
     proc = subprocess.Popen(
         [TTS_HELPER_PYTHON, str(TTS_HELPER), *command],
         stdout=subprocess.DEVNULL,
@@ -712,6 +865,11 @@ def _stop_tts_helper() -> bool:
     if not proc or proc.poll() is not None:
         return False
     proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=2.0)
     return True
 
 
@@ -757,8 +915,13 @@ async def tts_speak(req: TTSSpeakRequest):
         if req.block:
             payload = _run_tts_helper(["speak", req.text], block=True, timeout=120.0)
         else:
+            tts = _get_live_tts_service()
             _spawn_tts_helper(["speak", req.text])
-            payload = {"ok": True, "backend": "elevenlabs"}
+            payload = {
+                "ok": True,
+                "backend": "elevenlabs" if tts.available else "macos_say",
+                "queued": True,
+            }
         payload["text"] = req.text
         return payload
     except Exception as exc:
@@ -793,8 +956,13 @@ async def tts_stop():
     """Stop current TTS playback."""
     stopped_helper = _stop_tts_helper()
     tts = _get_live_tts_service()
-    tts.stop()
-    return {"ok": True, "stopped_helper": stopped_helper}
+    stopped_local = bool(tts.stop())
+    return {
+        "ok": True,
+        "status": "stopped" if (stopped_helper or stopped_local) else "already_stopped",
+        "stopped_helper": stopped_helper,
+        "stopped_local": stopped_local,
+    }
 
 
 # ── V23: Empty baseline calibration endpoints ──────────────────────
@@ -884,7 +1052,7 @@ async def zone_calibrate_start(req: ZoneCalibrateRequest):
     """
     result = zone_calibration_service.start_zone_capture(req.zone)
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed"))
+        _raise_zone_calibration_error(result)
     return result
 
 
@@ -892,8 +1060,6 @@ async def zone_calibrate_start(req: ZoneCalibrateRequest):
 async def zone_calibrate_stop():
     """Stop the current zone capture phase."""
     result = zone_calibration_service.stop_zone_capture()
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed"))
     return result
 
 
@@ -906,8 +1072,60 @@ async def zone_calibrate_fit():
     """
     result = zone_calibration_service.fit()
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result.get("error", "Failed"))
+        _raise_zone_calibration_error(result)
     return result
+
+
+@router.post("/zone/calibrate/inject")
+async def zone_calibrate_inject(req: dict):
+    """Inject current live features into a zone's calibration buffer.
+
+    Body: {"zone": "door"|"center", "count": 10, "interval": 2}
+    Captures `count` windows at `interval` seconds apart from live CSI stream.
+    """
+    import asyncio
+    zone = req.get("zone")
+    count = req.get("count", 10)
+    interval = req.get("interval", 2)
+
+    if not zone:
+        raise HTTPException(status_code=400, detail="zone required")
+
+    accepted = 0
+    rejected = 0
+    skipped_dup = 0
+    last_t_mid = None
+    # Wait for unique CSI windows (update ~every 5s), collect up to `count`
+    max_attempts = count * 5  # allow extra attempts to skip duplicates
+    attempts = 0
+    while accepted < count and attempts < max_attempts:
+        attempts += 1
+        feat = dict(csi_prediction_service._last_feat_dict)
+        t_mid = feat.get("t_mid")
+        if not feat or t_mid is None:
+            rejected += 1
+            await asyncio.sleep(interval)
+            continue
+        if t_mid == last_t_mid:
+            skipped_dup += 1
+            await asyncio.sleep(1)
+            continue
+        last_t_mid = t_mid
+        result = zone_calibration_service.inject_window(feat, zone)
+        if result.get("accepted"):
+            accepted += 1
+        else:
+            rejected += 1
+        await asyncio.sleep(interval)
+
+    return {
+        "ok": True,
+        "zone": zone,
+        "accepted": accepted,
+        "rejected": rejected,
+        "skipped_duplicates": skipped_dup,
+        "total_windows": accepted,
+    }
 
 
 @router.post("/zone/calibrate/reset")
@@ -915,6 +1133,233 @@ async def zone_calibrate_reset():
     """Reset all zone calibration state."""
     zone_calibration_service.reset()
     return {"ok": True, "status": "reset"}
+
+
+# ── Marker recording endpoint (raw features + predictions per ceiling marker) ──
+
+@router.post("/marker/record")
+async def marker_record(req: dict):
+    """Record raw CSI features + model predictions while user stands under a marker.
+
+    Body: {"marker_id": "1"|"2"|...|"11", "duration_sec": 60, "label": "optional"}
+
+    Pre-flight checks:
+      - 7 nodes active, PPS >= 10, fresh window (< 10s)
+      - _last_feat_dict non-empty with valid t_mid
+
+    Saves JSONL to output/marker_recordings/marker_{id}_{ts}.jsonl
+    Each line: full raw feature dict + predictions + marker ground truth
+    """
+    import asyncio, time, json, os
+
+    marker_id = str(req.get("marker_id", ""))
+    duration = int(req.get("duration_sec", 60))
+    custom_label = req.get("label", "")
+
+    if not marker_id:
+        raise HTTPException(status_code=400, detail="marker_id required (1-11)")
+
+    # Load marker positions from authoritative layout
+    layout_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
+        "output", "coord_zone_pipeline1", "garage_layout_authoritative_v2.json"
+    )
+    marker_info = None
+    try:
+        with open(layout_path) as f:
+            layout = json.load(f)
+        marker_info = layout.get("ceiling_markers", {}).get(marker_id)
+    except Exception:
+        pass
+
+    if marker_info is None:
+        raise HTTPException(status_code=400, detail=f"Unknown marker_id={marker_id}. Valid: 1-11")
+
+    gt_x = marker_info["x"]
+    gt_y = marker_info["y"]
+    marker_label = marker_info.get("label", f"Marker {marker_id}")
+
+    # ── PRE-FLIGHT CHECKS ──
+    status = csi_prediction_service.current
+    errors = []
+
+    nodes_active = status.get("nodes_active", 0)
+    if nodes_active < 7:
+        errors.append(f"nodes_active={nodes_active}, need 7")
+
+    pps = status.get("pps", 0)
+    if pps < 10:
+        errors.append(f"pps={pps}, need >= 10")
+
+    window_age = status.get("window_age_sec", 999)
+    if window_age > 10:
+        errors.append(f"window_age={window_age}s, need < 10s")
+
+    feat = csi_prediction_service._last_feat_dict
+    if not feat or feat.get("t_mid") is None:
+        errors.append("no feature data yet (_last_feat_dict empty)")
+
+    if errors:
+        return {"ok": False, "preflight_failed": True, "errors": errors}
+
+    # ── SETUP OUTPUT ──
+    out_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
+        "output", "marker_recordings"
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    ts_start = int(time.time())
+    filename = f"marker_{marker_id}_{ts_start}.jsonl"
+    filepath = os.path.join(out_dir, filename)
+
+    # ── RECORD ──
+    collected = 0
+    skipped_dup = 0
+    last_t_mid = None
+    t_end = time.time() + duration
+    records = []
+
+    while time.time() < t_end:
+        feat = dict(csi_prediction_service._last_feat_dict)
+        t_mid = feat.get("t_mid")
+
+        if not feat or t_mid is None:
+            await asyncio.sleep(1)
+            continue
+
+        if t_mid == last_t_mid:
+            skipped_dup += 1
+            await asyncio.sleep(0.5)
+            continue
+
+        last_t_mid = t_mid
+
+        # Get current predictions
+        cur = dict(csi_prediction_service.current)
+
+        record = {
+            "ts": time.time(),
+            "marker_id": marker_id,
+            "marker_label": marker_label,
+            "gt_x": gt_x,
+            "gt_y": gt_y,
+            "custom_label": custom_label,
+            # Raw CSI features (full dict)
+            "features": feat,
+            # Model predictions
+            "binary": cur.get("binary"),
+            "binary_confidence": cur.get("binary_confidence"),
+            "coarse": cur.get("coarse"),
+            "zone": cur.get("target_zone"),
+            "pred_x": cur.get("target_x"),
+            "pred_y": cur.get("target_y"),
+            "coord_source": cur.get("coord_source", ""),
+            "model_version": cur.get("model_version"),
+            "nodes_active": cur.get("nodes_active"),
+            "pps": cur.get("pps"),
+            "window_age_sec": cur.get("window_age_sec"),
+        }
+        records.append(record)
+        collected += 1
+        await asyncio.sleep(2)
+
+    # ── SAVE ──
+    with open(filepath, "w") as f:
+        for r in records:
+            f.write(json.dumps(r, default=str) + "\n")
+
+    # ── POST-FLIGHT VALIDATION ──
+    validation = {
+        "total_windows": collected,
+        "unique_t_mids": len(set(r["features"].get("t_mid") for r in records)),
+        "skipped_duplicates": skipped_dup,
+        "duration_actual_sec": round(time.time() - ts_start, 1),
+        "binary_occupied_pct": round(
+            sum(1 for r in records if r["binary"] == "occupied") / max(collected, 1) * 100, 1
+        ),
+        "feature_keys_count": len(records[0]["features"]) if records else 0,
+        "has_rssi": any("rssi" in k for k in (records[0]["features"].keys() if records else [])),
+        "has_amplitude": any("amp" in k for k in (records[0]["features"].keys() if records else [])),
+        "file": filepath,
+        "file_size_kb": round(os.path.getsize(filepath) / 1024, 1) if os.path.exists(filepath) else 0,
+    }
+
+    ok = collected >= 5 and validation["unique_t_mids"] >= 5
+    return {
+        "ok": ok,
+        "marker_id": marker_id,
+        "marker_label": marker_label,
+        "gt_x": gt_x,
+        "gt_y": gt_y,
+        "collected": collected,
+        "validation": validation,
+        "filepath": filepath,
+    }
+
+
+@router.post("/features/record")
+async def features_record(req: dict):
+    """Record raw CSI features for a given duration. No occupancy check.
+
+    Body: {"duration_sec": 300, "label": "empty_baseline"}
+    """
+    import asyncio, time, json, os
+
+    duration = int(req.get("duration_sec", 60))
+    label = req.get("label", "unlabeled")
+
+    out_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
+        "output", "marker_recordings"
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    ts_start = int(time.time())
+    filepath = os.path.join(out_dir, f"{label}_{ts_start}.jsonl")
+
+    collected = 0
+    skipped_dup = 0
+    last_t_mid = None
+    t_end = time.time() + duration
+    records = []
+
+    while time.time() < t_end:
+        feat = dict(csi_prediction_service._last_feat_dict)
+        t_mid = feat.get("t_mid")
+        if not feat or t_mid is None:
+            await asyncio.sleep(1)
+            continue
+        if t_mid == last_t_mid:
+            skipped_dup += 1
+            await asyncio.sleep(0.5)
+            continue
+        last_t_mid = t_mid
+        cur = dict(csi_prediction_service.current)
+        record = {
+            "ts": time.time(),
+            "label": label,
+            "features": feat,
+            "binary": cur.get("binary"),
+            "binary_confidence": cur.get("binary_confidence"),
+            "nodes_active": cur.get("nodes_active"),
+            "pps": cur.get("pps"),
+        }
+        records.append(record)
+        collected += 1
+        await asyncio.sleep(2)
+
+    with open(filepath, "w") as f:
+        for r in records:
+            f.write(json.dumps(r, default=str) + "\n")
+
+    return {
+        "ok": collected >= 1,
+        "label": label,
+        "collected": collected,
+        "skipped_duplicates": skipped_dup,
+        "duration_sec": round(time.time() - ts_start, 1),
+        "filepath": filepath,
+        "file_size_kb": round(os.path.getsize(filepath) / 1024, 1) if os.path.exists(filepath) else 0,
+    }
 
 
 # ── Few-shot calibration storage endpoints (shadow-only packet persistence) ──
@@ -1044,3 +1489,289 @@ async def shadow_v43_disable():
 async def shadow_v43_status():
     """Get current V43 shadow state, agreement rate, and window count."""
     return csi_prediction_service.get_v43_shadow_status()
+
+
+# ── Epoch4 position prediction endpoint ──────────────────────────────
+
+_epoch4_model = None
+_epoch4_meta = None
+# v4.1 model (TEXT format, 56 features)
+_V41_MODEL_PATH = PROJECT_ROOT / "output" / "epoch4_v41_model" / "v41_position_classifier.pkl"
+_V41_META_PATH = PROJECT_ROOT / "output" / "epoch4_v41_model" / "v41_position_classifier_meta.json"
+# Legacy model (binary format, kept as fallback)
+_EPOCH4_MODEL_PATH = PROJECT_ROOT / "output" / "epoch4_position_model" / "epoch4_position_classifier.pkl"
+_EPOCH4_META_PATH = PROJECT_ROOT / "output" / "epoch4_position_model" / "epoch4_position_classifier_meta.json"
+_EPOCH4_NODE_IPS = [
+    "192.168.0.137", "192.168.0.117", "192.168.0.143", "192.168.0.125",
+    "192.168.0.110", "192.168.0.132", "192.168.0.153",
+]
+_EPOCH4_NSUB = 64
+_EPOCH4_WIN = 7
+_EPOCH4_LABELS = {}
+_epoch4_model_version = None  # "v41" or "legacy"
+
+
+def _load_epoch4_model():
+    global _epoch4_model, _epoch4_meta, _EPOCH4_LABELS, _epoch4_model_version
+    if _epoch4_model is not None:
+        return _epoch4_model, _epoch4_meta
+
+    # Try v4.1 model first
+    if _V41_MODEL_PATH.exists():
+        import pickle
+        with open(_V41_MODEL_PATH, "rb") as f:
+            bundle = pickle.load(f)
+        _epoch4_model = bundle["model"]
+        le = bundle["label_encoder"]
+        _EPOCH4_LABELS = {i: str(c) for i, c in enumerate(le.classes_)}
+        if _V41_META_PATH.exists():
+            _epoch4_meta = json.loads(_V41_META_PATH.read_text())
+        _epoch4_model_version = "v41"
+        logger.info("Loaded v4.1 position model (%d classes)", len(_EPOCH4_LABELS))
+        return _epoch4_model, _epoch4_meta
+
+    # Fallback to legacy model
+    if _EPOCH4_MODEL_PATH.exists():
+        import joblib
+        _epoch4_model = joblib.load(_EPOCH4_MODEL_PATH)
+        if _EPOCH4_META_PATH.exists():
+            _epoch4_meta = json.loads(_EPOCH4_META_PATH.read_text())
+            if "classes" in _epoch4_meta:
+                _EPOCH4_LABELS = {int(k): v for k, v in _epoch4_meta["classes"].items()}
+        _epoch4_model_version = "legacy"
+        logger.info("Loaded legacy position model")
+        return _epoch4_model, _epoch4_meta
+
+    return None, None
+
+
+@router.post("/position/reload")
+async def reload_position_model():
+    """Force reload of position model (after retraining)."""
+    global _epoch4_model, _epoch4_meta, _epoch4_model_version
+    _epoch4_model = None
+    _epoch4_meta = None
+    _epoch4_model_version = None
+    model, meta = _load_epoch4_model()
+    if model is None:
+        return {"status": "error", "message": "model file not found"}
+    return {"status": "ok", "version": _epoch4_model_version, "classes": _EPOCH4_LABELS, "n_classes": len(_EPOCH4_LABELS)}
+
+
+def _extract_v41_features(packets: dict, node_ips: list[str], win: int) -> tuple[list[float], list[str]]:
+    """Extract 56-dim feature vector matching v4.1 training format.
+
+    8 features per node: mean_rssi, std_rssi, mean_amp, std_amp, max_amp, low_amp, mid_amp, high_amp
+    """
+    import numpy as np
+    fv: list[float] = []
+    ready_nodes: list[str] = []
+
+    for ip in node_ips:
+        if ip not in packets or len(packets[ip]) < win:
+            fv.extend([0.0] * 8)
+            continue
+
+        recent = packets[ip][-win:]
+        ready_nodes.append(ip)
+        rssis = np.array([float(r[1]) for r in recent], dtype=np.float64)
+        amp_list = [np.asarray(r[2], dtype=np.float64) for r in recent]
+
+        # Pad amplitudes to same length
+        max_sc = max(len(a) for a in amp_list) if amp_list else 0
+        if max_sc == 0:
+            fv.extend([0.0] * 8)
+            continue
+
+        padded = np.zeros((len(amp_list), max_sc))
+        for i, a in enumerate(amp_list):
+            padded[i, :len(a)] = a
+
+        mean_rssi = float(np.mean(rssis))
+        std_rssi = float(np.std(rssis))
+        mean_amp = float(np.mean(padded))
+        std_amp = float(np.std(padded))
+        max_amp = float(np.max(padded))
+        third = max_sc // 3
+        low_amp = float(np.mean(padded[:, :third])) if third > 0 else 0.0
+        mid_amp = float(np.mean(padded[:, third:2*third])) if third > 0 else 0.0
+        high_amp = float(np.mean(padded[:, 2*third:])) if third > 0 else 0.0
+
+        fv.extend([mean_rssi, std_rssi, mean_amp, std_amp, max_amp, low_amp, mid_amp, high_amp])
+
+    return fv, ready_nodes
+
+
+def _extract_legacy_features(packets: dict, node_ips: list[str], win: int, nsub: int) -> tuple[list[float], list[str]]:
+    """Extract legacy 258-dim feature vector for binary-format model."""
+    import numpy as np
+    fv: list[float] = []
+    ready_nodes: list[str] = []
+
+    for ip in node_ips:
+        if ip not in packets or len(packets[ip]) < win:
+            fv.extend([0.0] * (nsub * 4 + 2))
+            continue
+
+        recent = packets[ip][-win:]
+        ready_nodes.append(ip)
+        amps_raw = [r[2] for r in recent]
+        phs_raw = [r[3] for r in recent]
+        rssis = np.array([r[1] for r in recent], dtype=np.float32)
+
+        amps = np.zeros((win, nsub), np.float32)
+        phs = np.zeros((win, nsub), np.float32)
+        for i in range(len(recent)):
+            a_raw = np.asarray(amps_raw[i], dtype=np.float32)
+            p_raw = np.asarray(phs_raw[i], dtype=np.float32)
+            n = len(a_raw)
+            if n == nsub:
+                amps[i] = a_raw
+                phs[i] = p_raw
+            elif n > nsub:
+                k = n // nsub
+                usable = nsub * k
+                amps[i] = a_raw[:usable].reshape(nsub, k).mean(axis=1)
+                phs[i] = p_raw[:usable:k][:nsub]
+            elif n > 0:
+                amps[i, :n] = a_raw
+                phs[i, :n] = p_raw
+
+        fv.extend(amps.mean(0).tolist())
+        fv.extend(amps.std(0).tolist())
+        fv.extend(phs.mean(0).tolist())
+        fv.extend(phs.std(0).tolist())
+        fv.append(float(rssis.mean()) / 100.0)
+        fv.append(float(rssis.mean() + 96) / 100.0)
+
+    return fv, ready_nodes
+
+
+@router.get("/position")
+async def get_position_prediction():
+    """Real-time position prediction using the best available model.
+
+    v4.1 model: 56-dim features (mean_rssi, std_rssi, mean/std/max_amp, low/mid/high_amp per node)
+    Legacy model: 258-dim features (amp/phase mean/std + rssi per node)
+    """
+    import numpy as np
+
+    model, meta = _load_epoch4_model()
+    if model is None:
+        raise HTTPException(status_code=503, detail="position model not found")
+
+    svc = csi_prediction_service
+    packets = svc._packets
+
+    if _epoch4_model_version == "v41":
+        fv, ready_nodes = _extract_v41_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
+    else:
+        fv, ready_nodes = _extract_legacy_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN, _EPOCH4_NSUB)
+
+    X = np.array(fv, np.float32).reshape(1, -1)
+    raw_pred = model.predict(X)[0]
+    proba = model.predict_proba(X)[0]
+
+    # Handle both numeric (LabelEncoder) and string (direct) predictions
+    if isinstance(raw_pred, (int, np.integer)):
+        pred = int(raw_pred)
+        label = _EPOCH4_LABELS.get(pred, f"class_{pred}")
+        confidence = float(proba[pred])
+    else:
+        label = str(raw_pred)
+        # Find index of predicted class in proba array
+        pred_idx = list(model.classes_).index(raw_pred) if hasattr(model, 'classes_') else 0
+        confidence = float(proba[pred_idx])
+
+    top3_idx = np.argsort(proba)[::-1][:3]
+    top3 = []
+    for i in top3_idx:
+        if _EPOCH4_LABELS:
+            lbl = _EPOCH4_LABELS.get(int(i), str(model.classes_[i]) if hasattr(model, 'classes_') else f"class_{i}")
+        else:
+            lbl = str(model.classes_[i]) if hasattr(model, 'classes_') else f"class_{i}"
+        top3.append({"label": lbl, "probability": round(float(proba[i]), 4)})
+
+    node_info = {}
+    for ip in _EPOCH4_NODE_IPS:
+        if ip in packets and packets[ip]:
+            last_pkt = packets[ip][-1]
+            node_info[ip] = {
+                "n_packets": len(packets[ip]),
+                "amp_shape": len(last_pkt[2]),
+                "rssi": float(last_pkt[1]),
+            }
+        else:
+            node_info[ip] = {"n_packets": 0}
+
+    return {
+        "position": label,
+        "confidence": round(confidence, 4),
+        "top3": top3,
+        "model_version": _epoch4_model_version,
+        "nodes_ready": len(ready_nodes),
+        "nodes_total": len(_EPOCH4_NODE_IPS),
+        "window_size": _EPOCH4_WIN,
+        "feature_dim": len(fv),
+        "nodes": node_info,
+    }
+
+
+_EPOCH4_SNAPSHOTS_DIR = PROJECT_ROOT / "output" / "epoch4_live_snapshots"
+
+
+class PositionSnapshotRequest(BaseModel):
+    label: str = Field(..., description="Position label (e.g. center, door, empty, marker1)")
+    window_size: int = Field(default=20, description="Packets per node to capture")
+
+
+@router.post("/position/snapshot")
+async def capture_position_snapshot(req: PositionSnapshotRequest):
+    """Capture a labeled snapshot of current CSI buffer for model retraining.
+
+    Call this while standing at a known position to collect training data
+    that matches the exact runtime feature format (sanitized phase, etc).
+    """
+    import numpy as np
+
+    svc = csi_prediction_service
+    packets = svc._packets
+    win = req.window_size
+
+    snapshot_data = {}
+    nodes_captured = 0
+    for ip in _EPOCH4_NODE_IPS:
+        if ip not in packets or len(packets[ip]) < win:
+            snapshot_data[ip] = None
+            continue
+        recent = packets[ip][-win:]
+        snapshot_data[ip] = {
+            "rssi": [float(r[1]) for r in recent],
+            "amp": [r[2].tolist() for r in recent],
+            "phase": [r[3].tolist() for r in recent],
+            "t_sec": [float(r[0]) for r in recent],
+        }
+        nodes_captured += 1
+
+    _EPOCH4_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    fname = f"snap_{req.label}_{ts}.json"
+    fpath = _EPOCH4_SNAPSHOTS_DIR / fname
+
+    record = {
+        "label": req.label,
+        "timestamp": ts,
+        "window_size": win,
+        "node_ips": _EPOCH4_NODE_IPS,
+        "nodes_captured": nodes_captured,
+        "data": snapshot_data,
+    }
+    fpath.write_text(json.dumps(record), encoding="utf-8")
+
+    return {
+        "status": "ok",
+        "file": str(fpath),
+        "label": req.label,
+        "nodes_captured": nodes_captured,
+        "nodes_total": len(_EPOCH4_NODE_IPS),
+    }

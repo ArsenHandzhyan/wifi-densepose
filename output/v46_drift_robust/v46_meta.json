@@ -1,21 +1,21 @@
 {
   "version": "v46_drift_robust",
-  "n_samples": 156,
+  "n_samples": 655,
   "n_features": 77,
   "classes": [
     "empty",
     "motion",
     "static"
   ],
-  "cv_f1_macro": 0.9849876543209877,
-  "best_model": "GBM-500",
+  "cv_f1_macro": 0.9958121459006415,
+  "best_model": "RF-1000",
   "label_counts": {
-    "empty": 65,
-    "static": 26,
-    "motion": 65
+    "empty": 282,
+    "static": 113,
+    "motion": 260
   },
   "empty_files": 57,
-  "static_files": 38,
+  "static_files": 47,
   "motion_files": 28,
   "window_size": 7,
   "min_nodes": 5,

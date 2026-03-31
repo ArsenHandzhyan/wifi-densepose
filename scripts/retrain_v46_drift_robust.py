@@ -79,6 +79,10 @@ STATIC_PATTERNS = [
     "occupied_marker8_static_1p_epoch4_20260331_chunk*.ndjson.gz",
     "marker4_static_1p_v44_chunk*.ndjson.gz",
     "center_static_1p_v44_chunk*.ndjson.gz",
+    # V46 fresh static recordings (drift conditions, 2min each)
+    "static_marker1_2min_v46_chunk*.ndjson.gz",
+    "static_center_2min_v46_chunk*.ndjson.gz",
+    "static_marker3_2min_v46_chunk*.ndjson.gz",
 ]
 
 MOTION_PATTERNS = [

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from live_sensor_guard import fetch_json, format_health_report, verify_online_sensor_health
+from v1.src.services.training_capture_contract import evaluate_capture_clip_manifest
 
 
 SCRIPT_VERSION = "atomic_capture_v1_2026-03-12"
@@ -334,6 +335,114 @@ TRAIN_PACKS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "walking_motion_pack": {
+        "title": "Walking Motion Pack — Center, Passage, Door (7 min total)",
+        "scenario": "walking_motion",
+        "clips": [
+            # --- ЦЕНТР: ходьба туда-сюда ---
+            {
+                "label_name": "walk_center",
+                "step_name": "walk_center_slow_1",
+                "duration_sec": 30,
+                "prompt": "Иди в центр гаража. Ходи туда-сюда по центру в спокойном темпе. Не останавливайся.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_center",
+                "step_name": "walk_center_slow_2",
+                "duration_sec": 30,
+                "prompt": "Продолжай ходить по центру туда-сюда. Спокойный шаг, не торопись.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_center",
+                "step_name": "walk_center_normal",
+                "duration_sec": 30,
+                "prompt": "Ходи по центру в обычном темпе. Естественная походка туда-сюда.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_center",
+                "step_name": "walk_center_turns",
+                "duration_sec": 30,
+                "prompt": "Ходи по центру с поворотами. Меняй направление каждые несколько шагов.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_center",
+                "step_name": "walk_center_circle",
+                "duration_sec": 30,
+                "prompt": "Ходи по центру по кругу или по восьмёрке. Не останавливайся.",
+                "person_count_expected": 1,
+            },
+            # --- ПРОХОД: ходьба по проходу ---
+            {
+                "label_name": "walk_passage",
+                "step_name": "walk_passage_slow_1",
+                "duration_sec": 30,
+                "prompt": "Перейди в проход. Ходи по проходу вперёд-назад в спокойном темпе.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_passage",
+                "step_name": "walk_passage_slow_2",
+                "duration_sec": 30,
+                "prompt": "Продолжай ходить по проходу. Спокойный шаг туда-сюда.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_passage",
+                "step_name": "walk_passage_normal",
+                "duration_sec": 30,
+                "prompt": "Ходи по проходу в обычном темпе. Естественная походка.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_passage",
+                "step_name": "walk_passage_fast",
+                "duration_sec": 30,
+                "prompt": "Ходи по проходу чуть быстрее обычного. Энергичный шаг.",
+                "person_count_expected": 1,
+            },
+            # --- ДВЕРЬ: ходьба у двери ---
+            {
+                "label_name": "walk_door",
+                "step_name": "walk_door_slow_1",
+                "duration_sec": 30,
+                "prompt": "Перейди к двери. Ходи возле двери туда-сюда в спокойном темпе. Не выходи наружу.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_door",
+                "step_name": "walk_door_slow_2",
+                "duration_sec": 30,
+                "prompt": "Продолжай ходить возле двери. Спокойный шаг, не выходи.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_door",
+                "step_name": "walk_door_normal",
+                "duration_sec": 30,
+                "prompt": "Ходи у двери в обычном темпе. Вперёд-назад вдоль двери.",
+                "person_count_expected": 1,
+            },
+            # --- ПЕРЕХОДЫ между зонами ---
+            {
+                "label_name": "walk_transition",
+                "step_name": "walk_door_to_center_loop",
+                "duration_sec": 30,
+                "prompt": "Ходи от двери к центру и обратно. Полный маршрут туда-сюда без остановок.",
+                "person_count_expected": 1,
+            },
+            {
+                "label_name": "walk_transition",
+                "step_name": "walk_full_route_loop",
+                "duration_sec": 30,
+                "prompt": "Ходи по всему гаражу: дверь — проход — центр — проход — дверь. По кругу без остановок.",
+                "person_count_expected": 1,
+            },
+        ],
+    },
 }
 
 EVAL_SCENARIOS: dict[str, dict[str, Any]] = {
@@ -530,15 +639,83 @@ def post_json(url: str, payload: dict[str, Any], timeout_sec: float) -> tuple[bo
             raw = response.read().decode("utf-8")
         return True, json.loads(raw), None
     except urllib.error.HTTPError as exc:
+        payload_body: dict[str, Any] | None = None
         try:
             body = exc.read().decode("utf-8")
         except Exception:
             body = exc.reason
+        if body:
+            try:
+                payload_body = json.loads(body)
+            except Exception:
+                payload_body = None
+        if payload_body is not None:
+            return False, payload_body, f"HTTP {exc.code}"
         return False, None, f"HTTP {exc.code}: {body}"
     except urllib.error.URLError as exc:
         return False, None, f"URL error: {exc.reason}"
     except Exception as exc:
         return False, None, repr(exc)
+
+
+def _extract_error_message_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    error_block = payload.get("error")
+    if isinstance(error_block, dict):
+        message_block = error_block.get("message")
+        if isinstance(message_block, dict):
+            return message_block
+        if isinstance(message_block, str):
+            return {
+                "error": error_block.get("type") or error_block.get("code") or "http_error",
+                "message": message_block,
+            }
+
+    if payload.get("ok") is False:
+        message = payload.get("error")
+        if isinstance(message, str):
+            return {
+                "error": payload.get("error_code") or "request_failed",
+                "message": message,
+            }
+    return None
+
+
+def format_live_csi_capture_error(payload: dict[str, Any] | None, fallback_error: str | None) -> str:
+    detail = _extract_error_message_payload(payload)
+    fallback = str(fallback_error or "live CSI capture request failed")
+    if detail is None:
+        return fallback
+
+    error_code = str(detail.get("error") or "live_csi_capture_failed")
+    message = str(detail.get("message") or fallback)
+
+    if error_code == "hardware_runtime_not_ready":
+        hardware_status = detail.get("hardware_status") or {}
+        status_reason = str(hardware_status.get("status_reason") or "").strip()
+        hardware_message = str(hardware_status.get("message") or message)
+        if status_reason:
+            return f"{error_code} ({status_reason}): {hardware_message}"
+        return f"{error_code}: {hardware_message}"
+
+    if error_code == "csi_runtime_not_ready":
+        csi_status = detail.get("csi_status") or {}
+        status_reason = str(csi_status.get("status_reason") or "").strip()
+        status_message = str(csi_status.get("status_message") or message)
+        if status_reason:
+            return f"{error_code} ({status_reason}): {status_message}"
+        return f"{error_code}: {status_message}"
+
+    if error_code == "csi_dead_on_start":
+        recording_stop = detail.get("recording_stop") or {}
+        stop_reason = str(recording_stop.get("stop_reason") or "").strip()
+        if stop_reason and stop_reason != error_code:
+            return f"{error_code} ({stop_reason}): {message}"
+        return f"{error_code}: {message}"
+
+    return f"{error_code}: {message}"
 
 
 def fp2_backend_base_url(fp2_url: str) -> str:
@@ -834,6 +1011,36 @@ def ffmpeg_backend_snapshot() -> dict[str, Any]:
         "ffprobe_path": shutil.which("ffprobe"),
         "devices_output_excerpt": output[-2000:],
     }
+
+
+def probe_media_duration(path: Path) -> float | None:
+    if not path.exists():
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return round(float((completed.stdout or "").strip()), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def mac_video_teacher_host(command: str, *extra: str) -> tuple[bool, dict[str, Any] | None, str | None]:
@@ -1399,7 +1606,7 @@ def trigger_live_csi_capture(args: argparse.Namespace, *, capture_label: str, du
         timeout_sec=max(args.timeout_sec + duration_sec + 10.0, 15.0),
     )
     if not ok or not payload or not payload.get("ok"):
-        raise RuntimeError(error or "live CSI capture request failed")
+        raise RuntimeError(format_live_csi_capture_error(payload, error))
     return dict(payload.get("capture") or {})
 
 
@@ -1767,6 +1974,10 @@ def main() -> int:
                         _, video_error = finalize_recorder(video_proc)
                         clip_manifest["video_recording_status"] = "completed" if not video_error and video_path.exists() else "failed"
                         clip_manifest["video_failure_reason"] = video_error
+                        video_duration_sec = probe_media_duration(video_path) if video_path.exists() else None
+                        clip_manifest["video_actual_duration_sec"] = video_duration_sec
+                        if video_duration_sec is not None and clip_duration_sec > 0:
+                            clip_manifest["video_truth_coverage_ratio"] = round(video_duration_sec / clip_duration_sec, 4)
                     video_end_ts = now_iso()
                     if video_error:
                         clip_manifest.setdefault("notes", "")
@@ -1801,6 +2012,7 @@ def main() -> int:
                     print(f"audio: {audio_path}", flush=True)
                 clip_manifest["timestamp_end"] = now_iso()
                 clip_manifest["video_end_ts"] = video_end_ts
+                clip_manifest["completion_contract"] = evaluate_capture_clip_manifest(clip_manifest)
                 write_json(clip_manifest_path, clip_manifest)
 
             print(f"clip_manifest: {clip_manifest_path}", flush=True)
@@ -1810,6 +2022,12 @@ def main() -> int:
             if video_teacher_enabled and clip_manifest.get("video_recording_status") not in (None, "completed"):
                 raise RuntimeError(
                     f"video teacher degraded: {clip_manifest.get('video_recording_status')} / {clip_manifest.get('video_failure_reason') or 'unknown'}"
+                )
+            completion_contract = clip_manifest.get("completion_contract") or {}
+            if not completion_contract.get("ok"):
+                raise RuntimeError(
+                    "capture completion contract failed: "
+                    f"{completion_contract.get('status')}: {completion_contract.get('reason')}"
                 )
             speak("Стоп.", enable_voice=enable_voice, voice=args.voice)
 

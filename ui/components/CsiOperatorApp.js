@@ -9,7 +9,7 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
 import { FP2Tab } from './FP2Tab.js?v=20260327-unified-01';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260327-v42-prod-01';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260329-v44-door-passage-01';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
 
@@ -337,26 +337,26 @@ const FATE_GROUP_HOTKEYS = {
 };
 const FORENSIC_SEARCH_PREFETCH_DELAY_MS = 180;
 const DEFAULT_GARAGE_LAYOUT = {
-  // Garage Planner v3 (2026-03-26): 3×7m, single door 2.4m at bottom.
+  // Garage Planner v3 (2026-03-28): 3×7m, door-sector + updated center/deep cut.
   // Backend center-based X: x ∈ [-1.5, +1.5]. Y: 0=door, 7=deep end.
   widthMeters: 3.0,
   heightMeters: 7.0,
-  door: { xMeters: 0.0, yMeters: 0.0 },
+  door: { xMeters: 1.0, yMeters: 0.0, widthMeters: 1.0, offsetMeters: 2.0 },
   zones: {
-    doorMaxY: 3.5,
-    deepMinY: 5.0,
+    doorMaxY: 2.0,
+    deepMinY: 5.5,
     // Подзоны внутри door (center-based X: -1.5..+1.5)
-    zone3: { xMin: 0.50, xMax: 1.50, yMin: 0.0, yMax: 3.5, label: 'Проход' },
+    zone3: { xMin: 0.50, xMax: 1.50, yMin: 0.0, yMax: 3.0, label: 'Проход' },
     zone4: { xMin: -0.50, xMax: 0.50, yMin: 0.0, yMax: 1.0, label: 'FP2' }
   },
   nodes: [
-    { nodeId: 'node01', ip: '192.168.1.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
-    { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
-    { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
-    { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.33',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
-    { nodeId: 'node06', ip: '192.168.1.77',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
-    { nodeId: 'node07', ip: '192.168.1.41',  xMeters: 1.50, yMeters: 3.70, zone: 'center' }
+    { nodeId: 'node01', ip: '192.168.0.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node02', ip: '192.168.0.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node03', ip: '192.168.0.143', xMeters: -1.50, yMeters: 3.15, zone: 'center' },
+    { nodeId: 'node04', ip: '192.168.0.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
+    { nodeId: 'node05', ip: '192.168.0.110',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.0.132',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.0.153',  xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
 const DEFAULT_VISIBLE_NODE_COUNT = Math.max(DEFAULT_GARAGE_LAYOUT.nodes.length, 7);
@@ -1563,6 +1563,8 @@ export class CsiOperatorApp {
     this.pendingForensicScrollRunId = null;
     this.lastRenderedForensicRunId = null;
     this.signalCoordinateState = null;
+    this._nodesLive = null;
+    this._nodesLiveTimer = null;
     this.runtimeViewSelection = readUiRuntimeViewSelection();
     this.validationFilter = 'all';
     this.runtimeRecordingUi = {
@@ -1598,6 +1600,80 @@ export class CsiOperatorApp {
       this.renderSnapshot();
     });
     await this.service.start();
+    this._startNodesLivePolling();
+  }
+
+  _startNodesLivePolling() {
+    const poll = async () => {
+      try {
+        const resp = await fetch('/api/v1/csi/nodes/live');
+        if (resp.ok) {
+          this._nodesLive = await resp.json();
+          this._renderNodesLiveTable();
+        }
+      } catch (_) { /* ignore */ }
+    };
+    poll();
+    this._nodesLiveTimer = setInterval(poll, 2000);
+  }
+
+  _renderNodesLiveRows() {
+    const data = this._nodesLive;
+    if (!data || !data.nodes) {
+      return '<div style="padding:8px;opacity:0.5">Загрузка...</div>';
+    }
+    return data.nodes.map((n) => {
+      const online = n.online;
+      const dotColor = online ? '#22c55e' : '#ef4444';
+      const statusText = online ? 'online' : (n.packets > 0 ? 'stale' : 'offline');
+      const rssiBar = n.rssi != null ? this._signalBar(n.rssi, -70, -10) : '';
+      const ampBar = n.amp_mean != null ? this._signalBar(n.amp_mean, 0, 30) : '';
+      const cvColor = n.amp_cv > 1.5 ? '#f59e0b' : n.amp_cv > 0.8 ? '#22c55e' : '#6b7280';
+      const tvColor = n.temporal_var > 2.0 ? '#ef4444' : n.temporal_var > 0.5 ? '#f59e0b' : '#22c55e';
+      return `
+        <div class="node-table__row" style="${!online ? 'opacity:0.4' : ''}">
+          <div class="node-table__cell node-table__cell--name"><span style="color:${dotColor};margin-right:4px">●</span>${escapeHtml(n.node_id)}</div>
+          <div class="node-table__cell" style="color:${dotColor}">${statusText}</div>
+          <div class="node-table__cell">${n.rssi != null ? n.rssi + ' dBm' : '—'}${rssiBar}</div>
+          <div class="node-table__cell">${n.amp_mean != null ? n.amp_mean.toFixed(1) : '—'}${ampBar}</div>
+          <div class="node-table__cell">${n.amp_max != null ? n.amp_max.toFixed(0) : '—'}</div>
+          <div class="node-table__cell" style="color:${cvColor}">${n.amp_cv != null ? n.amp_cv.toFixed(3) : '—'}</div>
+          <div class="node-table__cell" style="color:${tvColor}">${n.temporal_var != null ? n.temporal_var.toFixed(3) : '—'}</div>
+          <div class="node-table__cell">${n.packets || 0}${n.packets_window ? ' / ' + n.packets_window + 'w' : ''}</div>
+        </div>`;
+    }).join('');
+  }
+
+  _signalBar(value, min, max) {
+    const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+    const color = pct > 60 ? '#22c55e' : pct > 30 ? '#f59e0b' : '#ef4444';
+    return `<div style="height:3px;margin-top:2px;background:#333;border-radius:2px"><div style="width:${pct}%;height:100%;background:${color};border-radius:2px"></div></div>`;
+  }
+
+  _renderNodesLiveTable() {
+    const el = this.root.querySelector('#nodes-live-table');
+    if (!el) return;
+    // Keep header, replace data rows
+    const header = el.querySelector('.node-table__row--header');
+    const rows = this._renderNodesLiveRows();
+    if (header) {
+      el.innerHTML = header.outerHTML + rows;
+    } else {
+      el.innerHTML = rows;
+    }
+    // Update position info
+    const posEl = this.root.querySelector('#nodes-live-position');
+    if (posEl && this._nodesLive?.position) {
+      const p = this._nodesLive.position;
+      if (p.label) {
+        const probsText = p.probabilities
+          ? Object.entries(p.probabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`).join(' / ')
+          : '';
+        posEl.innerHTML = `<strong>V46 prediction:</strong> ${escapeHtml(p.label)} (${(p.confidence * 100).toFixed(1)}%) — ${escapeHtml(probsText)} — ${p.nodes_ready}/${this._nodesLive.total_nodes} nodes ready`;
+      } else if (p.error) {
+        posEl.innerHTML = `<span style="color:#ef4444">Error: ${escapeHtml(p.error)}</span>`;
+      }
+    }
   }
 
   dispose() {
@@ -1606,6 +1682,7 @@ export class CsiOperatorApp {
     this.root.removeEventListener('change', this.handleRootChange);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     this.clearForensicSearchPrefetch();
+    if (this._nodesLiveTimer) clearInterval(this._nodesLiveTimer);
     this.unsubscribe?.();
     this.service.stop();
   }
@@ -2431,6 +2508,12 @@ export class CsiOperatorApp {
     const trust = snapshot?.live?.trust || { tone: 'neutral', label: 'booting', summary: 'Идёт загрузка live-runtime…' };
     const topology = snapshot?.live?.topology || {};
     const primaryRuntime = snapshot?.live?.primaryRuntime || {};
+    const poseSurface = snapshot?.live?.poseSurface || {
+      tone: 'neutral',
+      label: 'No data',
+      summary: 'pose snapshot ещё не загружен',
+      detail: 'оператор видит только CSI/runtime слой'
+    };
     const shadowDisagreement = snapshot?.live?.shadowDisagreement || {};
     const trackBShadow = snapshot?.live?.trackBShadow || {};
     const v15Shadow = snapshot?.live?.v8Shadow || snapshot?.live?.v7Shadow || snapshot?.live?.v15Shadow || {};
@@ -2473,6 +2556,14 @@ export class CsiOperatorApp {
           <div class="summary-card__label">Runtime-сессия</div>
           <div class="summary-card__value">${escapeHtml(sessionId)}</div>
           <div class="summary-card__meta">Старт ${escapeHtml(getRuntimeStartText(snapshot))} / топология ${escapeHtml(topologyLabel)}</div>
+        </div>
+        <div class="summary-card ${toneClass(poseSurface.tone)}">
+          <div class="summary-card__label">Pose / FP2</div>
+          <div class="summary-card__value">${escapeHtml(String(poseSurface.label || 'No data').toUpperCase())}</div>
+          <div class="summary-card__meta">
+            ${escapeHtml(poseSurface.summary || 'нет данных')}
+            <br>${escapeHtml(poseSurface.detail || 'детали не переданы')}
+          </div>
         </div>
       </div>
     `;
@@ -2517,6 +2608,12 @@ export class CsiOperatorApp {
     const zoneCalibrationShadow = snapshot.live.zoneCalibrationShadow || {};
     const baselineStatus = snapshot.live.baselineStatus || {};
     const signalQuality = snapshot.live.signalQuality || {};
+    const poseSurface = snapshot.live.poseSurface || {
+      tone: 'neutral',
+      label: 'No data',
+      summary: 'pose snapshot ещё не загружен',
+      detail: 'оператор видит только CSI/runtime слой'
+    };
     const fewshotCalibration = snapshot.recording?.fewshotCalibration || {};
     const runtimeView = buildRuntimeView(
       primaryRuntime,
@@ -2592,6 +2689,7 @@ export class CsiOperatorApp {
             <span class="tag tone-info">${escapeHtml(runtimeView.routeLabel)} / уверенность ${escapeHtml(formatPercent(runtimeView.confidence, 0))}</span>
             <span class="tag ${toneClass(zoneGate.tone)}">дверь‑центр ${escapeHtml(zoneGate.state)} / ${escapeHtml(zoneGate.detail)}</span>
             <span class="tag ${toneClass(shadowDisagreement.tone)}">shadow ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))} / ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}</span>
+            <span class="tag ${toneClass(poseSurface.tone)}">pose/fp2 ${escapeHtml(poseSurface.label)} / ${escapeHtml(poseSurface.summary || 'нет данных')}</span>
             <span class="tag tone-info">support‑path ${escapeHtml(getSupportStatusText({ ...support, status: support.candidateStatus || support.status }))}</span>
           </div>
         </div>
@@ -2628,6 +2726,7 @@ export class CsiOperatorApp {
             <div class="kv"><span>PPS / возраст окна</span><strong>${escapeHtml(formatNumber(runtimeView.packetsPerSecond, 1))} / ${escapeHtml(formatRelativeTime(runtimeView.windowAgeSec))}</strong></div>
             <div class="kv"><span>Model</span><strong>${escapeHtml(runtimeView.modelVersion || 'unknown')} / ${escapeHtml(runtimeView.modelLoaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
             <div class="kv"><span>Zone model</span><strong>${escapeHtml(primaryRuntime.zoneModel || 'unknown')} / ${primaryRuntime.zoneProbabilities ? Object.entries(primaryRuntime.zoneProbabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`).join(' / ') : 'нет вероятностей'}</strong></div>
+            <div class="kv"><span>Pose / FP2</span><strong>${escapeHtml(poseSurface.label || 'No data')} / ${escapeHtml(poseSurface.summary || 'нет данных')}</strong></div>
           </div>
           <div class="panel__footer">${escapeHtml(runtimeView.summary)} / ${escapeHtml(zoneGate.state)} · ${escapeHtml(zoneGate.detail)}</div>
         </article>
@@ -2921,6 +3020,14 @@ export class CsiOperatorApp {
         ? buildGarageTrackPolyline(buildGarageTrackPoints(coordinate.motionHistory, smoothedCoordinate, garage))
         : null;
     const garageDoor = mapGarageCoordinateToPercent(garage?.door, garage);
+    const garageDoorWidth = garageDoor
+      ? clamp(
+          ((Number(garage?.door?.widthMeters) || DEFAULT_GARAGE_LAYOUT.door.widthMeters)
+            / (Number(garage?.widthMeters) || DEFAULT_GARAGE_LAYOUT.widthMeters)) * 100,
+          12,
+          96
+        )
+      : null;
     const garageZones = getGarageZoneBands(garage);
     const ambiguityZone = garageZones.find((zone) => zone.id === ambiguity.targetZone) || null;
     const garageNodes = Array.isArray(garage?.nodes) ? garage.nodes : [];
@@ -2996,6 +3103,9 @@ export class CsiOperatorApp {
       : diagnosticShadowCoordinate
         ? 'V8 shadow diagnostic target'
         : (shadowPresenceDetected ? 'V8 shadow diagnostics (без active motion)' : getCoordinateSourceText(coordinate));
+    const coordinateDisplayLabel = coordinate?.displayGuided ? 'Координата (guided)' : 'Координата';
+    const coordinateRawAvailable = coordinate?.displayGuided
+      && (coordinate?.rawXcm != null || coordinate?.rawYcm != null);
 
     const motionProbabilities = Object.entries(motion.probabilities || {});
 
@@ -3029,7 +3139,11 @@ export class CsiOperatorApp {
           <div class="panel__headline">${escapeHtml(getFingerprintLabelText(fingerprint))}</div>
           <div class="kv-list">
             <div class="kv"><span>Запас</span><strong>${escapeHtml(getFingerprintMarginText(fingerprint))}</strong></div>
-            <div class="kv"><span>Координата</span><strong>${escapeHtml(formatNumber(coordinate.xCm, 1))} / ${escapeHtml(formatNumber(coordinate.yCm, 1))} см</strong></div>
+            <div class="kv"><span>${escapeHtml(coordinateDisplayLabel)}</span><strong>${escapeHtml(formatNumber(coordinate.xCm, 1))} / ${escapeHtml(formatNumber(coordinate.yCm, 1))} см</strong></div>
+            ${coordinateRawAvailable ? `
+              <div class="kv"><span>Координата raw</span><strong>${escapeHtml(formatNumber(coordinate.rawXcm, 1))} / ${escapeHtml(formatNumber(coordinate.rawYcm, 1))} см</strong></div>
+              <div class="kv"><span>Display mode</span><strong>${escapeHtml(displayToken(coordinate.displayMode || 'raw_coordinate'))} / ${escapeHtml(displayToken(coordinate.displayReason || 'raw_runtime_coordinate'))}</strong></div>
+            ` : ''}
             <div class="kv"><span>Источник координаты</span><strong>${escapeHtml(getCoordinateSourceText(coordinate))}</strong></div>
           </div>
         </article>
@@ -3074,7 +3188,7 @@ export class CsiOperatorApp {
                 <div class="garage-map__ambiguity-zone garage-map__ambiguity-zone--${ambiguityZone.id}" style="top:${ambiguityZone.top}%;height:${ambiguityZone.height}%"></div>
               ` : ''}
               ${garageDoor ? `
-                <div class="garage-map__door" style="left:${garageDoor.left}%;top:${garageDoor.top}%">
+                <div class="garage-map__door" style="left:${garageDoor.left}%;top:${garageDoor.top}%;width:${garageDoorWidth.toFixed(1)}%">
                   <span>дверь</span>
                 </div>
               ` : ''}
@@ -3160,6 +3274,36 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
+          <div class="panel__eyebrow">Позиция (epoch4 RF)</div>
+          ${(() => {
+            const pos = snapshot.live.position;
+            if (!pos) {
+              return '<div class="panel__headline" style="opacity:0.5">Загрузка...</div>';
+            }
+            const confPct = Math.round((pos.confidence || 0) * 100);
+            const confTone = confPct >= 70 ? 'tone-ok' : confPct >= 40 ? 'tone-warn' : 'tone-alert';
+            const posLabel = pos.position || 'unknown';
+            const barWidth = Math.max(5, Math.min(100, confPct));
+            return `
+              <div class="panel__headline ${confTone}" style="font-size:1.4em">${escapeHtml(posLabel.toUpperCase())}</div>
+              <div style="margin:8px 0;background:var(--bg-secondary,#222);border-radius:4px;height:24px;overflow:hidden;position:relative">
+                <div style="width:${barWidth}%;height:100%;background:${confPct >= 70 ? '#4caf50' : confPct >= 40 ? '#ff9800' : '#f44336'};border-radius:4px;transition:width 0.3s"></div>
+                <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-weight:bold;font-size:13px;color:#fff">${confPct}%</span>
+              </div>
+              <div class="kv-list">
+                ${(pos.top3 || []).map((t, i) => `
+                  <div class="kv">
+                    <span>${i === 0 ? '1' : i === 1 ? '2' : '3'}</span>
+                    <strong>${escapeHtml(t.label)} — ${Math.round((t.probability || 0) * 100)}%</strong>
+                  </div>
+                `).join('')}
+                <div class="kv"><span>Ноды</span><strong>${pos.nodes_ready || 0} / ${pos.nodes_total || 7}</strong></div>
+              </div>
+            `;
+          })()}
+        </article>
+
+        <article class="panel">
           <div class="panel__eyebrow">Теневая диагностика</div>
           <div class="diagnostic-grid">
             ${snapshot.live.shadowDiagnostics.map((item) => `
@@ -3200,19 +3344,22 @@ export class CsiOperatorApp {
       </div>
 
       <article class="panel">
-        <div class="panel__eyebrow">Сигнал по каждому узлу</div>
-        <div class="node-table">
-          ${topology.nodes.map((node) => `
-              <div class="node-table__row">
-                <div class="node-table__cell node-table__cell--name">${escapeHtml(node.nodeId)}</div>
-                <div class="node-table__cell">${escapeHtml(node.active == null ? UI_LOCALE.common.unknown : node.active ? UI_LOCALE.common.live : UI_LOCALE.common.idle)}</div>
-                <div class="node-table__cell">${escapeHtml(getNodeSignalScopeText(node))}</div>
-                <div class="node-table__cell">${escapeHtml(getNodePacketText(node))}</div>
-                <div class="node-table__cell">${escapeHtml(getNodeShareText(node))}</div>
-              </div>
-            `).join('')}
+        <div class="panel__eyebrow">Сигнал по каждому узлу — live мониторинг</div>
+        <div id="nodes-live-table" class="node-table">
+          <div class="node-table__row node-table__row--header" style="font-weight:600;opacity:0.7;font-size:11px">
+            <div class="node-table__cell node-table__cell--name">Узел</div>
+            <div class="node-table__cell">Статус</div>
+            <div class="node-table__cell">RSSI</div>
+            <div class="node-table__cell">Amp avg</div>
+            <div class="node-table__cell">Amp max</div>
+            <div class="node-table__cell">CV amp</div>
+            <div class="node-table__cell">Temp var</div>
+            <div class="node-table__cell">Пакеты</div>
+          </div>
+          ${this._renderNodesLiveRows()}
         </div>
-        ${aggregateNodeNote ? `<div class="panel__footer">${escapeHtml(aggregateNodeNote)}</div>` : ''}
+        <div id="nodes-live-position" style="margin-top:8px;font-size:12px;opacity:0.8"></div>
+        <div class="panel__footer">Обновляется каждые 2 сек. CV amp = коэффициент вариации амплитуды. Temp var = временная вариация (маркер движения). V46 drift-robust модель.</div>
       </article>
     `;
   }
@@ -3225,6 +3372,7 @@ export class CsiOperatorApp {
     const v27Binary7NodeShadow = this.snapshot?.live?.v27Binary7NodeShadow || {};
     const zoneCalibrationShadow = this.snapshot?.live?.zoneCalibrationShadow || {};
     const garageRatioV2Shadow = this.snapshot?.live?.garageRatioV2Shadow || {};
+    const emptySubregimeShadow = this.snapshot?.live?.emptySubregimeShadow || {};
     const fewshotCalibration = this.snapshot?.recording?.fewshotCalibration || {};
     const runtimeModels = this.snapshot?.runtimeModels || {};
     const models = Array.isArray(runtimeModels.items) ? runtimeModels.items : [];
@@ -3354,6 +3502,24 @@ export class CsiOperatorApp {
             <div class="kv"><span>Время inference</span><strong>${escapeHtml(formatNumberWithUnit(garageRatioV2Shadow.inferenceMs, { digits: 2, unit: ' ms', missing: 'ещё нет окна' }))}</strong></div>
           </div>
           <div class="panel__footer">Это текущий лучший гаражный shadow‑кандидат. В рантайме он сглаживается только causal‑majority по последним окнам и не меняет production routing Track A / V5.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel__eyebrow">Empty subregime shadow</div>
+          <div class="panel__headline">${escapeHtml(displayMaybeToken(emptySubregimeShadow.predictedClass || emptySubregimeShadow.status || 'unknown'))}</div>
+          <div class="kv-list">
+            <div class="kv"><span>Статус</span><strong>${escapeHtml(displayMaybeToken(emptySubregimeShadow.status || 'unknown'))} / ${escapeHtml(emptySubregimeShadow.loaded ? 'модель загружена' : 'модель не загружена')}</strong></div>
+            <div class="kv"><span>Режим</span><strong>diagnostic shadow / false-occupied empty</strong></div>
+            <div class="kv"><span>Последний класс</span><strong>${escapeHtml(displayMaybeToken(emptySubregimeShadow.predictedClass || 'unknown'))}</strong></div>
+            <div class="kv"><span>Рекомендация</span><strong>${escapeHtml(displayMaybeToken(emptySubregimeShadow.recommendedAction || 'none'))}</strong></div>
+            <div class="kv"><span>Empty-like / canonical / diag</span><strong>${escapeHtml(formatPercent(emptySubregimeShadow.emptyLikeRatio, 0))} / ${escapeHtml(formatPercent(emptySubregimeShadow.canonicalEmptyRatio, 0))} / ${escapeHtml(formatPercent(emptySubregimeShadow.diagEmptyRatio, 0))}</strong></div>
+            <div class="kv"><span>Occupied-anchor</span><strong>${escapeHtml(formatPercent(emptySubregimeShadow.occupiedAnchorRatio, 0))}</strong></div>
+            <div class="kv"><span>Runtime binary</span><strong>${escapeHtml(displayMaybeToken(emptySubregimeShadow.runtimeBinary || 'unknown'))} / ${escapeHtml(formatPercent(emptySubregimeShadow.runtimeBinaryConfidence, 0))}</strong></div>
+            <div class="kv"><span>Rescue runtime</span><strong>${emptySubregimeShadow.rescueEnabled ? 'включён' : 'выключен'} / eligible: ${emptySubregimeShadow.rescueEligible ? 'да' : 'нет'} / applied: ${emptySubregimeShadow.rescueApplied ? 'да' : 'нет'}</strong></div>
+            <div class="kv"><span>Streak rescue</span><strong>${escapeHtml(formatNumber(emptySubregimeShadow.rescueConsecutive))} / ${escapeHtml(formatNumber(emptySubregimeShadow.rescueRequired))}</strong></div>
+            <div class="kv"><span>KNN / centroid</span><strong>${escapeHtml(displayMaybeToken(emptySubregimeShadow.knnPredictedClass || 'unknown'))} / ${escapeHtml(displayMaybeToken(emptySubregimeShadow.centroidPredictedClass || 'unknown'))}</strong></div>
+          </div>
+          <div class="panel__footer">Диагностический слой для пустого подрежима. Он помогает ловить false-occupied empty состояния, но не должен менять production routing, если rescue path отключён.</div>
         </article>
 
         <article class="panel">
@@ -3543,6 +3709,11 @@ export class CsiOperatorApp {
                     <div class="kv"><span>${escapeHtml(UI_LOCALE.models.kindLabel)}</span><strong>${escapeHtml(item.kind || UI_LOCALE.common.unknown)}</strong></div>
                     <div class="kv"><span>Обновлено</span><strong>${escapeHtml(formatTimestamp(item.updatedAt))}</strong></div>
                     <div class="kv"><span>${escapeHtml(UI_LOCALE.models.runtimeScopeLabel)}</span><strong>motion-only runtime</strong></div>
+                    ${item.metrics?.f1_macro != null ? `<div class="kv"><span>F1 (CV)</span><strong>${(item.metrics.f1_macro * 100).toFixed(2)}%</strong></div>` : ''}
+                    ${item.metrics?.mae_combined != null ? `<div class="kv"><span>MAE</span><strong>${item.metrics.mae_combined.toFixed(3)} м</strong></div>` : ''}
+                    ${item.metrics?.empty_accuracy != null ? `<div class="kv"><span>Empty Acc.</span><strong>${(item.metrics.empty_accuracy * 100).toFixed(2)}%</strong></div>` : ''}
+                    ${item.metrics?.n_windows != null ? `<div class="kv"><span>Окон</span><strong>${item.metrics.n_windows}</strong></div>` : ''}
+                    ${item.metrics?.n_recordings != null ? `<div class="kv"><span>Записей</span><strong>${item.metrics.n_recordings}</strong></div>` : ''}
                   </div>
                   <div class="capture-pack__actions">
                     <button
@@ -5280,17 +5451,25 @@ export class CsiOperatorApp {
     );
     const recordingMode = getRecordingMode(recording);
     const fewshotActive = ACTIVE_FEWSHOT_STATUSES.includes(fewshot.status || 'idle');
+    const csiBackendStatus = this.snapshot?.csi?.status || null;
+    const csiBackendMessage = this.snapshot?.csi?.status_message || null;
+    const csiHealthy = csiBackendStatus
+      ? csiBackendStatus === 'healthy'
+      : (Boolean(this.snapshot?.csi?.running) && Boolean(this.snapshot?.csi?.model_loaded));
     const canStart = !fewshotActive
       && !recordingMode
-      && Boolean(this.snapshot?.csi?.running)
-      && Boolean(this.snapshot?.csi?.model_loaded)
+      && csiHealthy
       && liveNodes >= 3;
     const blockedReasons = [];
-    if (!this.snapshot?.csi?.running) {
-      blockedReasons.push('CSI runtime не запущен.');
-    }
-    if (this.snapshot?.csi?.running && !this.snapshot?.csi?.model_loaded) {
-      blockedReasons.push('CSI runtime поднят, но модель не загружена.');
+    if (csiBackendStatus && csiBackendStatus !== 'healthy') {
+      blockedReasons.push(csiBackendMessage || `CSI runtime сейчас в состоянии ${displayToken(csiBackendStatus)}.`);
+    } else {
+      if (!this.snapshot?.csi?.running) {
+        blockedReasons.push('CSI runtime не запущен.');
+      }
+      if (this.snapshot?.csi?.running && !this.snapshot?.csi?.model_loaded) {
+        blockedReasons.push('CSI runtime поднят, но модель не загружена.');
+      }
     }
     if (liveNodes < 3) {
       blockedReasons.push('Нужно минимум 3 активные ноды, чтобы calibration windows были валидны.');

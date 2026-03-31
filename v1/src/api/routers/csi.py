@@ -397,6 +397,108 @@ async def csi_status():
     return csi_prediction_service.get_status()
 
 
+@router.get("/nodes/live")
+async def csi_nodes_live():
+    """Per-node live signal metrics for UI monitoring.
+
+    Returns RSSI, amplitude stats, packet count, and V46 drift-robust features
+    for each of the 7 ESP32 CSI nodes.
+    """
+    import numpy as np
+
+    svc = csi_prediction_service
+    packets = svc._packets
+    now = time.time()
+    start_time = svc._start_time or now
+
+    nodes = []
+    for ip in _EPOCH4_NODE_IPS:
+        pkts = packets.get(ip, [])
+        node_idx = _EPOCH4_NODE_IPS.index(ip)
+        node_id = f"node{node_idx + 1:02d}"
+
+        if not pkts:
+            nodes.append({
+                "node_id": node_id,
+                "ip": ip,
+                "online": False,
+                "packets": 0,
+            })
+            continue
+
+        recent = pkts[-_EPOCH4_WIN:] if len(pkts) >= _EPOCH4_WIN else pkts
+        rssis = np.array([float(r[1]) for r in recent], dtype=np.float64)
+        amp_list = [np.asarray(r[2], dtype=np.float64) for r in recent]
+        last_t = recent[-1][0] + start_time
+        age_sec = now - last_t
+
+        # Amplitude stats
+        if amp_list:
+            all_amp = np.concatenate(amp_list)
+            mean_amp = float(np.mean(all_amp))
+            std_amp = float(np.std(all_amp))
+            max_amp = float(np.max(all_amp))
+        else:
+            mean_amp = std_amp = max_amp = 0.0
+
+        # Per-packet mean amplitude for temporal variance
+        per_pkt_means = [float(np.mean(a)) for a in amp_list if len(a) > 0]
+        temporal_var = float(np.std(per_pkt_means)) if len(per_pkt_means) > 1 else 0.0
+
+        nodes.append({
+            "node_id": node_id,
+            "ip": ip,
+            "online": age_sec < 10.0,
+            "packets": len(pkts),
+            "packets_window": len(recent),
+            "last_age_sec": round(age_sec, 1),
+            "rssi": round(float(np.mean(rssis)), 1),
+            "rssi_std": round(float(np.std(rssis)), 3),
+            "rssi_range": round(float(np.max(rssis) - np.min(rssis)), 1),
+            "amp_mean": round(mean_amp, 2),
+            "amp_std": round(std_amp, 2),
+            "amp_max": round(max_amp, 1),
+            "amp_cv": round(std_amp / (mean_amp + 1e-6), 4),
+            "temporal_var": round(temporal_var, 3),
+        })
+
+    # V46 position prediction
+    position_info = {}
+    model, meta = _load_epoch4_model()
+    if model is not None:
+        try:
+            if _epoch4_model_version == "v46":
+                fv, ready = _extract_v46_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
+            elif _epoch4_model_version == "v41":
+                fv, ready = _extract_v41_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
+            else:
+                fv, ready = _extract_legacy_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN, _EPOCH4_NSUB)
+            X = np.array(fv, np.float32).reshape(1, -1)
+            pred = model.predict(X)[0]
+            proba = model.predict_proba(X)[0]
+            label = str(pred)
+            pred_idx = list(model.classes_).index(pred) if hasattr(model, 'classes_') else 0
+            position_info = {
+                "label": label,
+                "confidence": round(float(proba[pred_idx]), 4),
+                "probabilities": {str(c): round(float(p), 4) for c, p in zip(model.classes_, proba)},
+                "model_version": _epoch4_model_version,
+                "nodes_ready": len(ready),
+                "feature_dim": len(fv),
+            }
+        except Exception as e:
+            position_info = {"error": str(e)}
+
+    total_online = sum(1 for n in nodes if n.get("online"))
+    return {
+        "nodes": nodes,
+        "total_online": total_online,
+        "total_nodes": len(_EPOCH4_NODE_IPS),
+        "window_size": _EPOCH4_WIN,
+        "position": position_info,
+    }
+
+
 @router.get("/features")
 async def csi_features():
     """Dump the last extracted window features for training data collection.
@@ -1508,7 +1610,7 @@ _EPOCH4_NODE_IPS = [
 _EPOCH4_NSUB = 64
 _EPOCH4_WIN = 7
 _EPOCH4_LABELS = {}
-_epoch4_model_version = None  # "v41" or "legacy"
+_epoch4_model_version = None  # "v46", "v41" or "legacy"
 
 
 def _load_epoch4_model():
@@ -1516,7 +1618,7 @@ def _load_epoch4_model():
     if _epoch4_model is not None:
         return _epoch4_model, _epoch4_meta
 
-    # Try v4.1 model first
+    # Try v4.1/v46 model first
     if _V41_MODEL_PATH.exists():
         import pickle
         with open(_V41_MODEL_PATH, "rb") as f:
@@ -1526,8 +1628,13 @@ def _load_epoch4_model():
         _EPOCH4_LABELS = {i: str(c) for i, c in enumerate(le.classes_)}
         if _V41_META_PATH.exists():
             _epoch4_meta = json.loads(_V41_META_PATH.read_text())
-        _epoch4_model_version = "v41"
-        logger.info("Loaded v4.1 position model (%d classes)", len(_EPOCH4_LABELS))
+        # Detect v46 drift-robust features
+        if bundle.get("version") == "v46" or bundle.get("feature_extractor") == "extract_features_v46":
+            _epoch4_model_version = "v46"
+            logger.info("Loaded v46 drift-robust model (%d classes)", len(_EPOCH4_LABELS))
+        else:
+            _epoch4_model_version = "v41"
+            logger.info("Loaded v4.1 position model (%d classes)", len(_EPOCH4_LABELS))
         return _epoch4_model, _epoch4_meta
 
     # Fallback to legacy model
@@ -1556,6 +1663,73 @@ async def reload_position_model():
     if model is None:
         return {"status": "error", "message": "model file not found"}
     return {"status": "ok", "version": _epoch4_model_version, "classes": _EPOCH4_LABELS, "n_classes": len(_EPOCH4_LABELS)}
+
+
+def _extract_v46_features(packets: dict, node_ips: list[str], win: int) -> tuple[list[float], list[str]]:
+    """Extract 77-dim drift-robust feature vector (11 features per node).
+
+    Uses ratios and variances instead of absolute amplitudes to resist
+    amplitude drift caused by temperature/humidity changes.
+    """
+    import numpy as np
+    fv: list[float] = []
+    ready_nodes: list[str] = []
+    N_FEATS = 11
+
+    for ip in node_ips:
+        if ip not in packets or len(packets[ip]) < win:
+            fv.extend([0.0] * N_FEATS)
+            continue
+
+        recent = packets[ip][-win:]
+        ready_nodes.append(ip)
+        rssis = np.array([float(r[1]) for r in recent], dtype=np.float64)
+        amp_list = [np.asarray(r[2], dtype=np.float64) for r in recent]
+
+        max_sc = max(len(a) for a in amp_list) if amp_list else 0
+        if max_sc == 0:
+            fv.extend([0.0] * N_FEATS)
+            continue
+
+        padded = np.zeros((len(amp_list), max_sc))
+        for i, a in enumerate(amp_list):
+            padded[i, :len(a)] = a
+
+        mean_amp = float(np.mean(padded))
+        std_amp = float(np.std(padded))
+        third = max_sc // 3
+
+        # Per-packet mean amplitudes
+        per_pkt_means = padded.mean(axis=1)
+
+        # Subcarrier profile entropy
+        sc_profile = padded.mean(axis=0)
+        sc_profile_norm = sc_profile / (sc_profile.sum() + 1e-10)
+        sc_entropy = float(-np.sum(sc_profile_norm * np.log(sc_profile_norm + 1e-10)))
+
+        # Temporal variance per subcarrier
+        temporal_var = float(padded.std(axis=0).mean()) if padded.shape[0] > 1 else 0.0
+
+        # IQR
+        q75 = float(np.percentile(padded, 75))
+        q25 = float(np.percentile(padded, 25))
+        median_amp = float(np.median(padded))
+
+        fv.extend([
+            float(np.std(rssis)),                                          # std_rssi
+            std_amp / (mean_amp + 1e-6),                                   # cv_amp
+            float(np.max(padded) - np.min(padded)) / (mean_amp + 1.0),   # amp_range_ratio
+            temporal_var / (mean_amp + 1e-6),                              # temporal_var (normalized)
+            float(np.mean(padded[:, :third])) / (mean_amp + 1.0) if third > 0 else 0.0,  # low_ratio
+            float(np.mean(padded[:, third:2*third])) / (mean_amp + 1.0) if third > 0 else 0.0,  # mid_ratio
+            float(np.mean(padded[:, 2*third:])) / (mean_amp + 1.0) if third > 0 else 0.0,  # high_ratio
+            float(np.std(per_pkt_means)) / (float(np.mean(per_pkt_means)) + 1e-6),  # packet_std_amp
+            sc_entropy,                                                     # subcarrier_entropy
+            float(np.max(rssis) - np.min(rssis)),                          # rssi_range
+            (q75 - q25) / (median_amp + 1.0),                             # amp_iqr_ratio
+        ])
+
+    return fv, ready_nodes
 
 
 def _extract_v41_features(packets: dict, node_ips: list[str], win: int) -> tuple[list[float], list[str]]:
@@ -1663,7 +1837,9 @@ async def get_position_prediction():
     svc = csi_prediction_service
     packets = svc._packets
 
-    if _epoch4_model_version == "v41":
+    if _epoch4_model_version == "v46":
+        fv, ready_nodes = _extract_v46_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
+    elif _epoch4_model_version == "v41":
         fv, ready_nodes = _extract_v41_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
     else:
         fv, ready_nodes = _extract_legacy_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN, _EPOCH4_NSUB)

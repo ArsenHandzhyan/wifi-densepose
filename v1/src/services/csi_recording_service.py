@@ -35,6 +35,11 @@ from .recording_truth_hardening import (
     build_zone_review_autowire_status,
     normalize_motion_type,
 )
+from .csi_management_probe import (
+    build_csi_probe_timeout,
+    infer_csi_status_schema,
+    probe_csi_node_status,
+)
 from .csi_node_inventory import CORE_NODE_IPS, NODE_IPS, NODE_NAMES
 
 logger = logging.getLogger(__name__)
@@ -62,10 +67,10 @@ HOST_SCRIPT_PYTHON = (
     or shutil.which("python3")
     or sys.executable
 )
-POST_START_SIGNAL_GRACE_SEC = float(os.getenv("CSI_POST_START_SIGNAL_GRACE_SEC", "6.0"))
-POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES = int(os.getenv("CSI_POST_START_MIN_ACTIVE_CORE_NODES", "1"))
-POST_START_SIGNAL_MIN_PACKETS = int(os.getenv("CSI_POST_START_MIN_PACKETS", "20"))
-POST_START_SIGNAL_MIN_PPS = float(os.getenv("CSI_POST_START_MIN_PPS", "5.0"))
+POST_START_SIGNAL_GRACE_SEC = float(os.getenv("CSI_POST_START_SIGNAL_GRACE_SEC", "20.0"))
+POST_START_SIGNAL_MIN_ACTIVE_CORE_NODES = int(os.getenv("CSI_POST_START_MIN_ACTIVE_CORE_NODES", "3"))
+POST_START_SIGNAL_MIN_PACKETS = int(os.getenv("CSI_POST_START_MIN_PACKETS", "3"))
+POST_START_SIGNAL_MIN_PPS = float(os.getenv("CSI_POST_START_MIN_PPS", "0.3"))
 
 
 class CsiRecordingService:
@@ -130,6 +135,7 @@ class CsiRecordingService:
         self._stop_reason: str | None = None
         self._truth_hardening: dict[str, Any] | None = None
         self._startup_signal_guard: dict[str, Any] | None = None
+        self._rf_manifest_nodes: dict[str, dict[str, Any]] = {}
 
         # Voice prompt subprocess
         self._say_proc: subprocess.Popen[bytes] | None = None
@@ -187,26 +193,48 @@ class CsiRecordingService:
         import aiohttp
 
         nodes_ok = 0
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
-            for ip in CORE_NODE_IPS:
-                name = NODE_NAMES.get(ip, ip)
-                try:
-                    async with session.get(f"http://{ip}:8080/api/v1/status") as resp:
-                        data = await resp.json()
-                        results["nodes"][name] = {
-                            "ip": ip,
-                            "ok": True,
-                            "uptime": data.get("uptime_sec", 0),
-                            "firmware": data.get("firmware_version", "?"),
-                            "send_errors": data.get("send_errors", 0),
-                        }
-                        nodes_ok += 1
-                except Exception as exc:
-                    results["nodes"][name] = {
-                        "ip": ip,
-                        "ok": False,
-                        "error": str(exc),
-                    }
+        stream_health = {}
+        try:
+            from .csi_prediction_service import csi_prediction_service
+            stream_health = csi_prediction_service.get_node_health()
+        except Exception:
+            stream_health = {}
+        async with aiohttp.ClientSession(timeout=build_csi_probe_timeout()) as session:
+            probe_results = await asyncio.gather(
+                *(probe_csi_node_status(session, ip) for ip in CORE_NODE_IPS)
+            )
+
+        for ip, probe in zip(CORE_NODE_IPS, probe_results):
+            name = NODE_NAMES.get(ip, ip)
+            stream = stream_health.get(name, {})
+            if probe.get("ok"):
+                data = probe.get("data") or {}
+                results["nodes"][name] = {
+                    "ip": ip,
+                    "ok": True,
+                    "uptime": data.get("uptime_sec", 0),
+                    "firmware": data.get("firmware_version", data.get("version", data.get("fw", "?"))),
+                    "send_errors": data.get("send_errors", data.get("send_errors_total", 0)),
+                    "runtime_mode": data.get("runtime_mode"),
+                    "connected_ssid": data.get("connected_ssid"),
+                    "connected_bssid": data.get("connected_bssid"),
+                    "primary_channel": data.get("primary_channel"),
+                    "secondary_channel": data.get("secondary_channel"),
+                    "authmode": data.get("authmode"),
+                    "tx_power_dbm": data.get("tx_power_dbm"),
+                    "stream_status": stream.get("status"),
+                    "last_seen_sec": stream.get("last_seen_sec"),
+                }
+                nodes_ok += 1
+            else:
+                results["nodes"][name] = {
+                    "ip": ip,
+                    "ok": False,
+                    "error": probe.get("error"),
+                    "error_type": probe.get("error_type"),
+                    "stream_status": stream.get("status"),
+                    "last_seen_sec": stream.get("last_seen_sec"),
+                }
 
         if nodes_ok < 3:
             results["ok"] = False
@@ -232,6 +260,183 @@ class CsiRecordingService:
 
         self._preflight = results
         return results
+
+    def _snapshot_rf_manifest_node(self, name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        payload = payload if isinstance(payload, dict) else {}
+        status_schema = payload.get("status_schema")
+        if status_schema is None:
+            status_schema = infer_csi_status_schema(payload)
+        return {
+            "ip": payload.get("ip"),
+            "ok": bool(payload.get("ok")),
+            "runtime_mode": payload.get("runtime_mode"),
+            "connected_ssid": payload.get("connected_ssid"),
+            "connected_bssid": payload.get("connected_bssid"),
+            "primary_channel": payload.get("primary_channel"),
+            "secondary_channel": payload.get("secondary_channel"),
+            "authmode": payload.get("authmode"),
+            "tx_power_dbm": payload.get("tx_power_dbm"),
+            "status_schema": status_schema,
+            "firmware": payload.get("firmware"),
+            "management_error": payload.get("error") or payload.get("management_error"),
+        }
+
+    def _seed_rf_manifest_from_preflight(self) -> None:
+        nodes = self._preflight.get("nodes") if isinstance(self._preflight, dict) else {}
+        if not isinstance(nodes, dict):
+            self._rf_manifest_nodes = {}
+            return
+        self._rf_manifest_nodes = {
+            str(name): self._snapshot_rf_manifest_node(str(name), payload)
+            for name, payload in nodes.items()
+            if isinstance(payload, dict)
+        }
+
+    def _rf_manifest_probe_targets(self) -> list[tuple[str, str]]:
+        targets: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        nodes = self._preflight.get("nodes") if isinstance(self._preflight, dict) else {}
+        if isinstance(nodes, dict):
+            for name, payload in nodes.items():
+                if not isinstance(payload, dict):
+                    continue
+                ip = str(payload.get("ip") or "").strip()
+                if not ip or ip in seen:
+                    continue
+                seen.add(ip)
+                targets.append((str(name), ip))
+
+        for ip in NODE_IPS:
+            if int(self._node_packet_counts.get(ip, 0) or 0) <= 0 or ip in seen:
+                continue
+            seen.add(ip)
+            targets.append((NODE_NAMES.get(ip, ip), ip))
+
+        return targets
+
+    async def _refresh_rf_manifest_snapshot(self) -> None:
+        targets = self._rf_manifest_probe_targets()
+        if not targets:
+            return
+
+        import aiohttp
+
+        async with aiohttp.ClientSession(timeout=build_csi_probe_timeout(total_sec=4.0)) as session:
+            probe_results = await asyncio.gather(
+                *(
+                    probe_csi_node_status(
+                        session,
+                        ip,
+                        attempts=3,
+                        retry_delay_sec=0.35,
+                    )
+                    for _, ip in targets
+                )
+            )
+
+        for (name, ip), probe in zip(targets, probe_results):
+            existing = self._rf_manifest_nodes.get(name) or {}
+            if probe.get("ok"):
+                data = probe.get("data") or {}
+                payload = {
+                    "ip": ip,
+                    "ok": True,
+                    "runtime_mode": data.get("runtime_mode"),
+                    "connected_ssid": data.get("connected_ssid"),
+                    "connected_bssid": data.get("connected_bssid"),
+                    "primary_channel": data.get("primary_channel"),
+                    "secondary_channel": data.get("secondary_channel"),
+                    "authmode": data.get("authmode"),
+                    "tx_power_dbm": data.get("tx_power_dbm"),
+                    "status_schema": infer_csi_status_schema(data),
+                    "firmware": data.get("firmware_version", data.get("version", data.get("fw", "?"))),
+                }
+                self._rf_manifest_nodes[name] = self._snapshot_rf_manifest_node(name, payload)
+                continue
+
+            if existing.get("ok"):
+                continue
+
+            self._rf_manifest_nodes[name] = {
+                **self._snapshot_rf_manifest_node(name, {"ip": ip}),
+                "management_error": probe.get("error"),
+            }
+
+    def _build_rf_manifest(self) -> dict[str, Any]:
+        nodes = self._rf_manifest_nodes
+        if not isinstance(nodes, dict) or not nodes:
+            preflight_nodes = self._preflight.get("nodes") if isinstance(self._preflight, dict) else {}
+            nodes = preflight_nodes if isinstance(preflight_nodes, dict) else {}
+
+        node_entries: dict[str, Any] = {}
+        ok_nodes = 0
+        value_sets: dict[str, set[str]] = {
+            "runtime_mode": set(),
+            "connected_ssid": set(),
+            "connected_bssid": set(),
+            "primary_channel": set(),
+            "secondary_channel": set(),
+            "authmode": set(),
+            "tx_power_dbm": set(),
+        }
+
+        for name, payload in nodes.items():
+            if not isinstance(payload, dict):
+                continue
+            node_entry = {
+                "ip": payload.get("ip"),
+                "ok": bool(payload.get("ok")),
+                "runtime_mode": payload.get("runtime_mode"),
+                "connected_ssid": payload.get("connected_ssid"),
+                "connected_bssid": payload.get("connected_bssid"),
+                "primary_channel": payload.get("primary_channel"),
+                "secondary_channel": payload.get("secondary_channel"),
+                "authmode": payload.get("authmode"),
+                "tx_power_dbm": payload.get("tx_power_dbm"),
+            }
+            node_entries[str(name)] = node_entry
+            if not node_entry["ok"]:
+                continue
+            ok_nodes += 1
+            for key in value_sets:
+                value = node_entry.get(key)
+                if value is None or value == "":
+                    continue
+                value_sets[key].add(str(value))
+
+        consensus: dict[str, Any] = {}
+        mismatches: dict[str, list[str]] = {}
+        for key, values in value_sets.items():
+            if not values:
+                consensus[key] = None
+                continue
+            if len(values) == 1:
+                only = next(iter(values))
+                if key in {"primary_channel", "secondary_channel"}:
+                    try:
+                        consensus[key] = int(only)
+                    except ValueError:
+                        consensus[key] = only
+                elif key == "tx_power_dbm":
+                    try:
+                        consensus[key] = float(only)
+                    except ValueError:
+                        consensus[key] = only
+                else:
+                    consensus[key] = only
+            else:
+                consensus[key] = None
+                mismatches[key] = sorted(values)
+
+        return {
+            "source": "preflight_node_status_enriched",
+            "ok_nodes": ok_nodes,
+            "node_count": len(node_entries),
+            "consensus": consensus,
+            "mismatches": mismatches,
+            "nodes": node_entries,
+        }
 
     # ── Voice prompts ──────────────────────────────────────────────
 
@@ -356,7 +561,10 @@ class CsiRecordingService:
     ) -> dict[str, Any]:
         """Start a new recording session."""
         if self.recording:
-            return {"ok": False, "error": "Already recording"}
+            return self._build_start_error_result(
+                "Already recording",
+                error_code="already_recording",
+            )
 
         try:
             teacher_cfg = self._resolve_teacher_source(
@@ -373,7 +581,10 @@ class CsiRecordingService:
         except ValueError as exc:
             if voice_prompt:
                 self._say("Teacher video настроен неверно. Запись не начата.")
-            return {"ok": False, "error": str(exc)}
+            return self._build_start_error_result(
+                str(exc),
+                error_code="invalid_teacher_config",
+            )
 
         if not skip_preflight:
             pf = await self.preflight_check(
@@ -390,7 +601,11 @@ class CsiRecordingService:
             if not pf["ok"]:
                 if voice_prompt and teacher_cfg["video_required"]:
                     self._say("Teacher video недоступно. Запись не начата.")
-                return {"ok": False, "error": pf.get("error", "Pre-flight failed"), "preflight": pf}
+                return self._build_start_error_result(
+                    pf.get("error", "Pre-flight failed"),
+                    error_code="recording_preflight_failed",
+                    preflight=pf,
+                )
         else:
             pf = {
                 "ok": True,
@@ -400,6 +615,7 @@ class CsiRecordingService:
             self._preflight = pf
 
         self._reset_runtime_state()
+        self._seed_rf_manifest_from_preflight()
         self._session_token += 1
         self.session_label = label
         self.chunk_sec = chunk_sec
@@ -434,7 +650,11 @@ class CsiRecordingService:
             except Exception as exc:
                 if self.voice_prompt_enabled:
                     self._say("Teacher video не стартовал. Запись не начата.")
-                return {"ok": False, "error": f"Teacher source start failed: {exc}", "preflight": self._preflight}
+                return self._build_start_error_result(
+                    f"Teacher source start failed: {exc}",
+                    error_code="teacher_source_start_failed",
+                    preflight=self._preflight,
+                )
 
             self._teacher_handle = handle
             self._video_proc = handle.get("proc")
@@ -449,12 +669,12 @@ class CsiRecordingService:
                 if self.voice_prompt_enabled:
                     self._say("Teacher video не поднялся. Запись не начата.")
                 error = sample.get("error") or "teacher truth layer did not become active in time"
-                return {
-                    "ok": False,
-                    "error": f"Teacher source unavailable at start: {error}",
-                    "preflight": self._preflight,
-                    "teacher_status": sample,
-                }
+                return self._build_start_error_result(
+                    f"Teacher source unavailable at start: {error}",
+                    error_code="teacher_source_unavailable_at_start",
+                    preflight=self._preflight,
+                    teacher_status=sample,
+                )
 
         self.recording = True
         self._session_start = time.time()
@@ -512,8 +732,17 @@ class CsiRecordingService:
         """Stop recording and flush current chunk."""
         if not self.recording:
             if self._last_stop_result:
-                return {**self._last_stop_result, "already_stopped": True}
-            return {"ok": False, "error": "Not recording"}
+                return {
+                    **self._last_stop_result,
+                    "already_stopped": True,
+                    "message": "Recording service is already inactive",
+                }
+            return {
+                "ok": True,
+                "status": "already_stopped",
+                "already_stopped": True,
+                "message": "Recording service is already inactive",
+            }
 
         self.recording = False
         self._teacher_stop_requested = True
@@ -522,6 +751,8 @@ class CsiRecordingService:
         voice_enabled = self.voice_prompt_enabled if voice_prompt is None else bool(voice_prompt)
 
         await self._cancel_background_tasks()
+
+        await self._refresh_rf_manifest_snapshot()
 
         # Flush current chunk (even if < chunk_sec)
         self._flush_chunk(final=True)
@@ -610,11 +841,13 @@ class CsiRecordingService:
         with gzip.open(csi_path, "wt") as handle:
             for ts_ns, ip, raw_data in self._chunk_packets:
                 port = {
-                    "192.168.1.137": 1137,
-                    "192.168.1.117": 1117,
-                    "192.168.1.101": 1101,
-                    "192.168.1.125": 1125,
-                    "192.168.1.33": 1033,
+                    "192.168.0.137": 1137,
+                    "192.168.0.117": 1117,
+                    "192.168.0.143": 1143,
+                    "192.168.0.125": 1125,
+                    "192.168.0.110": 1110,
+                    "192.168.0.132": 1132,
+                    "192.168.0.153": 1153,
                 }.get(ip, 0)
                 record = {
                     "ts_ns": ts_ns,
@@ -652,6 +885,7 @@ class CsiRecordingService:
             "teacher_failure_reason": self._teacher_failure_reason,
             "is_final_chunk": final,
             "recorded_at": datetime.now().isoformat(),
+            "rf_manifest": self._build_rf_manifest(),
         }
 
         summary_path = CAPTURE_DIR / f"{chunk_label}.summary.json"
@@ -1323,6 +1557,7 @@ class CsiRecordingService:
             "person_count_expected": self.person_count,
             "motion_type": self.motion_type,
             "space_id": self.space_id,
+            "rf_manifest": self._build_rf_manifest(),
         }
 
     def _current_truth_coverage_sec(self, end_time: float | None) -> float:
@@ -1473,6 +1708,7 @@ class CsiRecordingService:
         self._last_stop_result = None
         self._stop_reason = None
         self._truth_hardening = None
+        self._rf_manifest_nodes = {}
 
     def _run_json_script(self, script_path: Path, *args: str) -> tuple[bool, dict[str, Any] | None, str | None]:
         completed = subprocess.run(
@@ -1592,15 +1828,150 @@ class CsiRecordingService:
             return None
         return datetime.fromtimestamp(value).isoformat()
 
+    def _build_start_error_result(self, error: str, *, error_code: str, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "error": error,
+            "error_code": error_code,
+        }
+        payload.update(extra)
+        return payload
+
     # ── Status ────────────────────────────────────────────────────
+
+    def _resolve_recording_lifecycle_status(
+        self,
+        *,
+        recording_active: bool,
+        last_stop_result: dict[str, Any] | None,
+        last_session_summary: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        guard = self._startup_signal_guard if isinstance(self._startup_signal_guard, dict) else {}
+        guard_status = str(guard.get("status") or "").strip().lower()
+
+        if recording_active:
+            if guard_status in {"pending", "starting", "probing"}:
+                return {
+                    "status": "starting",
+                    "status_reason": "awaiting_startup_signal_guard",
+                    "status_scope": "current_runtime",
+                    "status_message": "Recording started and is waiting for the post-start CSI guard.",
+                }
+            if self._teacher_degraded or self._teacher_auto_stopped or self._teacher_failure_reason:
+                return {
+                    "status": "degraded",
+                    "status_reason": "teacher_degraded",
+                    "status_scope": "current_runtime",
+                    "status_message": "Recording is active, but teacher truth is degraded.",
+                }
+            return {
+                "status": "recording",
+                "status_reason": "capture_active",
+                "status_scope": "current_runtime",
+                "status_message": "CSI recording is active.",
+            }
+
+        if isinstance(last_session_summary, dict):
+            session_status = str(last_session_summary.get("session_status") or "").strip()
+            if session_status:
+                stop_reason = (
+                    str(last_session_summary.get("stop_reason") or "").strip()
+                    or str((last_stop_result or {}).get("stop_reason") or "").strip()
+                )
+                status_reason = stop_reason or f"last_session_{session_status}"
+                return {
+                    "status": session_status,
+                    "status_reason": status_reason,
+                    "status_scope": "last_session",
+                    "status_message": f"Last recording session finished with status {session_status}.",
+                }
+
+        if isinstance(last_stop_result, dict):
+            last_status = str(last_stop_result.get("status") or "").strip()
+            if last_status == "already_stopped":
+                return {
+                    "status": "inactive",
+                    "status_reason": "already_stopped",
+                    "status_scope": "idle",
+                    "status_message": "Recording service is already inactive.",
+                }
+
+        return {
+            "status": "inactive",
+            "status_reason": "no_active_recording",
+            "status_scope": "idle",
+            "status_message": "Recording service is inactive.",
+        }
+
+    def _recover_last_session_summary_from_disk(self) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            candidates = sorted(
+                CAPTURE_DIR.glob("*.recording_summary.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return None, None
+
+        for path in candidates:
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                return payload, str(path)
+        return None, None
+
+    def _build_last_stop_result_from_summary(
+        self,
+        session_summary: dict[str, Any],
+        *,
+        summary_path: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "label": session_summary.get("label"),
+            "duration_sec": session_summary.get("duration_sec"),
+            "total_chunks": session_summary.get("total_chunks"),
+            "total_packets": session_summary.get("total_packets"),
+            "node_packets": session_summary.get("node_packets"),
+            "last_chunk": None,
+            "status": session_summary.get("session_status"),
+            "stop_reason": session_summary.get("stop_reason"),
+            "session_summary_path": summary_path,
+            "truth_summary": session_summary.get("truth_summary"),
+            "labeling_verdict": session_summary.get("labeling_verdict"),
+            "truth_hardening": session_summary.get("truth_hardening"),
+            "zone_review_packet_path": session_summary.get("zone_review_packet_path"),
+            "recovered_from_disk": True,
+        }
 
     def get_status(self) -> dict:
         """Get recording status for API/UI."""
         last_stop_result = self._last_stop_result
         last_session_summary = self._session_summary
+        if not self.recording and last_session_summary is None:
+            last_session_summary, summary_path = self._recover_last_session_summary_from_disk()
+            if last_session_summary is not None:
+                self._session_summary = last_session_summary
+                if self._session_summary_path is None and summary_path:
+                    self._session_summary_path = Path(summary_path)
+                if last_stop_result is None:
+                    last_stop_result = self._build_last_stop_result_from_summary(
+                        last_session_summary,
+                        summary_path=summary_path,
+                    )
+                    self._last_stop_result = last_stop_result
+        lifecycle = self._resolve_recording_lifecycle_status(
+            recording_active=bool(self.recording),
+            last_stop_result=last_stop_result,
+            last_session_summary=last_session_summary,
+        )
         if not self.recording:
             return {
                 "recording": False,
+                **lifecycle,
                 "preflight": self._preflight,
                 "startup_signal_guard": self._startup_signal_guard,
                 "last_result": last_stop_result,
@@ -1619,6 +1990,7 @@ class CsiRecordingService:
 
         return {
             "recording": True,
+            **lifecycle,
             "label": self.session_label,
             "elapsed_sec": round(elapsed, 1),
             "chunk_num": self._chunk_num,

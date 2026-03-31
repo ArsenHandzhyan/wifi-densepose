@@ -5,6 +5,7 @@ Stop command implementation for WiFi-DensePose API
 import asyncio
 import os
 import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -261,23 +262,111 @@ def send_reload_signal(settings: Settings) -> bool:
         return False
 
 
-async def restart_server(settings: Settings, timeout: int = 30) -> None:
-    """Restart the server (stop then start)."""
-    
+async def restart_server(settings: Settings, timeout: int = 30, *, port: int = 8000) -> None:
+    """Restart the server (stop then start).
+
+    Uses both PID-file and port-based detection to ensure a clean restart
+    regardless of how the previous instance was launched.
+    """
     logger.info("Restarting server...")
-    
-    # Stop server if running
+
+    # 1. Try PID-file based stop first
     if is_server_running(settings):
         await stop_command(settings, timeout=timeout)
-        
-        # Wait for server to stop
         if not await wait_for_server_stop(settings, timeout):
             logger.error("Server did not stop within timeout, forcing restart")
             await stop_command(settings, force=True)
-    
+
+    # 2. Fallback: kill anything still holding the port
+    ensure_port_free(port)
+
     # Start server
     from src.commands.start import start_command
     await start_command(settings)
+
+
+def find_port_holders(port: int) -> list[dict]:
+    """Find all PIDs holding a given port via lsof."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-i", f":{port}", "-P", "-n", "-t"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip().isdigit()]
+        holders = []
+        for pid in set(pids):
+            try:
+                cmd_result = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=3,
+                )
+                holders.append({"pid": pid, "command": cmd_result.stdout.strip()})
+            except Exception:
+                holders.append({"pid": pid, "command": "unknown"})
+        return holders
+    except Exception as e:
+        logger.warning(f"Could not query port {port}: {e}")
+        return []
+
+
+def kill_port_holders(port: int, *, graceful_timeout: float = 5.0) -> list[int]:
+    """Kill all processes holding a given port. Returns list of killed PIDs.
+
+    Sends SIGTERM first, waits up to *graceful_timeout* seconds, then SIGKILL
+    for any survivors. Skips the current process (os.getpid()).
+    """
+    holders = find_port_holders(port)
+    my_pid = os.getpid()
+    killed: list[int] = []
+
+    for h in holders:
+        pid = h["pid"]
+        if pid == my_pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.info("Sent SIGTERM to PID %d (%s) on port %d", pid, h["command"], port)
+            killed.append(pid)
+        except OSError:
+            pass
+
+    if not killed:
+        return killed
+
+    deadline = time.monotonic() + graceful_timeout
+    while time.monotonic() < deadline:
+        still_alive = []
+        for pid in killed:
+            try:
+                os.kill(pid, 0)
+                still_alive.append(pid)
+            except OSError:
+                pass
+        if not still_alive:
+            break
+        time.sleep(0.3)
+    else:
+        for pid in still_alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                logger.warning("Sent SIGKILL to PID %d on port %d", pid, port)
+            except OSError:
+                pass
+
+    logger.info("Killed %d process(es) on port %d", len(killed), port)
+    return killed
+
+
+def ensure_port_free(port: int) -> list[int]:
+    """Ensure *port* has no listeners. Convenience wrapper around kill_port_holders.
+
+    Returns list of PIDs that were killed (empty if port was already free).
+    """
+    holders = find_port_holders(port)
+    if not holders:
+        return []
+    logger.info("Port %d occupied by %d process(es), clearing...", port, len(holders))
+    return kill_port_holders(port)
 
 
 def get_stop_status_summary(settings: Settings) -> dict:

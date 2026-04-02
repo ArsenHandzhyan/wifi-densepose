@@ -9,7 +9,7 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
 import { FP2Tab } from './FP2Tab.js?v=20260327-unified-01';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260329-v44-door-passage-01';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260401-v48-rssi-vote-02';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
 
@@ -1565,6 +1565,16 @@ export class CsiOperatorApp {
     this.signalCoordinateState = null;
     this._nodesLive = null;
     this._nodesLiveTimer = null;
+    this._nodesRssiHistory = {}; // { node_id: [rssi, rssi, ...] } - last 20 values for sparklines
+    // Signal dashboard chart state
+    this._sdCharts = null;
+    this._sdHistory = [];
+    this._sdEvents = [];
+    this._sdLastBinary = null;
+    this._sdSelectedRange = 60;
+    this._sdSparklineData = {};
+    this._sdPollTimer = null;
+    this._sdInitialized = false;
     this.runtimeViewSelection = readUiRuntimeViewSelection();
     this.validationFilter = 'all';
     this.runtimeRecordingUi = {
@@ -1594,6 +1604,9 @@ export class CsiOperatorApp {
       if (tabId === 'labeling') {
         this.renderLabeling();
       }
+      if (tabId === 'signal') {
+        this._initSignalDashboard();
+      }
     });
     this.unsubscribe = this.service.subscribe((snapshot) => {
       this.snapshot = snapshot;
@@ -1604,17 +1617,93 @@ export class CsiOperatorApp {
   }
 
   _startNodesLivePolling() {
+    const SPARKLINE_MAX = 20;
     const poll = async () => {
       try {
         const resp = await fetch('/api/v1/csi/nodes/live');
         if (resp.ok) {
           this._nodesLive = await resp.json();
-          this._renderNodesLiveTable();
+          // Track RSSI history for sparklines
+          if (this._nodesLive?.nodes) {
+            for (const n of this._nodesLive.nodes) {
+              if (!this._nodesRssiHistory[n.node_id]) {
+                this._nodesRssiHistory[n.node_id] = [];
+              }
+              const hist = this._nodesRssiHistory[n.node_id];
+              hist.push(n.rssi != null ? n.rssi : null);
+              if (hist.length > SPARKLINE_MAX) {
+                hist.splice(0, hist.length - SPARKLINE_MAX);
+              }
+            }
+          }
+          this._renderNodesLiveCards();
         }
       } catch (_) { /* ignore */ }
     };
     poll();
-    this._nodesLiveTimer = setInterval(poll, 2000);
+    this._nodesLiveTimer = setInterval(poll, 1500);
+  }
+
+  _rssiColor(rssi) {
+    if (rssi == null) return '#6b7280';
+    if (rssi > -40) return '#22c55e';
+    if (rssi > -55) return '#f59e0b';
+    return '#ef4444';
+  }
+
+  _renderSparkline(nodeId) {
+    const hist = this._nodesRssiHistory[nodeId];
+    if (!hist || hist.length < 2) return '';
+    const BARS = 20;
+    const values = hist.slice(-BARS);
+    const validValues = values.filter((v) => v != null);
+    if (validValues.length < 2) return '';
+    const minR = Math.min(...validValues);
+    const maxR = Math.max(...validValues);
+    const range = Math.max(maxR - minR, 5); // at least 5dBm range
+    return `<div class="node-signal-card__sparkline">${values.map((v) => {
+      if (v == null) return '<div class="node-signal-card__sparkline-bar" style="height:1px;background:#333"></div>';
+      const pct = Math.max(5, ((v - minR) / range) * 100);
+      const color = this._rssiColor(v);
+      return `<div class="node-signal-card__sparkline-bar" style="height:${pct}%;background:${color}"></div>`;
+    }).join('')}</div>`;
+  }
+
+  _renderNodeCard(n) {
+    const online = n.online;
+    const dotColor = online ? '#22c55e' : '#ef4444';
+    const statusLabel = online ? 'online' : (n.packets > 0 ? 'stale' : 'offline');
+    const rssiColor = this._rssiColor(n.rssi);
+    const tvColor = n.temporal_var > 2.0 ? '#ef4444' : n.temporal_var > 0.5 ? '#f59e0b' : '#22c55e';
+    const pps = n.packets_window != null && n.last_age_sec > 0
+      ? Math.round(n.packets_window / Math.max(n.last_age_sec, 1))
+      : null;
+    const lastSeenText = n.last_age_sec != null
+      ? (n.last_age_sec < 2 ? 'только что' : `${n.last_age_sec.toFixed(0)} с назад`)
+      : '—';
+
+    return `
+      <div class="node-signal-card${online ? '' : ' node-signal-card--offline'}">
+        <div class="node-signal-card__header">
+          <div class="node-signal-card__name">
+            <span class="node-signal-card__dot" style="background:${dotColor}"></span>
+            ${escapeHtml(n.node_id)}
+            <span style="font-size:10px;font-weight:400;color:${dotColor}">${statusLabel}</span>
+          </div>
+          <span class="node-signal-card__ip">${escapeHtml(n.ip)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="node-signal-card__rssi-label" style="color:${rssiColor}">${n.rssi != null ? n.rssi + '' : '—'}<small style="font-size:10px;font-weight:400"> dBm</small></span>
+          <div style="flex:1">${this._renderSparkline(n.node_id)}</div>
+        </div>
+        <div class="node-signal-card__metrics">
+          <div class="node-signal-card__metric"><span>amp avg</span><span class="node-signal-card__metric-value">${n.amp_mean != null ? n.amp_mean.toFixed(1) : '—'}</span></div>
+          <div class="node-signal-card__metric"><span>tvar</span><span class="node-signal-card__metric-value" style="color:${tvColor}">${n.temporal_var != null ? n.temporal_var.toFixed(3) : '—'}</span></div>
+          <div class="node-signal-card__metric"><span>пакеты</span><span class="node-signal-card__metric-value">${n.packets || 0}${pps != null ? ' <small style="opacity:0.6">(' + pps + '/с)</small>' : ''}</span></div>
+          <div class="node-signal-card__metric"><span>amp max</span><span class="node-signal-card__metric-value">${n.amp_max != null ? n.amp_max.toFixed(0) : '—'}</span></div>
+        </div>
+        <div class="node-signal-card__last-seen">${escapeHtml(lastSeenText)}</div>
+      </div>`;
   }
 
   _renderNodesLiveRows() {
@@ -1622,26 +1711,7 @@ export class CsiOperatorApp {
     if (!data || !data.nodes) {
       return '<div style="padding:8px;opacity:0.5">Загрузка...</div>';
     }
-    return data.nodes.map((n) => {
-      const online = n.online;
-      const dotColor = online ? '#22c55e' : '#ef4444';
-      const statusText = online ? 'online' : (n.packets > 0 ? 'stale' : 'offline');
-      const rssiBar = n.rssi != null ? this._signalBar(n.rssi, -70, -10) : '';
-      const ampBar = n.amp_mean != null ? this._signalBar(n.amp_mean, 0, 30) : '';
-      const cvColor = n.amp_cv > 1.5 ? '#f59e0b' : n.amp_cv > 0.8 ? '#22c55e' : '#6b7280';
-      const tvColor = n.temporal_var > 2.0 ? '#ef4444' : n.temporal_var > 0.5 ? '#f59e0b' : '#22c55e';
-      return `
-        <div class="node-table__row" style="${!online ? 'opacity:0.4' : ''}">
-          <div class="node-table__cell node-table__cell--name"><span style="color:${dotColor};margin-right:4px">●</span>${escapeHtml(n.node_id)}</div>
-          <div class="node-table__cell" style="color:${dotColor}">${statusText}</div>
-          <div class="node-table__cell">${n.rssi != null ? n.rssi + ' dBm' : '—'}${rssiBar}</div>
-          <div class="node-table__cell">${n.amp_mean != null ? n.amp_mean.toFixed(1) : '—'}${ampBar}</div>
-          <div class="node-table__cell">${n.amp_max != null ? n.amp_max.toFixed(0) : '—'}</div>
-          <div class="node-table__cell" style="color:${cvColor}">${n.amp_cv != null ? n.amp_cv.toFixed(3) : '—'}</div>
-          <div class="node-table__cell" style="color:${tvColor}">${n.temporal_var != null ? n.temporal_var.toFixed(3) : '—'}</div>
-          <div class="node-table__cell">${n.packets || 0}${n.packets_window ? ' / ' + n.packets_window + 'w' : ''}</div>
-        </div>`;
-    }).join('');
+    return data.nodes.map((n) => this._renderNodeCard(n)).join('');
   }
 
   _signalBar(value, min, max) {
@@ -1650,17 +1720,10 @@ export class CsiOperatorApp {
     return `<div style="height:3px;margin-top:2px;background:#333;border-radius:2px"><div style="width:${pct}%;height:100%;background:${color};border-radius:2px"></div></div>`;
   }
 
-  _renderNodesLiveTable() {
-    const el = this.root.querySelector('#nodes-live-table');
+  _renderNodesLiveCards() {
+    const el = this.root.querySelector('#nodes-live-grid');
     if (!el) return;
-    // Keep header, replace data rows
-    const header = el.querySelector('.node-table__row--header');
-    const rows = this._renderNodesLiveRows();
-    if (header) {
-      el.innerHTML = header.outerHTML + rows;
-    } else {
-      el.innerHTML = rows;
-    }
+    el.innerHTML = this._renderNodesLiveRows();
     // Update position info
     const posEl = this.root.querySelector('#nodes-live-position');
     if (posEl && this._nodesLive?.position) {
@@ -1669,7 +1732,7 @@ export class CsiOperatorApp {
         const probsText = p.probabilities
           ? Object.entries(p.probabilities).map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`).join(' / ')
           : '';
-        posEl.innerHTML = `<strong>V46 prediction:</strong> ${escapeHtml(p.label)} (${(p.confidence * 100).toFixed(1)}%) — ${escapeHtml(probsText)} — ${p.nodes_ready}/${this._nodesLive.total_nodes} nodes ready`;
+        posEl.innerHTML = `<strong>V48 prediction:</strong> ${escapeHtml(p.label)} (${(p.confidence * 100).toFixed(1)}%) — ${escapeHtml(probsText)} — ${p.nodes_ready}/${this._nodesLive.total_nodes} nodes ready`;
       } else if (p.error) {
         posEl.innerHTML = `<span style="color:#ef4444">Error: ${escapeHtml(p.error)}</span>`;
       }
@@ -1683,6 +1746,7 @@ export class CsiOperatorApp {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     this.clearForensicSearchPrefetch();
     if (this._nodesLiveTimer) clearInterval(this._nodesLiveTimer);
+    this._destroySignalDashboard();
     this.unsubscribe?.();
     this.service.stop();
   }
@@ -2548,7 +2612,7 @@ export class CsiOperatorApp {
           <div class="summary-card__value">${escapeHtml(String(liveBinaryLabel || 'unknown')).toUpperCase()}</div>
           <div class="summary-card__meta">
             binary ${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.primaryBinaryConfidence ?? primaryRuntime.binaryConfidence, 0))}
-            <br>zone ${escapeHtml(liveZoneLabel)} / ${escapeHtml(formatPercent(primaryRuntime.zoneConfidence, 0))}
+            <br>zone ${escapeHtml(liveZoneLabel)} / ${escapeHtml(primaryRuntime.zoneSource || 'unknown')}${primaryRuntime.n02RssiEma != null ? ` / RSSI ${formatNumber(primaryRuntime.n02RssiEma, 1)}` : ''}
             <br>shadow ${escapeHtml(liveShadowLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.shadowBinaryConfidence, 0))} / ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))} · ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}
           </div>
         </div>
@@ -2718,7 +2782,7 @@ export class CsiOperatorApp {
           <div class="panel__headline">${escapeHtml(String(liveBinaryLabel || 'unknown'))} · ${escapeHtml(liveZoneLabel)}</div>
           <div class="kv-list">
             <div class="kv"><span>Binary</span><strong>${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.primaryBinaryConfidence ?? primaryRuntime.binaryConfidence, 0))}</strong></div>
-            <div class="kv"><span>Zone</span><strong>${escapeHtml(liveZoneLabel)} / ${escapeHtml(formatPercent(primaryRuntime.zoneConfidence, 0))}</strong></div>
+            <div class="kv"><span>Zone</span><strong>${escapeHtml(liveZoneLabel)} / ${escapeHtml(primaryRuntime.zoneSource || 'unknown')}${primaryRuntime.n02RssiEma != null ? ` / RSSI ${formatNumber(primaryRuntime.n02RssiEma, 1)}` : ''}</strong></div>
             <div class="kv"><span>Shadow</span><strong>${escapeHtml(liveShadowLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.shadowBinaryConfidence, 0))} / ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))}</strong></div>
             <div class="kv"><span>Disagreement</span><strong>${escapeHtml(shadowDisagreement.binaryDisagreement ? 'есть' : 'нет')} / ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}</strong></div>
             <div class="kv"><span>Runtime</span><strong>${escapeHtml(runtimeView.label)} / ${escapeHtml(runtimeView.routeLabel)} / ${escapeHtml(runtimeView.running ? UI_LOCALE.common.running : 'offline')}</strong></div>
@@ -3253,11 +3317,15 @@ export class CsiOperatorApp {
                 <strong>${escapeHtml(displayMaybeToken(signalMapZoneLabel))}</strong>
               </div>
               <div class="garage-map__metric">
+                <span>Источник зоны</span>
+                <strong>${escapeHtml(primaryRuntime?.zoneSource || 'unknown')}${primaryRuntime?.n02RssiEma != null ? ` (RSSI n02: ${formatNumber(primaryRuntime.n02RssiEma, 1)} dBm${primaryRuntime?.rssiVotes ? ` / votes: ${escapeHtml(primaryRuntime.rssiVotes)}` : ''})` : ''}</strong>
+              </div>
+              <div class="garage-map__metric">
                 <span>Координата</span>
                 <strong>${escapeHtml(formatNumber(displayCoordinateXcm, 1))} / ${escapeHtml(formatNumber(displayCoordinateYcm, 1))} см</strong>
               </div>
               <div class="garage-map__metric">
-                <span>Источник</span>
+                <span>Источник координат</span>
                 <strong>${escapeHtml(displayCoordinateSource)}</strong>
               </div>
               <div class="garage-map__metric">
@@ -3344,24 +3412,559 @@ export class CsiOperatorApp {
       </div>
 
       <article class="panel">
-        <div class="panel__eyebrow">Сигнал по каждому узлу — live мониторинг</div>
-        <div id="nodes-live-table" class="node-table">
-          <div class="node-table__row node-table__row--header" style="font-weight:600;opacity:0.7;font-size:11px">
-            <div class="node-table__cell node-table__cell--name">Узел</div>
-            <div class="node-table__cell">Статус</div>
-            <div class="node-table__cell">RSSI</div>
-            <div class="node-table__cell">Amp avg</div>
-            <div class="node-table__cell">Amp max</div>
-            <div class="node-table__cell">CV amp</div>
-            <div class="node-table__cell">Temp var</div>
-            <div class="node-table__cell">Пакеты</div>
-          </div>
+        <div class="panel__eyebrow">Сигнал по каждому узлу — live мониторинг (7 ESP32)</div>
+        <div id="nodes-live-grid" class="node-signal-grid">
           ${this._renderNodesLiveRows()}
         </div>
         <div id="nodes-live-position" style="margin-top:8px;font-size:12px;opacity:0.8"></div>
-        <div class="panel__footer">Обновляется каждые 2 сек. CV amp = коэффициент вариации амплитуды. Temp var = временная вариация (маркер движения). V46 drift-robust модель.</div>
+        <div class="panel__footer">Обновляется каждые 1.5 сек. RSSI: зелёный > -40, жёлтый -40..-55, красный < -55 dBм. tvar = временная вариация (маркер движения). Sparkline = история RSSI (20 точек).</div>
       </article>
+
+      <div class="signal-dashboard" id="signal-dashboard">
+        <article class="panel">
+          <div class="panel__eyebrow">Дашборд сигналов — временные ряды</div>
+          <div class="signal-dashboard__time-range" id="sd-time-range">
+            <label>Диапазон:</label>
+            <button class="signal-dashboard__range-btn active" data-sd-range="60">1 мин</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="300">5 мин</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="900">15 мин</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="3600">1 час</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="21600">6 часов</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="86400">24 часа</button>
+            <button class="signal-dashboard__range-btn" data-sd-range="0">Вся история</button>
+            <span class="signal-dashboard__range-info" id="sd-range-info">--</span>
+          </div>
+        </article>
+
+        <div class="signal-dashboard__node-cards" id="sd-node-cards"></div>
+
+        <div class="signal-dashboard__charts">
+          <div class="sd-chart-panel"><h3>A. RSSI по узлам (дБм)</h3><canvas id="sd-chart-rssi"></canvas></div>
+          <div class="sd-chart-panel"><h3>B. Амплитуда по узлам</h3><canvas id="sd-chart-amp"></canvas></div>
+          <div class="sd-chart-panel"><h3>C. Temporal Variance по узлам</h3><canvas id="sd-chart-tvar"></canvas></div>
+          <div class="sd-chart-panel"><h3>D. Корреляции между узлами</h3><canvas id="sd-chart-corr"></canvas></div>
+          <div class="sd-chart-panel"><h3>E. Phase STD по узлам</h3><canvas id="sd-chart-phase"></canvas></div>
+          <div class="sd-chart-panel"><h3>F. Бинарное предсказание (занятость)</h3><canvas id="sd-chart-binary"></canvas></div>
+        </div>
+
+        <div class="signal-dashboard__event-log">
+          <h3>
+            <span>Журнал событий (переходы)</span>
+            <span id="sd-event-count" style="font-weight:400; font-size:11px; color:var(--operator-text-muted)">0 событий</span>
+          </h3>
+          <div class="sd-event-log" id="sd-event-log">
+            <div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Ожидание данных...</div>
+          </div>
+        </div>
+      </div>
     `;
+    this._initSignalDashboard();
+  }
+
+  // ============================================================
+  //  Signal Dashboard — Chart.js time-series monitor
+  // ============================================================
+
+  _SD_NODE_IDS = ['node01','node02','node03','node04','node05','node06','node07'];
+  _SD_NODE_IPS = ['192.168.0.137','192.168.0.117','192.168.0.143','192.168.0.125','192.168.0.110','192.168.0.132','192.168.0.153'];
+  _SD_NODE_COLORS = ['#4fc3f7','#ff9800','#56f39a','#f06292','#ab47bc','#ffc107','#00e5ff'];
+  _SD_CORR_PAIRS = [['node04','node05'],['node03','node06'],['node05','node06'],['node01','node03'],['node02','node04']];
+  _SD_CORR_COLORS = ['#4fc3f7','#ff9800','#56f39a','#f06292','#ab47bc'];
+  _SD_MAX_HISTORY = 100000;
+  _SD_SPARKLINE_LEN = 50;
+  _SD_LS_KEY = 'csi_signal_history';
+  _SD_POLL_MS = 2000;
+
+  _initSignalDashboard() {
+    if (typeof Chart === 'undefined') return;
+    // Avoid re-init on every render — only init charts once, then update data
+    if (this._sdInitialized && this._sdCharts) {
+      this._sdUpdateCharts();
+      this._sdRenderNodeCards();
+      this._sdRenderEventLog();
+      this._sdBindTimeRange();
+      return;
+    }
+    this._sdLoadHistory();
+    this._sdInitNodeCards();
+    this._sdInitCharts();
+    this._sdBindTimeRange();
+    this._sdRenderEventLog();
+    // Restore sparklines from recent history
+    if (this._sdHistory.length > 0) {
+      const recent = this._sdHistory.slice(-this._SD_SPARKLINE_LEN);
+      recent.forEach(entry => {
+        this._SD_NODE_IDS.forEach(nid => {
+          if (!this._sdSparklineData[nid]) this._sdSparklineData[nid] = [];
+          if (entry.node_rssi && entry.node_rssi[nid] != null) {
+            this._sdSparklineData[nid].push(entry.node_rssi[nid]);
+          }
+        });
+      });
+      this._SD_NODE_IDS.forEach(nid => {
+        if (this._sdSparklineData[nid]) {
+          this._sdSparklineData[nid] = this._sdSparklineData[nid].slice(-this._SD_SPARKLINE_LEN);
+        }
+      });
+      this._sdUpdateCharts();
+    }
+    // Start independent polling for dashboard
+    if (!this._sdPollTimer) {
+      this._sdPollData();
+      this._sdPollTimer = setInterval(() => this._sdPollData(), this._SD_POLL_MS);
+    }
+    this._sdInitialized = true;
+  }
+
+  _destroySignalDashboard() {
+    if (this._sdPollTimer) {
+      clearInterval(this._sdPollTimer);
+      this._sdPollTimer = null;
+    }
+    if (this._sdCharts) {
+      Object.values(this._sdCharts).forEach(c => { try { c.destroy(); } catch(_){} });
+      this._sdCharts = null;
+    }
+    this._sdInitialized = false;
+  }
+
+  _sdLoadHistory() {
+    try {
+      const raw = localStorage.getItem(this._SD_LS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) this._sdHistory = parsed;
+      }
+      const evRaw = localStorage.getItem(this._SD_LS_KEY + '_events');
+      if (evRaw) {
+        const parsed = JSON.parse(evRaw);
+        if (Array.isArray(parsed)) this._sdEvents = parsed;
+      }
+    } catch(_) {}
+    // Restore last binary state
+    if (this._sdHistory.length > 0) {
+      const last = this._sdHistory[this._sdHistory.length - 1];
+      if (last.binary_prob != null) {
+        this._sdLastBinary = last.binary_prob >= 0.25 ? 'occupied' : 'empty';
+      }
+    }
+  }
+
+  _sdSaveHistory() {
+    try {
+      if (this._sdHistory.length > this._SD_MAX_HISTORY) {
+        this._sdHistory = this._sdHistory.slice(this._sdHistory.length - this._SD_MAX_HISTORY);
+      }
+      localStorage.setItem(this._SD_LS_KEY, JSON.stringify(this._sdHistory));
+      localStorage.setItem(this._SD_LS_KEY + '_events', JSON.stringify(this._sdEvents.slice(-500)));
+    } catch(_) {}
+  }
+
+  _sdInitNodeCards() {
+    const container = this.root.querySelector('#sd-node-cards');
+    if (!container) return;
+    this._SD_NODE_IDS.forEach(nid => {
+      if (!this._sdSparklineData[nid]) this._sdSparklineData[nid] = [];
+    });
+    this._sdRenderNodeCards();
+  }
+
+  _sdRenderNodeCards() {
+    const container = this.root.querySelector('#sd-node-cards');
+    if (!container) return;
+    container.innerHTML = this._SD_NODE_IDS.map((id, i) => `
+      <div class="sd-node-card offline" id="sd-nc-${id}">
+        <div class="sd-node-card__header">
+          <div>
+            <span class="sd-node-card__name" style="color:${this._SD_NODE_COLORS[i]}">${id}</span>
+            <span class="sd-node-card__ip">${this._SD_NODE_IPS[i]}</span>
+          </div>
+          <span class="sd-node-card__status offline" id="sd-nc-st-${id}">OFFLINE</span>
+        </div>
+        <div class="sd-node-card__metrics">
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">RSSI</span><span class="sd-node-card__metric-value" id="sd-nc-rssi-${id}">--</span></div>
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">Amp</span><span class="sd-node-card__metric-value" id="sd-nc-amp-${id}">--</span></div>
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">Tvar</span><span class="sd-node-card__metric-value" id="sd-nc-tvar-${id}">--</span></div>
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">PhStd</span><span class="sd-node-card__metric-value" id="sd-nc-phase-${id}">--</span></div>
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">PPS</span><span class="sd-node-card__metric-value" id="sd-nc-pps-${id}">--</span></div>
+          <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">Пакеты</span><span class="sd-node-card__metric-value" id="sd-nc-pkts-${id}">--</span></div>
+        </div>
+        <div class="sd-node-card__sparkline"><canvas id="sd-spark-${id}"></canvas></div>
+      </div>
+    `).join('');
+  }
+
+  _sdUpdateNodeCard(nodeId, data) {
+    const card = this.root.querySelector(`#sd-nc-${nodeId}`);
+    const stEl = this.root.querySelector(`#sd-nc-st-${nodeId}`);
+    if (!card || !stEl) return;
+    const rssi = data.rssi;
+    let status = 'offline';
+    if (data.online) status = (rssi != null && rssi > -70) ? 'online' : 'weak';
+    card.className = `sd-node-card ${status}`;
+    stEl.className = `sd-node-card__status ${status}`;
+    stEl.textContent = status === 'online' ? 'OK' : status === 'weak' ? 'WEAK' : 'OFFLINE';
+    const set = (sfx, val) => {
+      const el = this.root.querySelector(`#sd-nc-${sfx}-${nodeId}`);
+      if (el) el.textContent = val;
+    };
+    set('rssi', rssi != null ? `${rssi} дБм` : '--');
+    set('amp', data.amp_mean != null ? data.amp_mean.toFixed(1) : '--');
+    set('tvar', data.temporal_var != null ? data.temporal_var.toFixed(3) : '--');
+    set('phase', data.phase_std != null ? data.phase_std.toFixed(3) : '--');
+    set('pps', data.pps != null ? data.pps.toFixed(1) : '--');
+    set('pkts', data.packets != null ? String(data.packets) : '--');
+    // Sparkline
+    if (rssi != null) {
+      if (!this._sdSparklineData[nodeId]) this._sdSparklineData[nodeId] = [];
+      this._sdSparklineData[nodeId].push(rssi);
+      if (this._sdSparklineData[nodeId].length > this._SD_SPARKLINE_LEN) {
+        this._sdSparklineData[nodeId] = this._sdSparklineData[nodeId].slice(-this._SD_SPARKLINE_LEN);
+      }
+    }
+    this._sdDrawSparkline(nodeId);
+  }
+
+  _sdDrawSparkline(nodeId) {
+    const canvas = this.root.querySelector(`#sd-spark-${nodeId}`);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    if (rect.width < 1) return;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+    const data = this._sdSparklineData[nodeId] || [];
+    if (data.length < 2) return;
+    const min = Math.min(...data) - 2;
+    const max = Math.max(...data) + 2;
+    const range = max - min || 1;
+    const idx = this._SD_NODE_IDS.indexOf(nodeId);
+    const color = this._SD_NODE_COLORS[idx] || '#4fc3f7';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    data.forEach((v, i) => {
+      const x = (i / (data.length - 1)) * w;
+      const y = h - ((v - min) / range) * h;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  _sdMakeChartConfig(yLabel, datasets, suggestedMin, suggestedMax) {
+    return {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: false },
+            ticks: {
+              callback: v => {
+                const d = new Date(v);
+                return d.getHours().toString().padStart(2, '0') + ':' +
+                  d.getMinutes().toString().padStart(2, '0') + ':' +
+                  d.getSeconds().toString().padStart(2, '0');
+              },
+              maxTicksLimit: 8
+            },
+            grid: { color: 'rgba(30,45,74,0.3)' }
+          },
+          y: {
+            title: { display: true, text: yLabel, font: { size: 10 } },
+            suggestedMin, suggestedMax,
+            grid: { color: 'rgba(30,45,74,0.3)' }
+          }
+        },
+        plugins: {
+          legend: { display: true, position: 'top', labels: { boxWidth: 10, padding: 6, font: { size: 9 } } },
+          tooltip: {
+            callbacks: {
+              title: items => {
+                if (!items.length) return '';
+                return new Date(items[0].parsed.x).toLocaleTimeString('ru-RU');
+              }
+            }
+          }
+        },
+        elements: { point: { radius: 0 }, line: { borderWidth: 1.5 } }
+      }
+    };
+  }
+
+  _sdMakeNodeDatasets() {
+    return this._SD_NODE_IDS.map((id, i) => ({
+      label: id,
+      borderColor: this._SD_NODE_COLORS[i],
+      backgroundColor: this._SD_NODE_COLORS[i] + '22',
+      data: [],
+      tension: 0.3
+    }));
+  }
+
+  _sdMakeCorrDatasets() {
+    return this._SD_CORR_PAIRS.map(([a, b], i) => ({
+      label: `${a}-${b}`,
+      borderColor: this._SD_CORR_COLORS[i],
+      backgroundColor: this._SD_CORR_COLORS[i] + '22',
+      data: [],
+      tension: 0.3
+    }));
+  }
+
+  _sdInitCharts() {
+    if (this._sdCharts) {
+      Object.values(this._sdCharts).forEach(c => { try { c.destroy(); } catch(_){} });
+    }
+    Chart.defaults.color = '#91a3bc';
+    Chart.defaults.borderColor = 'rgba(120,145,180,0.12)';
+    Chart.defaults.font.family = "'SF Mono','Fira Code','JetBrains Mono',monospace";
+    Chart.defaults.font.size = 10;
+    const h = 200;
+    this.root.querySelectorAll('.sd-chart-panel canvas').forEach(c => {
+      c.parentElement.style.height = (h + 40) + 'px';
+      c.style.height = h + 'px';
+    });
+    const get = (id) => this.root.querySelector(`#${id}`);
+    this._sdCharts = {};
+    this._sdCharts.rssi = new Chart(get('sd-chart-rssi'), this._sdMakeChartConfig('дБм', this._sdMakeNodeDatasets(), -90, -30));
+    this._sdCharts.amp = new Chart(get('sd-chart-amp'), this._sdMakeChartConfig('Амплитуда', this._sdMakeNodeDatasets(), 0, undefined));
+    this._sdCharts.tvar = new Chart(get('sd-chart-tvar'), this._sdMakeChartConfig('Temporal Var', this._sdMakeNodeDatasets(), 0, undefined));
+    this._sdCharts.corr = new Chart(get('sd-chart-corr'), this._sdMakeChartConfig('Корреляция', this._sdMakeCorrDatasets(), -1, 1));
+    this._sdCharts.phase = new Chart(get('sd-chart-phase'), this._sdMakeChartConfig('Phase STD', this._sdMakeNodeDatasets(), 0, undefined));
+    const binaryDs = [{
+      label: 'P(occupied)',
+      borderColor: '#ff6d87',
+      backgroundColor: 'rgba(255,109,135,0.1)',
+      data: [],
+      fill: true,
+      tension: 0.3
+    }, {
+      label: 'Порог 0.25',
+      borderColor: '#ffb35c',
+      borderDash: [6, 3],
+      data: [],
+      pointRadius: 0,
+      tension: 0
+    }];
+    this._sdCharts.binary = new Chart(get('sd-chart-binary'), this._sdMakeChartConfig('P(occupied)', binaryDs, 0, 1));
+  }
+
+  _sdGetFilteredHistory() {
+    if (this._sdSelectedRange === 0 || this._sdHistory.length === 0) return this._sdHistory;
+    const cutoff = Date.now() - this._sdSelectedRange * 1000;
+    let lo = 0, hi = this._sdHistory.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this._sdHistory[mid].timestamp < cutoff) lo = mid + 1; else hi = mid;
+    }
+    return this._sdHistory.slice(lo);
+  }
+
+  _sdUpdateCharts() {
+    if (!this._sdCharts) return;
+    const filtered = this._sdGetFilteredHistory();
+    if (filtered.length === 0) return;
+    const span = filtered.length > 1 ? (filtered[filtered.length - 1].timestamp - filtered[0].timestamp) / 1000 : 0;
+    const infoEl = this.root.querySelector('#sd-range-info');
+    if (infoEl) infoEl.textContent = `${filtered.length} точек | ${this._sdFormatDuration(span)}`;
+    const rssiData = this._SD_NODE_IDS.map(() => []);
+    const ampData = this._SD_NODE_IDS.map(() => []);
+    const tvarData = this._SD_NODE_IDS.map(() => []);
+    const phaseData = this._SD_NODE_IDS.map(() => []);
+    const corrData = this._SD_CORR_PAIRS.map(() => []);
+    const binaryData = [];
+    const thresholdData = [];
+    const maxPoints = 800;
+    const step = Math.max(1, Math.floor(filtered.length / maxPoints));
+    for (let idx = 0; idx < filtered.length; idx += step) {
+      const entry = filtered[idx];
+      const t = entry.timestamp;
+      this._SD_NODE_IDS.forEach((nid, ni) => {
+        const nr = entry.node_rssi || {};
+        const na = entry.node_amp || {};
+        const nt = entry.node_tvar || {};
+        const np = entry.phase_stds || {};
+        if (nr[nid] != null) rssiData[ni].push({ x: t, y: nr[nid] });
+        if (na[nid] != null) ampData[ni].push({ x: t, y: na[nid] });
+        if (nt[nid] != null) tvarData[ni].push({ x: t, y: nt[nid] });
+        if (np[nid] != null) phaseData[ni].push({ x: t, y: np[nid] });
+      });
+      const corrs = entry.correlations || {};
+      this._SD_CORR_PAIRS.forEach(([a, b], ci) => {
+        const key = `corr_${a}_${b}`;
+        if (corrs[key] != null) corrData[ci].push({ x: t, y: corrs[key] });
+      });
+      if (entry.binary_prob != null) {
+        binaryData.push({ x: t, y: entry.binary_prob });
+        thresholdData.push({ x: t, y: 0.25 });
+      }
+    }
+    this._SD_NODE_IDS.forEach((_, i) => {
+      this._sdCharts.rssi.data.datasets[i].data = rssiData[i];
+      this._sdCharts.amp.data.datasets[i].data = ampData[i];
+      this._sdCharts.tvar.data.datasets[i].data = tvarData[i];
+      this._sdCharts.phase.data.datasets[i].data = phaseData[i];
+    });
+    this._SD_CORR_PAIRS.forEach((_, i) => {
+      this._sdCharts.corr.data.datasets[i].data = corrData[i];
+    });
+    this._sdCharts.binary.data.datasets[0].data = binaryData;
+    this._sdCharts.binary.data.datasets[1].data = thresholdData;
+    Object.values(this._sdCharts).forEach(c => c.update('none'));
+  }
+
+  _sdFormatDuration(sec) {
+    if (sec < 60) return `${Math.round(sec)} сек`;
+    if (sec < 3600) return `${Math.round(sec / 60)} мин`;
+    if (sec < 86400) return `${(sec / 3600).toFixed(1)} ч`;
+    return `${(sec / 86400).toFixed(1)} дн`;
+  }
+
+  _sdBindTimeRange() {
+    const container = this.root.querySelector('#sd-time-range');
+    if (!container) return;
+    container.querySelectorAll('.signal-dashboard__range-btn').forEach(btn => {
+      const rangeVal = parseInt(btn.dataset.sdRange);
+      btn.classList.toggle('active', rangeVal === this._sdSelectedRange);
+      // Remove old listener by cloning
+      const newBtn = btn.cloneNode(true);
+      newBtn.classList.toggle('active', rangeVal === this._sdSelectedRange);
+      btn.parentNode.replaceChild(newBtn, btn);
+      newBtn.addEventListener('click', () => {
+        container.querySelectorAll('.signal-dashboard__range-btn').forEach(b => b.classList.remove('active'));
+        newBtn.classList.add('active');
+        this._sdSelectedRange = rangeVal;
+        this._sdUpdateCharts();
+      });
+    });
+  }
+
+  _sdAddEvent(from, to, confidence) {
+    this._sdEvents.push({ from, to, confidence, ts: Date.now() });
+    if (this._sdEvents.length > 500) this._sdEvents = this._sdEvents.slice(-500);
+    this._sdRenderEventLog();
+  }
+
+  _sdRenderEventLog() {
+    const el = this.root.querySelector('#sd-event-log');
+    const countEl = this.root.querySelector('#sd-event-count');
+    if (!el) return;
+    if (countEl) countEl.textContent = `${this._sdEvents.length} событий`;
+    if (this._sdEvents.length === 0) {
+      el.innerHTML = '<div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Ожидание данных...</div>';
+      return;
+    }
+    const recent = this._sdEvents.slice(-50).reverse();
+    el.innerHTML = recent.map(ev => {
+      const d = new Date(ev.ts);
+      const timeStr = d.toLocaleTimeString('ru-RU');
+      const isOccupied = ev.to === 'occupied';
+      return `<div class="sd-event-log__row">
+        <span class="sd-event-log__time">${timeStr}</span>
+        <span class="sd-event-log__arrow ${isOccupied ? 'to-occupied' : 'to-empty'}">${escapeHtml(ev.from)} → ${escapeHtml(ev.to)}</span>
+        <span class="sd-event-log__conf">уверенность: ${(ev.confidence * 100).toFixed(1)}%</span>
+      </div>`;
+    }).join('');
+  }
+
+  async _sdPollData() {
+    const fetchJSON = async (url) => {
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(4000) });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch(_) { return null; }
+    };
+    const [statusData, nodesData, featData] = await Promise.all([
+      fetchJSON('/api/v1/csi/status'),
+      fetchJSON('/api/v1/csi/nodes/live'),
+      fetchJSON('/api/v1/csi/features')
+    ]);
+    const now = Date.now();
+    const entry = {
+      timestamp: now,
+      node_rssi: {},
+      node_amp: {},
+      node_tvar: {},
+      correlations: {},
+      phase_stds: {},
+      binary_prob: null
+    };
+    let binary = 'unknown';
+    let binaryConf = 0;
+    if (statusData) {
+      binary = statusData.binary || 'unknown';
+      binaryConf = parseFloat(statusData.binary_confidence || 0);
+      if (binary === 'occupied') entry.binary_prob = binaryConf;
+      else if (binary === 'empty') entry.binary_prob = 1.0 - binaryConf;
+      else entry.binary_prob = 0.5;
+      if (this._sdLastBinary !== null && this._sdLastBinary !== binary && binary !== 'unknown') {
+        this._sdAddEvent(this._sdLastBinary, binary, binaryConf);
+      }
+      if (binary !== 'unknown') this._sdLastBinary = binary;
+    }
+    if (nodesData && nodesData.nodes) {
+      nodesData.nodes.forEach(n => {
+        const nid = n.node_id;
+        if (!this._SD_NODE_IDS.includes(nid)) return;
+        entry.node_rssi[nid] = n.rssi != null ? n.rssi : null;
+        entry.node_amp[nid] = n.amp_mean != null ? n.amp_mean : null;
+        entry.node_tvar[nid] = n.temporal_var != null ? n.temporal_var : null;
+        const nodePps = n.packets_window != null ? n.packets_window / 2.0 : null;
+        this._sdUpdateNodeCard(nid, {
+          online: n.online,
+          rssi: n.rssi,
+          amp_mean: n.amp_mean,
+          temporal_var: n.temporal_var,
+          phase_std: null,
+          pps: nodePps,
+          packets: n.packets
+        });
+      });
+    }
+    if (featData && featData.features) {
+      const f = featData.features;
+      this._SD_NODE_IDS.forEach((nid, ni) => {
+        const phaseKey = `${nid}_phase_std`;
+        const phaseKey2 = `csi_${nid}_phase_std`;
+        const phaseKey3 = `n${ni}_sq_phase_jump_rate`;
+        const phaseKey4 = `${nid}_phase_coherence`;
+        const val = f[phaseKey] ?? f[phaseKey2] ?? f[phaseKey3] ?? f[phaseKey4] ?? null;
+        if (val != null) {
+          entry.phase_stds[nid] = parseFloat(val);
+          const el = this.root.querySelector(`#sd-nc-phase-${nid}`);
+          if (el) el.textContent = parseFloat(val).toFixed(3);
+        }
+        if (entry.node_rssi[nid] == null && f[`${nid}_rssi_mean`] != null) {
+          entry.node_rssi[nid] = parseFloat(f[`${nid}_rssi_mean`]);
+        }
+        if (entry.node_amp[nid] == null && f[`${nid}_amp_mean`] != null) {
+          entry.node_amp[nid] = parseFloat(f[`${nid}_amp_mean`]);
+        }
+        if (entry.node_tvar[nid] == null && f[`${nid}_tvar`] != null) {
+          entry.node_tvar[nid] = parseFloat(f[`${nid}_tvar`]);
+        }
+      });
+      this._SD_CORR_PAIRS.forEach(([a, b]) => {
+        const key = `corr_${a}_${b}`;
+        const key2 = `corr_${b}_${a}`;
+        const val = f[key] ?? f[key2] ?? null;
+        if (val != null) entry.correlations[key] = parseFloat(val);
+      });
+    }
+    this._sdHistory.push(entry);
+    if (this._sdHistory.length % 10 === 0) this._sdSaveHistory();
+    this._sdUpdateCharts();
   }
 
   renderModel() {

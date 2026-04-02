@@ -4,6 +4,8 @@ Main service orchestrator for WiFi-DensePose API
 
 import asyncio
 import logging
+import os
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
@@ -164,7 +166,17 @@ class ServiceOrchestrator:
             # Start FP2 service (optional)
             if self.fp2_service and hasattr(self.fp2_service, 'start'):
                 await self.fp2_service.start()
-            
+
+            # Start CSI prediction service if enabled
+            if self.settings.csi_pipeline_enabled:
+                try:
+                    from src.services.csi_prediction_service import csi_prediction_service
+                    await csi_prediction_service.ensure_started(interval=2.0)
+                    logger.info("csi_prediction_service started successfully")
+                    await self._maybe_start_continuous_csi_recording()
+                except Exception as e:
+                    logger.warning(f"CSI prediction service failed to start: {e} — continuing without CSI inference")
+
             logger.info("Application services started")
             
         except Exception as e:
@@ -193,6 +205,72 @@ class ServiceOrchestrator:
         except Exception as e:
             logger.error(f"Failed to start background tasks: {e}")
             raise
+
+    async def _maybe_start_continuous_csi_recording(self):
+        """Optionally auto-start always-on CSI archive using the canonical recording service."""
+        enabled = str(os.getenv("CSI_CONTINUOUS_RECORDING_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            return
+
+        from src.services.csi_recording_service import csi_recording_service
+
+        status = csi_recording_service.get_status()
+        if status.get("recording"):
+            logger.info(
+                "Continuous CSI archive not started because recording is already active: %s",
+                status.get("label") or status.get("last_result", {}).get("label"),
+            )
+            return
+
+        prefix = (os.getenv("CSI_CONTINUOUS_RECORDING_LABEL_PREFIX", "continuous_signal_archive") or "continuous_signal_archive").strip()
+        chunk_sec = int(os.getenv("CSI_CONTINUOUS_RECORDING_CHUNK_SEC", "60"))
+        motion_type = os.getenv("CSI_CONTINUOUS_RECORDING_MOTION_TYPE", "continuous_archive")
+        notes = os.getenv("CSI_CONTINUOUS_RECORDING_NOTES", "Automatic always-on CSI archive")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        label = f"{prefix}_{timestamp}"
+        result = await csi_recording_service.start_recording(
+            label=label,
+            chunk_sec=chunk_sec,
+            with_video=False,
+            video_required=False,
+            person_count=None,
+            motion_type=motion_type,
+            notes=notes,
+            voice_prompt=False,
+            skip_preflight=False,
+        )
+        if not result.get("ok") and result.get("error_code") == "recording_preflight_failed":
+            preflight = result.get("preflight") or {}
+            nodes = preflight.get("nodes") if isinstance(preflight, dict) else {}
+            stream_online = sum(
+                1 for node in (nodes or {}).values()
+                if isinstance(node, dict) and node.get("stream_status") == "online"
+            )
+            if stream_online >= 3:
+                logger.warning(
+                    "Continuous CSI archive preflight failed on HTTP node probes, but %s nodes are online in live stream; retrying with skip_preflight and relying on post-start CSI guard",
+                    stream_online,
+                )
+                result = await csi_recording_service.start_recording(
+                    label=label,
+                    chunk_sec=chunk_sec,
+                    with_video=False,
+                    video_required=False,
+                    person_count=None,
+                    motion_type=motion_type,
+                    notes=notes,
+                    voice_prompt=False,
+                    skip_preflight=True,
+                )
+        if result.get("ok"):
+            logger.info("Continuous CSI archive started automatically: %s", label)
+            return
+
+        logger.warning(
+            "Continuous CSI archive failed to start automatically: %s (%s)",
+            result.get("message") or result.get("error") or "unknown error",
+            result.get("error_code") or "unknown_error_code",
+        )
     
     async def _health_check_loop(self):
         """Background health check loop."""
@@ -263,6 +341,17 @@ class ServiceOrchestrator:
     async def _shutdown_application_services(self):
         """Shutdown application-specific services."""
         try:
+            try:
+                from src.services.csi_recording_service import csi_recording_service
+                if csi_recording_service.recording:
+                    await csi_recording_service.stop_recording(
+                        voice_prompt=False,
+                        reason="orchestrator_shutdown",
+                    )
+                    logger.info("Stopped active CSI recording during orchestrator shutdown")
+            except Exception as exc:
+                logger.warning("Failed to stop active CSI recording during shutdown: %s", exc)
+
             # Shutdown services in reverse order
             if self.stream_service and hasattr(self.stream_service, 'shutdown'):
                 await self.stream_service.shutdown()

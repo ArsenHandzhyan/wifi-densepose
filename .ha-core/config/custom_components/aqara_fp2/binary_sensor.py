@@ -10,13 +10,18 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import COORDINATOR, DOMAIN
+from .const import (
+    COORDINATOR,
+    DOMAIN,
+    RESOURCE_GLOBAL_OCCUPANCY,
+    ZONE_OCCUPANCY_PREFIX,
+    ZONE_OCCUPANCY_SUFFIX,
+)
 from .coordinator import AqaraDataCoordinator, extract_params
+from .payload_parser import extract_targets
 
 _LOGGER = logging.getLogger(__name__)
 
-ZONE_PRESENCE_PREFIX = "13."
-ZONE_PRESENCE_SUFFIX = ".85"
 MAX_ZONES = 30
 
 
@@ -48,11 +53,11 @@ async def async_setup_entry(
 
 def _parse_zone_index(res_id: str) -> int | None:
     """Parse zone index from resource ID like '13.1.85'."""
-    if not res_id.startswith(ZONE_PRESENCE_PREFIX):
+    if not res_id.startswith(ZONE_OCCUPANCY_PREFIX):
         return None
-    if not res_id.endswith(ZONE_PRESENCE_SUFFIX):
+    if not res_id.endswith(ZONE_OCCUPANCY_SUFFIX):
         return None
-    middle = res_id[len(ZONE_PRESENCE_PREFIX) : -len(ZONE_PRESENCE_SUFFIX)]
+    middle = res_id[len(ZONE_OCCUPANCY_PREFIX) : -len(ZONE_OCCUPANCY_SUFFIX)]
     try:
         idx = int(middle)
         if 1 <= idx <= MAX_ZONES:
@@ -88,10 +93,48 @@ class AqaraFp2OccupancySensor(CoordinatorEntity, BinarySensorEntity):
 
         params = extract_params(self.coordinator.data)
         for param in params:
-            if param.get("resId") == "0.1.85":
+            if param.get("resId") == RESOURCE_GLOBAL_OCCUPANCY:
                 return param.get("value") == "1"
 
         return False
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Expose structured target/zone metadata for downstream consumers."""
+        if not self.coordinator.data:
+            return None
+
+        params = extract_params(self.coordinator.data)
+        zones = []
+        target_count = 0
+        for param in params:
+            res_id = param.get("resId", "")
+            zone_idx = _parse_zone_index(res_id)
+            if zone_idx is None:
+                continue
+            occupied = param.get("value") == "1"
+            if occupied:
+                target_count += 1
+            zones.append(
+                {
+                    "id": f"zone_{zone_idx}",
+                    "name": f"Zone {zone_idx}",
+                    "occupied": occupied,
+                    "target_count": 1 if occupied else 0,
+                }
+            )
+
+        targets = extract_targets(params)
+        if targets:
+            target_count = len(targets)
+
+        return {
+            "occupancy": bool(self.is_on),
+            "target_count": target_count,
+            "zones": zones,
+            "targets": targets,
+            "aqara_param_count": len(params),
+        }
 
 
 class AqaraFp2ZoneOccupancySensor(CoordinatorEntity, BinarySensorEntity):

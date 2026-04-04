@@ -5,7 +5,6 @@ WebSocket streaming API endpoints
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -14,12 +13,13 @@ from pydantic import BaseModel, Field
 from src.api.dependencies import (
     get_stream_service,
     get_pose_service,
-    get_current_user_ws,
-    require_auth
+    require_auth,
+    require_websocket_auth_if_enabled,
 )
 from src.api.websocket.connection_manager import ConnectionManager
 from src.services.stream_service import StreamService
 from src.services.pose_service import PoseService
+from src.services.runtime_uptime import utc_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -61,6 +61,8 @@ class StreamSubscriptionRequest(BaseModel):
 class StreamStatus(BaseModel):
     """Stream status model."""
     
+    status: str = Field(..., description="Runtime status (healthy, inactive, unhealthy)")
+    message: Optional[str] = Field(default=None, description="Human-readable runtime status detail")
     is_active: bool = Field(..., description="Whether streaming is active")
     connected_clients: int = Field(..., description="Number of connected clients")
     streams: List[Dict[str, Any]] = Field(..., description="Active streams")
@@ -95,16 +97,7 @@ async def websocket_pose_stream(
             return
         
         # Check authentication if enabled
-        from src.config.settings import get_settings
-        settings = get_settings()
-        
-        if settings.enable_authentication and not token:
-            await websocket.send_json({
-                "type": "error",
-                "message": "Authentication token required"
-            })
-            await websocket.close(code=1008)
-            return
+        await require_websocket_auth_if_enabled(token)
         
         # Parse zone IDs
         zone_list = None
@@ -126,7 +119,7 @@ async def websocket_pose_stream(
         await websocket.send_json({
             "type": "connection_established",
             "client_id": client_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "config": {
                 "zone_ids": zone_list,
                 "min_confidence": min_confidence,
@@ -157,6 +150,12 @@ async def websocket_pose_stream(
                     "message": "Internal server error"
                 })
     
+    except HTTPException as exc:
+        await websocket.send_json({
+            "type": "error",
+            "message": exc.detail,
+        })
+        await websocket.close(code=1008)
     except WebSocketDisconnect:
         logger.info(f"WebSocket client {client_id} disconnected")
     except Exception as e:
@@ -179,17 +178,7 @@ async def websocket_events_stream(
     try:
         await websocket.accept()
         
-        # Check authentication if enabled
-        from src.config.settings import get_settings
-        settings = get_settings()
-        
-        if settings.enable_authentication and not token:
-            await websocket.send_json({
-                "type": "error",
-                "message": "Authentication token required"
-            })
-            await websocket.close(code=1008)
-            return
+        await require_websocket_auth_if_enabled(token)
         
         # Parse parameters
         event_list = None
@@ -214,7 +203,7 @@ async def websocket_events_stream(
         await websocket.send_json({
             "type": "connection_established",
             "client_id": client_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "config": {
                 "event_types": event_list,
                 "zone_ids": zone_list
@@ -232,6 +221,12 @@ async def websocket_events_stream(
             except Exception as e:
                 logger.error(f"Error in events WebSocket: {e}")
     
+    except HTTPException as exc:
+        await websocket.send_json({
+            "type": "error",
+            "message": exc.detail,
+        })
+        await websocket.close(code=1008)
     except WebSocketDisconnect:
         logger.info(f"Events WebSocket client {client_id} disconnected")
     except Exception as e:
@@ -248,7 +243,7 @@ async def handle_websocket_message(client_id: str, data: Dict[str, Any], websock
     if message_type == "ping":
         await websocket.send_json({
             "type": "pong",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         })
     
     elif message_type == "update_config":
@@ -258,7 +253,7 @@ async def handle_websocket_message(client_id: str, data: Dict[str, Any], websock
         
         await websocket.send_json({
             "type": "config_updated",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "config": config
         })
     
@@ -267,7 +262,7 @@ async def handle_websocket_message(client_id: str, data: Dict[str, Any], websock
         status = await connection_manager.get_client_status(client_id)
         await websocket.send_json({
             "type": "status",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "status": status
         })
     
@@ -288,12 +283,9 @@ async def get_stream_status(
         status = await stream_service.get_status()
         connections = await connection_manager.get_connection_stats()
         
-        # Calculate uptime (simplified for now)
-        uptime_seconds = 0.0
-        if status.get("running", False):
-            uptime_seconds = 3600.0  # Default 1 hour for demo
-        
         return StreamStatus(
+            status=status.get("status", "unknown"),
+            message=status.get("message"),
             is_active=status.get("running", False),
             connected_clients=connections.get("total_clients", status["connections"]["active"]),
             streams=[{
@@ -301,7 +293,7 @@ async def get_stream_status(
                 "active": status.get("running", False),
                 "buffer_size": status["buffers"]["pose_buffer_size"]
             }],
-            uptime_seconds=uptime_seconds
+            uptime_seconds=float(status.get("uptime_seconds", 0.0))
         )
         
     except Exception as e:
@@ -321,17 +313,20 @@ async def start_streaming(
     try:
         logger.info(f"Starting streaming service by user: {current_user['id']}")
         
-        if await stream_service.is_active():
+        if stream_service.is_active:
             return JSONResponse(
                 status_code=200,
-                content={"message": "Streaming service is already active"}
+                content={
+                    "message": "Streaming service is already active",
+                    "timestamp": utc_now().isoformat(),
+                }
             )
         
         await stream_service.start()
         
         return {
             "message": "Streaming service started successfully",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except Exception as e:
@@ -350,13 +345,24 @@ async def stop_streaming(
     """Stop the streaming service."""
     try:
         logger.info(f"Stopping streaming service by user: {current_user['id']}")
-        
-        await stream_service.stop()
+
+        was_active = stream_service.is_active
+        if was_active:
+            await stream_service.stop()
         await connection_manager.disconnect_all()
-        
+
+        if not was_active:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "message": "Streaming service is already inactive",
+                    "timestamp": utc_now().isoformat(),
+                },
+            )
+
         return {
             "message": "Streaming service stopped successfully",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except Exception as e:
@@ -378,7 +384,7 @@ async def get_connected_clients(
         return {
             "total_clients": len(clients),
             "clients": clients,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except Exception as e:
@@ -408,7 +414,7 @@ async def disconnect_client(
         
         return {
             "message": f"Client {client_id} disconnected successfully",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except HTTPException:
@@ -435,7 +441,7 @@ async def broadcast_message(
         # Add metadata to message
         broadcast_data = {
             **message,
-            "broadcast_timestamp": datetime.utcnow().isoformat(),
+            "broadcast_timestamp": utc_now().isoformat(),
             "sender": current_user["id"]
         }
         
@@ -449,7 +455,7 @@ async def broadcast_message(
         return {
             "message": "Broadcast sent successfully",
             "recipients": sent_count,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except Exception as e:
@@ -468,7 +474,7 @@ async def get_streaming_metrics():
         
         return {
             "metrics": metrics,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }
         
     except Exception as e:

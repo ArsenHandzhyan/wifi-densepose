@@ -8,6 +8,9 @@ CONF_REGION = "region"
 CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_DEVICE_ID = "device_id"
+CONF_APP_ID = "app_id"
+CONF_APP_KEY = "app_key"
+CONF_KEY_ID = "key_id"
 
 PLATFORMS = ["binary_sensor", "sensor"]
 
@@ -23,6 +26,9 @@ API_DOMAINS = {
 
 # Default configuration
 DEFAULT_REGION = "europe"
+DEFAULT_APP_ID = "14781250729668648963a0b3"
+DEFAULT_APP_KEY = "uyx84zj5aym4itdkibvecakrfakm8nlp"
+DEFAULT_KEY_ID = "K.1478125073038168064"
 SCAN_INTERVAL = timedelta(seconds=60)
 SCAN_INTERVAL_BACKOFF = timedelta(minutes=5)
 SCAN_INTERVAL_FATAL = timedelta(minutes=30)
@@ -38,8 +44,15 @@ MONTHLY_QUOTA_MAX = 95_000  # 100K limit, 5K safety margin
 RATE_LIMIT_CODES = {429, 2015, 2016}  # HTTP 429 + Aqara-specific rate limit codes
 
 # Token refresh
-CONF_APP_ID = "app_id"
-CONF_APP_KEY = "app_key"
-CONF_KEY_ID = "key_id"
 TOKEN_REFRESH_INTENT = "config.auth.refreshToken"
 TOKEN_EXPIRY_CODES = {108, 2005}  # Token has expired, AccessToken expired
+
+# Working Aqara query intents for FP2
+DEVICE_INFO_INTENT = "query.device.info"
+RESOURCE_VALUE_INTENT = "query.resource.value"
+
+# Working FP2 resource IDs observed via query.resource.info/value
+RESOURCE_GLOBAL_OCCUPANCY = "3.51.85"
+RESOURCE_LIGHT_LEVEL = "0.4.85"
+ZONE_OCCUPANCY_PREFIX = "3."
+ZONE_OCCUPANCY_SUFFIX = ".85"

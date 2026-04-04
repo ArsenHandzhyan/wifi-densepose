@@ -41,6 +41,7 @@ FP2_PAIRING_CODE = os.environ.get("FP2_HOMEKIT_CODE", "797-12-099")
 FP2_MAC = os.environ.get("FP2_MAC", "54:EF:44:79:E0:03")
 LOCAL_IFACE = os.environ.get("LOCAL_IFACE", "192.168.1.62")
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
+BACKEND_BEARER_TOKEN = os.environ.get("BACKEND_BEARER_TOKEN", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,14 @@ log = logging.getLogger("fp2_hap")
 
 
 # ── HAP Discovery helpers ───────────────────────────────────
+
+def normalize_pairing_data(pairing_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Force restored pairing data to use the current known FP2 network address."""
+    normalized = dict(pairing_data)
+    normalized["AccessoryIP"] = FP2_IP
+    normalized["AccessoryIPs"] = [FP2_IP]
+    normalized["AccessoryPort"] = FP2_PORT
+    return normalized
 
 def build_fp2_service():
     """Build a HomeKitService manually for FP2 (bypasses mDNS)."""
@@ -128,7 +137,7 @@ async def pair_fp2():
     """Pair with FP2 using HomeKit protocol."""
     from aiohomekit.controller.ip import IpController
     from aiohomekit.controller.ip.discovery import IpDiscovery
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
+    from aiohomekit.characteristic_cache import CharacteristicCacheMemory
     from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 
     if PAIRING_DATA_FILE.exists():
@@ -201,7 +210,7 @@ async def pair_fp2():
         return False
     finally:
         await browser.async_cancel()
-        await controller.async_shutdown()
+        await controller.async_stop()
         await azc.async_close()
 
 
@@ -210,7 +219,7 @@ async def pair_fp2():
 async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
     """Connect to paired FP2 and monitor presence data in real-time."""
     from aiohomekit.controller.ip import IpController
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
+    from aiohomekit.characteristic_cache import CharacteristicCacheMemory
     from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 
     if not PAIRING_DATA_FILE.exists():
@@ -218,7 +227,7 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
         log.error("Сначала выполните: python3 %s pair", __file__)
         return
 
-    pairing_data = json.loads(PAIRING_DATA_FILE.read_text())
+    pairing_data = normalize_pairing_data(json.loads(PAIRING_DATA_FILE.read_text()))
     log.info("Загружены данные пейринга")
 
     # Setup
@@ -242,7 +251,7 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
         await controller.async_start()
 
         # Restore pairing
-        pairing = await controller.load_pairing("fp2_sensor", pairing_data)
+        pairing = controller.load_pairing("fp2_sensor", pairing_data)
         log.info("Подключение к FP2 восстановлено")
 
         # Get all accessories info
@@ -348,10 +357,14 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
                         "light_level": light_level,
                         "source": "hap_direct",
                     }
+                    headers = {}
+                    if BACKEND_BEARER_TOKEN:
+                        headers["Authorization"] = f"Bearer {BACKEND_BEARER_TOKEN}"
                     try:
                         async with http_session.post(
                             f"{backend_url}/api/v1/fp2/push",
                             json=payload,
+                            headers=headers or None,
                             timeout=aiohttp.ClientTimeout(total=3),
                         ) as resp:
                             if resp.status != 200:
@@ -373,7 +386,7 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
             await http_session.close()
         await browser.async_cancel()
         try:
-            await controller.async_shutdown()
+            await controller.async_stop()
         except Exception:
             pass
         await azc.async_close()
@@ -384,14 +397,14 @@ async def monitor_fp2(backend_url: Optional[str] = None, interval: float = 1.0):
 async def info_fp2():
     """Show info about paired FP2."""
     from aiohomekit.controller.ip import IpController
-    from aiohomekit.model.characteristics import CharacteristicCacheMemory
+    from aiohomekit.characteristic_cache import CharacteristicCacheMemory
     from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 
     if not PAIRING_DATA_FILE.exists():
         log.error("FP2 не спарен. Сначала: python3 %s pair", __file__)
         return
 
-    pairing_data = json.loads(PAIRING_DATA_FILE.read_text())
+    pairing_data = normalize_pairing_data(json.loads(PAIRING_DATA_FILE.read_text()))
 
     azc = AsyncZeroconf(interfaces=[LOCAL_IFACE])
 
@@ -406,7 +419,7 @@ async def info_fp2():
         char_cache = CharacteristicCacheMemory()
         controller = IpController(char_cache=char_cache, zeroconf_instance=azc)
         await controller.async_start()
-        pairing = await controller.load_pairing("fp2_sensor", pairing_data)
+        pairing = controller.load_pairing("fp2_sensor", pairing_data)
 
         accessories = await pairing.list_accessories_and_characteristics()
 
@@ -430,7 +443,7 @@ async def info_fp2():
 
     finally:
         await browser.async_cancel()
-        await controller.async_shutdown()
+        await controller.async_stop()
         await azc.async_close()
 
 
@@ -485,6 +498,7 @@ def main():
   FP2_PORT         Порт FP2 (по умолчанию: 443)
   FP2_HOMEKIT_CODE Код пейринга (по умолчанию: 797-12-099)
   LOCAL_IFACE      IP локального интерфейса (по умолчанию: 192.168.1.62)
+  BACKEND_BEARER_TOKEN  JWT для /api/v1/fp2/push, если backend auth включён
         """
     )
 

@@ -9,13 +9,17 @@ Supports two data sources:
 import logging
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, Query, HTTPException
 from pydantic import BaseModel
 
-from src.api.dependencies import get_fp2_service
+from src.api.dependencies import (
+    get_fp2_service,
+    require_auth,
+    require_websocket_auth_if_enabled,
+)
 from src.services.fp2_service import FP2Service, FP2Snapshot, FP2Zone, FP2Target
 
 logger = logging.getLogger(__name__)
@@ -24,6 +28,85 @@ router = APIRouter()
 # ── In-memory store for HAP push data ────────────────────────
 _hap_latest: Dict[str, Any] = {}
 _hap_listeners: list = []
+
+
+def _selected_entity_id(fp2_service: FP2Service, entity_id: str | None) -> str:
+    return entity_id or fp2_service.settings.fp2_entity_id
+
+
+def _build_fp2_pose_payload(
+    fp2_service: FP2Service,
+    *,
+    entity_id: str | None = None,
+    snapshot: FP2Snapshot | None = None,
+) -> Dict[str, Any] | None:
+    selected_entity_id = _selected_entity_id(fp2_service, entity_id)
+
+    if not fp2_service.settings.fp2_enabled:
+        payload = fp2_service.snapshot_to_pose_data()
+        payload.setdefault("metadata", {})
+        payload["metadata"].update(
+            {
+                "enabled": False,
+                "entity_id": selected_entity_id,
+                "fp2_state": "disabled",
+                "stale": False,
+                "upstream_available": False,
+            }
+        )
+        return payload
+
+    if snapshot is not None:
+        payload = fp2_service.snapshot_to_pose_data(snapshot)
+        payload.setdefault("metadata", {})
+        payload["metadata"].update(
+            {
+                "enabled": True,
+                "entity_id": selected_entity_id,
+                "fp2_state": "fresh",
+                "stale": False,
+                "upstream_available": True,
+            }
+        )
+        return payload
+
+    cached_snapshot = fp2_service.last_snapshot
+    if cached_snapshot is None:
+        return None
+
+    payload = fp2_service.snapshot_to_pose_data(cached_snapshot)
+    payload.setdefault("metadata", {})
+    payload["metadata"].update(
+        {
+            "enabled": True,
+            "entity_id": selected_entity_id,
+            "fp2_state": "stale_cache",
+            "stale": True,
+            "upstream_available": False,
+            "cached_snapshot_timestamp": cached_snapshot.timestamp.isoformat(),
+        }
+    )
+    if fp2_service.last_error:
+        payload["metadata"]["last_error"] = fp2_service.last_error
+        payload["metadata"]["message"] = "Serving cached FP2 snapshot because upstream is unavailable"
+    return payload
+
+
+def _build_fp2_unavailable_detail(
+    fp2_service: FP2Service,
+    *,
+    entity_id: str | None = None,
+) -> Dict[str, Any]:
+    selected_entity_id = _selected_entity_id(fp2_service, entity_id)
+    return {
+        "error": "fp2_upstream_unavailable",
+        "message": "FP2 upstream unavailable and no cached snapshot is available",
+        "entity_id": selected_entity_id,
+        "enabled": True,
+        "upstream_available": False,
+        "cached_snapshot_available": False,
+        "last_error": fp2_service.last_error,
+    }
 
 
 @router.get("/status")
@@ -43,14 +126,15 @@ async def get_fp2_current_pose_like_data(
 ):
     """Get latest FP2 snapshot converted to pose-like output."""
     if not fp2_service.settings.fp2_enabled:
-        data = fp2_service.snapshot_to_pose_data()
-        data["metadata"]["enabled"] = False
-        return data
+        return _build_fp2_pose_payload(fp2_service, entity_id=entity_id)
 
     snapshot = await fp2_service.fetch_snapshot(entity_id=entity_id)
-    payload = fp2_service.snapshot_to_pose_data(snapshot)
-    payload.setdefault("metadata", {})
-    payload["metadata"]["entity_id"] = entity_id or fp2_service.settings.fp2_entity_id
+    payload = _build_fp2_pose_payload(fp2_service, entity_id=entity_id, snapshot=snapshot)
+    if payload is None:
+        raise HTTPException(
+            status_code=503,
+            detail=_build_fp2_unavailable_detail(fp2_service, entity_id=entity_id),
+        )
     return payload
 
 
@@ -99,18 +183,31 @@ async def websocket_fp2_stream(
         if entity_id:
             while True:
                 snapshot = await fp2_service.fetch_snapshot(entity_id=entity_id)
-                payload = fp2_service.snapshot_to_pose_data(snapshot)
-                payload.setdefault("metadata", {})
-                payload["metadata"]["entity_id"] = entity_id
-                await websocket.send_json(payload)
+                payload = _build_fp2_pose_payload(fp2_service, entity_id=entity_id, snapshot=snapshot)
+                if payload is None:
+                    await websocket.send_json({
+                        "type": "error",
+                        **_build_fp2_unavailable_detail(fp2_service, entity_id=entity_id),
+                    })
+                else:
+                    await websocket.send_json(payload)
                 await asyncio.sleep(fp2_service.settings.fp2_poll_interval)
         else:
             queue = fp2_service.subscribe()
             try:
-                await websocket.send_json(fp2_service.snapshot_to_pose_data())
+                initial_payload = _build_fp2_pose_payload(fp2_service)
+                if initial_payload is not None:
+                    await websocket.send_json(initial_payload)
+                elif fp2_service.last_error:
+                    await websocket.send_json({
+                        "type": "error",
+                        **_build_fp2_unavailable_detail(fp2_service),
+                    })
                 while True:
                     snapshot = await queue.get()
-                    await websocket.send_json(fp2_service.snapshot_to_pose_data(snapshot))
+                    await websocket.send_json(
+                        _build_fp2_pose_payload(fp2_service, snapshot=snapshot)
+                    )
             finally:
                 fp2_service.unsubscribe(queue)
     except WebSocketDisconnect:
@@ -136,7 +233,10 @@ class HAPPushPayload(BaseModel):
 
 
 @router.post("/push")
-async def push_fp2_data(payload: HAPPushPayload):
+async def push_fp2_data(
+    payload: HAPPushPayload,
+    current_user: Optional[Dict[str, Any]] = Depends(require_auth),
+):
     """Receive FP2 data directly from HAP client (scripts/fp2_hap_client.py).
 
     This bypasses HA entirely — the HAP client reads FP2 via HomeKit
@@ -165,7 +265,7 @@ async def push_fp2_data(payload: HAPPushPayload):
             ))
 
     snapshot = FP2Snapshot(
-        timestamp=datetime.fromtimestamp(payload.timestamp),
+        timestamp=datetime.fromtimestamp(payload.timestamp, tz=timezone.utc),
         presence=payload.presence,
         zones=zones,
         targets=targets,
@@ -200,11 +300,14 @@ async def push_fp2_data(payload: HAPPushPayload):
         "presence": payload.presence,
         "zones": len(zones),
         "targets": len(targets),
+        "accepted_by": current_user["id"] if current_user else "anonymous",
     }
 
 
 @router.get("/hap-status")
-async def get_hap_status():
+async def get_hap_status(
+    current_user: Optional[Dict[str, Any]] = Depends(require_auth),
+):
     """Check status of direct HAP connection."""
     snapshot = _hap_latest.get("snapshot")
     updated = _hap_latest.get("updated_at")
@@ -226,11 +329,15 @@ async def get_hap_status():
         "zones": [{"zone_id": z.zone_id, "occupied": z.occupied} for z in snapshot.zones],
         "targets": len(snapshot.targets),
         "source": "hap_direct",
+        "requested_by": current_user["id"] if current_user else "anonymous",
     }
 
 
 @router.websocket("/ws/hap")
-async def websocket_hap_stream(websocket: WebSocket):
+async def websocket_hap_stream(
+    websocket: WebSocket,
+    token: str | None = Query(default=None, description="Authentication token"),
+):
     """WebSocket stream for real-time FP2 data from HAP client."""
     await websocket.accept()
 
@@ -238,6 +345,8 @@ async def websocket_hap_stream(websocket: WebSocket):
     _hap_listeners.append(queue)
 
     try:
+        await require_websocket_auth_if_enabled(token)
+
         # Send current state first
         snapshot = _hap_latest.get("snapshot")
         if snapshot:
@@ -248,6 +357,12 @@ async def websocket_hap_stream(websocket: WebSocket):
             snap = await queue.get()
             fp2_service = get_fp2_service()
             await websocket.send_json(fp2_service.snapshot_to_pose_data(snap))
+    except HTTPException as exc:
+        await websocket.send_json({
+            "type": "error",
+            "message": exc.detail,
+        })
+        await websocket.close(code=1008)
     except WebSocketDisconnect:
         pass
     except Exception as exc:

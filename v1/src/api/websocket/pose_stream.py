@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from src.api.websocket.connection_manager import ConnectionManager
 from src.services.pose_service import PoseService
 from src.services.stream_service import StreamService
+from src.services.runtime_uptime import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ class PoseStreamHandler:
                 
                 # Create structured pose data
                 pose_stream_data = PoseStreamData(
-                    timestamp=datetime.utcnow(),
+                    timestamp=utc_now(),
                     zone_id=zone_id,
                     pose_data=zone_data.get("pose", {}),
                     confidence=zone_data.get("confidence", 0.0),
@@ -194,7 +195,7 @@ class PoseStreamHandler:
                 "max_fps": subscription_config.get("max_fps", 30),
                 "include_metadata": subscription_config.get("include_metadata", True),
                 "stream_types": subscription_config.get("stream_types", ["pose_data"]),
-                "subscribed_at": datetime.utcnow()
+                "subscribed_at": utc_now()
             }
             
             logger.info(f"Updated subscription for client {client_id}")
@@ -204,7 +205,7 @@ class PoseStreamHandler:
                 "type": "subscription_updated",
                 "client_id": client_id,
                 "config": self.subscribers[client_id],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
             
             await self.connection_manager.send_to_client(client_id, confirmation)
@@ -247,7 +248,7 @@ class PoseStreamHandler:
                     "chunk_index": i // chunk_size,
                     "total_chunks": (len(historical_data) + chunk_size - 1) // chunk_size,
                     "data": chunk,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": utc_now().isoformat()
                 }
                 
                 await self.connection_manager.send_to_client(client_id, message)
@@ -260,7 +261,7 @@ class PoseStreamHandler:
                 "type": "historical_data_complete",
                 "zone_id": zone_id,
                 "total_records": len(historical_data),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
             
             await self.connection_manager.send_to_client(client_id, completion_message)
@@ -272,7 +273,7 @@ class PoseStreamHandler:
             error_message = {
                 "type": "error",
                 "message": f"Failed to retrieve historical data: {str(e)}",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
             
             await self.connection_manager.send_to_client(client_id, error_message)
@@ -287,7 +288,7 @@ class PoseStreamHandler:
                 "type": "zone_statistics",
                 "zone_id": zone_id,
                 "statistics": stats,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
             
             await self.connection_manager.send_to_client(client_id, message)
@@ -302,7 +303,7 @@ class PoseStreamHandler:
                 "type": "system_event",
                 "event_type": event_type,
                 "data": event_data,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
             
             # Broadcast to all pose stream clients
@@ -394,7 +395,7 @@ class PoseStreamHandler:
                 },
                 "connections": conn_metrics,
                 "pose_service": pose_metrics,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
         
         except Exception as e:

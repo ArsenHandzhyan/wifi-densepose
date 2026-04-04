@@ -67,19 +67,26 @@ def get_fp2_service() -> FP2Service:
     return FP2Service(settings=settings)
 
 
-@lru_cache()
-def get_csi_training_store_service() -> CSITrainingStoreService:
-    """Get CSI training store service instance."""
-    settings = get_settings()
-    return CSITrainingStoreService(settings=settings)
+_csi_training_store_instance: Optional[CSITrainingStoreService] = None
 
 
-async def get_hardware_service_from_request(request: Request) -> HardwareService:
-    """Prefer the live app hardware service instance bound to app.state."""
-    service = getattr(request.app.state, "hardware_service", None)
-    if service is not None:
-        return service
-    return get_hardware_service()
+async def get_csi_training_store_service() -> CSITrainingStoreService:
+    """Get CSI training store service instance (singleton)."""
+    global _csi_training_store_instance
+    if _csi_training_store_instance is None:
+        settings = get_settings()
+        _csi_training_store_instance = CSITrainingStoreService(settings=settings)
+    await _csi_training_store_instance.ensure_schema()
+    return _csi_training_store_instance
+
+
+def get_hardware_service_from_request(request: Request) -> HardwareService:
+    """Get hardware service from app state (for training endpoints)."""
+    service = getattr(request.app.state, 'hardware_service', None)
+    if service is None:
+        # Fall back to creating one via the cached factory
+        service = get_hardware_service()
+    return service
 
 
 # Authentication dependencies
@@ -469,3 +476,24 @@ async def development_only():
         )
     
     return True
+
+
+async def require_websocket_auth_if_enabled(
+    token: Optional[str] = None
+) -> None:
+    """Require WebSocket authentication only if authentication is enabled."""
+    settings = get_settings()
+    if not settings.enable_authentication:
+        return
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="WebSocket authentication token required"
+        )
+    # Token validation delegated to get_websocket_user
+    user = await get_websocket_user(token)
+    if user is None and settings.enable_authentication:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid WebSocket token"
+        )

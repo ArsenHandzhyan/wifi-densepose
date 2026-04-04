@@ -22,10 +22,16 @@ import requests
 
 # Configuration
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
-HA_TOKEN = os.getenv("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI2NWQ5NjQ1ZmI1NTY0OThiOWEyNjc4ZTg0OTczN2QyNCIsImlhdCI6MTc3MjM3MTQzNCwiZXhwIjoyMDg3NzMxNDM0fQ.qpkDjaOaY4sNzz-lzd5wfVUcJXJnoR5p1ca5wQfF13g")
+HA_TOKEN = os.getenv("HA_TOKEN", "")
 FP2_ENTITY = os.getenv("FP2_ENTITY", "input_boolean.fp2_presence")
 ROUTER_IP = "192.168.1.1"  # Keenetic GIGA
 LOG_FILE = Path(__file__).parent.parent / "data" / "fp2_motion_log.csv"
+
+
+def get_headers() -> dict[str, str]:
+    if not HA_TOKEN:
+        raise RuntimeError("HA_TOKEN environment variable is required")
+    return {"Authorization": f"Bearer {HA_TOKEN}"}
 
 
 def get_fp2_state():
@@ -33,7 +39,7 @@ def get_fp2_state():
     try:
         r = requests.get(
             f"{HA_URL}/api/states/{FP2_ENTITY}",
-            headers={"Authorization": f"Bearer {HA_TOKEN}"},
+            headers=get_headers(),
             timeout=5
         )
         data = r.json()
@@ -88,6 +94,9 @@ def log_event(writer, timestamp, fp2_state, net_stats, event_type=""):
 
 def record_mode(duration=None, interval=0.5):
     """Режим записи данных."""
+    if not HA_TOKEN:
+        raise SystemExit("HA_TOKEN environment variable is required for Home Assistant access")
+
     # Создаём директорию если нужно
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     

@@ -37,7 +37,12 @@ logger = logging.getLogger(__name__)
 PROJECT = Path(__file__).resolve().parents[3]
 
 # CSI parsing constants (mirrored from csi_prediction_service.py)
-CSI_HEADER = 20
+# V1/V2 firmware packet format constants
+CSI_MAGIC_V1 = 0xC5110001
+CSI_MAGIC_V2 = 0xC5110002
+CSI_HEADER_SIZE_V1 = 20  # V1: 20-byte header, no phase data
+CSI_HEADER_SIZE_V2 = 24  # V2: 24-byte header (byte[20]=flags, [21-22]=phase_offset, [23]=reserved)
+CSI_HEADER = CSI_HEADER_SIZE_V1  # backward-compat alias
 RSSI_OFFSET = 16
 
 # Feature keys used for zone fingerprinting (per-node).
@@ -105,12 +110,43 @@ def parse_csi_payload(b64_payload: str) -> tuple[np.ndarray | None, np.ndarray |
     """
     Parse a base64-encoded CSI payload into amplitude, phase arrays, and RSSI.
 
+    Supports V1 (magic=0xC5110001, 20-byte header) and V2 (magic=0xC5110002,
+    24-byte header with flags/phase_offset fields) firmware packet formats.
+
     Returns:
         (amp_64, phase_64, rssi) or (None, None, 0.0) if parsing fails.
     """
+    import struct as _struct
     raw = base64.b64decode(b64_payload)
-    if len(raw) < CSI_HEADER + 40:
+    if len(raw) < 4:
         return None, None, 0.0
+
+    magic = _struct.unpack_from('<I', raw, 0)[0]
+    if magic == CSI_MAGIC_V2:
+        # V2 format: 24-byte header
+        # byte[20] = flags (bit0 = has_phase)
+        # bytes[21-22] = phase_offset (uint16, offset from header end to phase data)
+        # byte[23] = reserved
+        header_size = CSI_HEADER_SIZE_V2
+        if len(raw) < header_size + 40:
+            return None, None, 0.0
+        flags = raw[20]
+        has_hw_phase = bool(flags & 0x01)
+        phase_offset_field = _struct.unpack_from('<H', raw, 21)[0]
+        iq_end = header_size + phase_offset_field if has_hw_phase else len(raw)
+        iq_block = raw[header_size:iq_end][:256]
+    elif magic == CSI_MAGIC_V1:
+        # V1 format: 20-byte header, no dedicated phase data block
+        header_size = CSI_HEADER_SIZE_V1
+        if len(raw) < header_size + 40:
+            return None, None, 0.0
+        iq_block = raw[header_size : header_size + 256]
+    else:
+        # Unknown magic — fall back to legacy V1 behaviour
+        header_size = CSI_HEADER_SIZE_V1
+        if len(raw) < header_size + 40:
+            return None, None, 0.0
+        iq_block = raw[header_size : header_size + 256]
 
     # Extract RSSI from header
     rssi = 0.0
@@ -118,12 +154,11 @@ def parse_csi_payload(b64_payload: str) -> tuple[np.ndarray | None, np.ndarray |
         rssi_byte = raw[RSSI_OFFSET]
         rssi = float(rssi_byte) - 256 if rssi_byte > 127 else float(rssi_byte)
 
-    iq = raw[CSI_HEADER: CSI_HEADER + 256]
-    n = len(iq) // 2
+    n = len(iq_block) // 2
     if n < 40:
         return None, None, rssi
 
-    arr = np.frombuffer(iq[: n * 2], dtype=np.int8).reshape(-1, 2)
+    arr = np.frombuffer(iq_block[: n * 2], dtype=np.int8).reshape(-1, 2)
     i_v = arr[:, 0].astype(np.float32)
     q_v = arr[:, 1].astype(np.float32)
     amp = np.sqrt(i_v ** 2 + q_v ** 2)

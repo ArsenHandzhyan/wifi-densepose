@@ -23,21 +23,24 @@ logging.basicConfig(
 log = logging.getLogger("fp2-bridge")
 
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
-HA_TOKEN = os.getenv("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI0MjM2MTJlYWRkZTA0MTgwYjNhMWM1MTNkMmY4Yjk0YyIsImlhdCI6MTc3MjcxNzU1OSwiZXhwIjoyMDg4MDc3NTU5fQ.9P34mWE4mme3dM79SxTsF6GO7aWagvYo2Dun7S3RC_c")
+HA_TOKEN = os.getenv("HA_TOKEN", "")
 SOURCE_ENTITY = os.getenv("SOURCE_ENTITY", "input_boolean.fp2_presence")
 HOMEBRIDGE_WEBHOOK_URL = os.getenv("HOMEBRIDGE_WEBHOOK_URL", "http://localhost:51828")
 SENSOR_ID = "fp2_motion"
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "2.0"))
 
-HEADERS = {
-    "Authorization": f"Bearer {HA_TOKEN}",
-    "Content-Type": "application/json",
-}
+def get_headers() -> dict[str, str]:
+    if not HA_TOKEN:
+        raise RuntimeError("HA_TOKEN environment variable is required")
+    return {
+        "Authorization": f"Bearer {HA_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
 
 def get_ha_state(entity_id: str) -> str | None:
     try:
-        r = requests.get(f"{HA_URL}/api/states/{entity_id}", headers=HEADERS, timeout=5)
+        r = requests.get(f"{HA_URL}/api/states/{entity_id}", headers=get_headers(), timeout=5)
         if r.status_code == 200:
             return r.json().get("state")
     except Exception as e:
@@ -60,6 +63,9 @@ def send_webhook(state: bool):
 
 
 def main():
+    if not HA_TOKEN:
+        raise SystemExit("HA_TOKEN environment variable is required for Home Assistant access")
+
     log.info("FP2 Bridge starting...")
     log.info("  Source: %s @ %s", SOURCE_ENTITY, HA_URL)
     log.info("  Homebridge webhook: %s", HOMEBRIDGE_WEBHOOK_URL)

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import aiohttp
 
 from src.config.settings import Settings
+from src.services.runtime_uptime import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class FP2Service:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_snapshot: Optional[FP2Snapshot] = None
         self._listeners: List[asyncio.Queue] = []
+        self._ha_token = settings.ha_token
         self._stats = {
             "polls": 0,
             "successful": 0,
@@ -70,14 +72,22 @@ class FP2Service:
         }
 
     @property
+    def last_snapshot(self) -> Optional[FP2Snapshot]:
+        return self._last_snapshot
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._stats.get("last_error")
+
+    @property
     def ha_url(self) -> str:
         return self.settings.ha_url.rstrip("/")
 
     @property
     def headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json"}
-        if self.settings.ha_token:
-            h["Authorization"] = f"Bearer {self.settings.ha_token}"
+        if self._ha_token:
+            h["Authorization"] = f"Bearer {self._ha_token}"
         return h
 
     # ── lifecycle ────────────────────────────────────────────────
@@ -129,11 +139,17 @@ class FP2Service:
                 logger.error("FP2 poll error: %s", exc)
             await asyncio.sleep(self.settings.fp2_poll_interval)
 
+    def _record_fetch_failure(self, message: str) -> None:
+        """Record a handled upstream fetch failure without throwing."""
+        self._stats["failed"] += 1
+        self._stats["last_error"] = message
+
     async def fetch_snapshot(self, entity_id: Optional[str] = None) -> Optional[FP2Snapshot]:
         """Fetch current FP2 state from Home Assistant."""
         self._stats["polls"] += 1
         if self._session is None or self._session.closed:
             await self.initialize()
+        await self._ensure_ha_token()
 
         selected_entity = entity_id or self.settings.fp2_entity_id
         url = f"{self.ha_url}/api/states/{selected_entity}"
@@ -141,19 +157,53 @@ class FP2Service:
         try:
             async with self._session.get(url, headers=self.headers) as resp:
                 if resp.status == 401:
-                    logger.error("HA auth failed — check HA_TOKEN")
-                    return None
+                    refreshed = await self._refresh_ha_access_token()
+                    if refreshed:
+                        async with self._session.get(url, headers=self.headers) as retry_resp:
+                            if retry_resp.status == 401:
+                                message = "ha_auth_failed"
+                                self._record_fetch_failure(message)
+                                logger.error("HA auth failed after refresh attempt")
+                                return None
+                            if retry_resp.status == 404:
+                                message = f"fp2_entity_not_found:{selected_entity}"
+                                self._record_fetch_failure(message)
+                                logger.warning("Entity %s not found in HA", selected_entity)
+                                return None
+                            retry_resp.raise_for_status()
+                            data = await retry_resp.json()
+                    else:
+                        message = "ha_auth_failed"
+                        self._record_fetch_failure(message)
+                        logger.error("HA auth failed — check HA_TOKEN / HA_REFRESH_TOKEN")
+                        return None
                 if resp.status == 404:
+                    message = f"fp2_entity_not_found:{selected_entity}"
+                    self._record_fetch_failure(message)
                     logger.warning("Entity %s not found in HA", selected_entity)
                     return None
-                resp.raise_for_status()
-                data = await resp.json()
+                if resp.status != 401:
+                    resp.raise_for_status()
+                    data = await resp.json()
         except aiohttp.ClientError as exc:
+            self._record_fetch_failure(str(exc))
             logger.debug("HA request failed: %s", exc)
             return None
 
+        entity_state = str(data.get("state", "")).lower()
+        if entity_state in {"unknown", "unavailable"}:
+            message = f"fp2_entity_state_{entity_state}:{selected_entity}"
+            self._record_fetch_failure(message)
+            logger.warning(
+                "FP2 entity %s returned non-live state %s",
+                selected_entity,
+                entity_state,
+            )
+            return None
+
         self._stats["successful"] += 1
-        self._stats["last_poll_time"] = datetime.utcnow().isoformat()
+        self._stats["last_poll_time"] = utc_now().isoformat()
+        self._stats["last_error"] = None
 
         return self._parse_entity(data)
 
@@ -162,20 +212,69 @@ class FP2Service:
         """Fetch all entities that look like FP2 zones/targets."""
         if self._session is None or self._session.closed:
             await self.initialize()
+        await self._ensure_ha_token()
         url = f"{self.ha_url}/api/states"
         try:
             async with self._session.get(url, headers=self.headers) as resp:
+                if resp.status == 401 and await self._refresh_ha_access_token():
+                    async with self._session.get(url, headers=self.headers) as retry_resp:
+                        retry_resp.raise_for_status()
+                        states = await retry_resp.json()
+                    return self._filter_fp2_entities(states)
                 resp.raise_for_status()
                 states = await resp.json()
         except Exception:
             return []
+        return self._filter_fp2_entities(states)
 
+    async def _ensure_ha_token(self) -> None:
+        """Ensure we have an access token when refresh credentials are available."""
+        if self._ha_token:
+            return
+        await self._refresh_ha_access_token()
+
+    async def _refresh_ha_access_token(self) -> bool:
+        """Refresh Home Assistant access token from refresh token."""
+        if self._session is None or self._session.closed:
+            await self.initialize()
+        if not self.settings.ha_refresh_token or not self.settings.ha_client_id:
+            return False
+
+        token_url = f"{self.ha_url}/auth/token"
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": self.settings.ha_client_id,
+            "refresh_token": self.settings.ha_refresh_token,
+        }
+        try:
+            async with self._session.post(
+                token_url,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            ) as resp:
+                if resp.status != 200:
+                    logger.error("HA token refresh failed with HTTP %s", resp.status)
+                    return False
+                payload = await resp.json()
+        except aiohttp.ClientError as exc:
+            logger.error("HA token refresh request failed: %s", exc)
+            return False
+
+        access_token = payload.get("access_token")
+        if not access_token:
+            logger.error("HA token refresh response missing access_token")
+            return False
+        self._ha_token = access_token
+        return True
+
+    def _filter_fp2_entities(self, states: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return entities that match the FP2 naming pattern."""
         fp2_entities = []
         base_name = self.settings.fp2_entity_id.split(".")[-1].replace("_presence", "")
-        for s in states:
-            eid = s.get("entity_id", "")
-            if base_name in eid or "fp2" in eid.lower():
-                fp2_entities.append(s)
+        for state in states:
+            entity_id = state.get("entity_id", "")
+            if base_name in entity_id or "fp2" in entity_id.lower():
+                fp2_entities.append(state)
         return fp2_entities
 
     async def recommend_entity_id(self) -> Optional[str]:
@@ -233,13 +332,13 @@ class FP2Service:
             try:
                 last_updated = datetime.fromisoformat(lu.replace("Z", "+00:00"))
             except Exception:
-                last_updated = datetime.utcnow()
+                last_updated = utc_now()
 
         zones = self._parse_zones(attrs)
         targets = self._parse_targets(attrs, zones)
 
         return FP2Snapshot(
-            timestamp=last_updated or datetime.utcnow(),
+            timestamp=last_updated or utc_now(),
             presence=presence,
             zones=zones,
             targets=targets,
@@ -318,7 +417,7 @@ class FP2Service:
         snap = snapshot or self._last_snapshot
         if snap is None:
             return {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now().isoformat(),
                 "frame_id": "fp2_no_data",
                 "persons": [],
                 "zone_summary": {},
@@ -389,13 +488,52 @@ class FP2Service:
     # ── status ──────────────────────────────────────────────────
 
     async def get_status(self) -> Dict[str, Any]:
+        if not self.settings.fp2_enabled:
+            status = "disabled"
+            message = "FP2 integration is disabled"
+            upstream_available = False
+            stale = False
+        elif self.last_error and self.last_snapshot is not None:
+            status = "degraded"
+            message = "Serving cached FP2 snapshot because upstream is unavailable"
+            upstream_available = False
+            stale = True
+        elif self.last_error:
+            status = "upstream_unavailable"
+            message = self.last_error
+            upstream_available = False
+            stale = False
+        elif self._running and self.last_snapshot is not None:
+            status = "healthy"
+            message = "FP2 polling is healthy"
+            upstream_available = True
+            stale = False
+        elif self._running:
+            status = "initializing"
+            message = "Waiting for first FP2 snapshot"
+            upstream_available = None
+            stale = False
+        elif self.last_snapshot is not None:
+            status = "inactive"
+            message = "FP2 polling is stopped; cached snapshot is available"
+            upstream_available = None
+            stale = True
+        else:
+            status = "inactive"
+            message = "FP2 polling is not running"
+            upstream_available = None
+            stale = False
+
         return {
-            "status": "healthy" if self._running else "stopped",
+            "status": status,
             "running": self._running,
+            "message": message,
+            "upstream_available": upstream_available,
+            "stale": stale,
             "ha_url": self.ha_url,
             "entity_id": self.settings.fp2_entity_id,
-            "last_snapshot": self._last_snapshot.timestamp.isoformat() if self._last_snapshot else None,
-            "presence": self._last_snapshot.presence if self._last_snapshot else None,
+            "last_snapshot": self.last_snapshot.timestamp.isoformat() if self.last_snapshot else None,
+            "presence": self.last_snapshot.presence if self.last_snapshot else None,
             "stats": self._stats,
         }
 

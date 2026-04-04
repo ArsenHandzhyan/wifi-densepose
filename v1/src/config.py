@@ -1,5 +1,9 @@
 """
-Centralized configuration management for WiFi-DensePose API
+Legacy compatibility facade around the canonical `src.config` package.
+
+Current runtime code imports `src.config.settings` and `src.config.domains`
+directly. This module remains only for older helper scripts or imports that
+still expect a single-file configuration surface.
 """
 
 import os

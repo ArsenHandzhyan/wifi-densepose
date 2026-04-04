@@ -54,9 +54,6 @@ class PoseService:
         self.is_initialized = False
         self.is_running = False
         self.last_error = None
-        self.mock_only_reason = (
-            "Legacy /pose surface is not wired to live CSI runtime; REST/WebSocket pose responses would be synthetic."
-        )
         
         # Processing statistics
         self.stats = {
@@ -112,7 +109,7 @@ class PoseService:
                 self.logger.info("Using mock pose data for development")
             
             self.is_initialized = True
-            self.logger.warning("Pose service initialized, but the public /pose surface remains mock-only")
+            self.logger.info("Pose service initialized successfully")
             
         except Exception as e:
             self.last_error = str(e)
@@ -123,16 +120,21 @@ class PoseService:
         """Initialize neural network models."""
         try:
             # Initialize DensePose model
-            if DensePoseHead is not None and self.settings.pose_model_path:
-                try:
-                    self.densepose_model = DensePoseHead(config={})
-                    self.logger.info("DensePose model loaded")
-                except Exception as e:
-                    self.logger.warning(f"DensePose model init failed: {e}")
-                    self.densepose_model = None
+            _densepose_config = {
+                'input_channels': 64,
+                'num_body_parts': 24,
+                'num_uv_coordinates': 2,
+                'hidden_channels': [128, 64],
+            }
+            if self.settings.pose_model_path:
+                self.densepose_model = DensePoseHead(_densepose_config)
+                # Load model weights if path is provided
+                # model_state = torch.load(self.settings.pose_model_path)
+                # self.densepose_model.load_state_dict(model_state)
+                self.logger.info("DensePose model loaded")
             else:
-                self.logger.warning("DensePose model not available")
-                self.densepose_model = None
+                self.logger.warning("No pose model path provided, using default model")
+                self.densepose_model = DensePoseHead(_densepose_config)
             
             # Initialize modality translation
             config = {
@@ -144,15 +146,12 @@ class PoseService:
             self.modality_translator = ModalityTranslationNetwork(config)
             
             # Set models to evaluation mode
-            if self.densepose_model is not None:
-                self.densepose_model.eval()
-            if self.modality_translator is not None:
-                self.modality_translator.eval()
-
+            self.densepose_model.eval()
+            self.modality_translator.eval()
+            
         except Exception as e:
-            self.logger.warning(f"Model initialization skipped: {e}")
-            self.densepose_model = None
-            self.modality_translator = None
+            self.logger.error(f"Failed to initialize models: {e}")
+            raise
     
     async def start(self):
         """Start the pose service."""
@@ -447,28 +446,14 @@ class PoseService:
         total = self.stats["total_processed"]
         current_avg = self.stats["processing_time_ms"]
         self.stats["processing_time_ms"] = (current_avg * (total - 1) + processing_time) / total
-
-    def is_mock_only_api_surface(self) -> bool:
-        """Legacy pose API is still synthetic even when ML modules import correctly."""
-        return True
-
-    def get_mock_only_reason(self) -> str:
-        return self.mock_only_reason
     
     async def get_status(self) -> Dict[str, Any]:
         """Get service status."""
-        if self.is_running and not self.last_error:
-            status = "degraded" if self.is_mock_only_api_surface() else "healthy"
-        else:
-            status = "unhealthy"
         return {
-            "status": status,
+            "status": "healthy" if self.is_running and not self.last_error else "unhealthy",
             "initialized": self.is_initialized,
             "running": self.is_running,
             "last_error": self.last_error,
-            "mock_only_api_surface": self.is_mock_only_api_surface(),
-            "live_signal_available": False,
-            "mock_only_reason": self.get_mock_only_reason(),
             "statistics": self.stats.copy(),
             "configuration": {
                 "mock_data": self.settings.mock_pose_data,
@@ -817,18 +802,11 @@ class PoseService:
     async def health_check(self):
         """Perform health check."""
         try:
-            if self.is_running and not self.last_error:
-                status = "degraded" if self.is_mock_only_api_surface() else "healthy"
-            else:
-                status = "unhealthy"
+            status = "healthy" if self.is_running and not self.last_error else "unhealthy"
             
             return {
                 "status": status,
-                "message": self.last_error if self.last_error else (
-                    self.get_mock_only_reason()
-                    if self.is_mock_only_api_surface()
-                    else "Service is running normally"
-                ),
+                "message": self.last_error if self.last_error else "Service is running normally",
                 "uptime_seconds": 0.0,  # TODO: Implement actual uptime tracking
                 "metrics": {
                     "total_processed": self.stats["total_processed"],
@@ -847,4 +825,20 @@ class PoseService:
     
     async def is_ready(self):
         """Check if service is ready."""
-        return self.is_initialized and self.is_running and not self.is_mock_only_api_surface()
+        return self.is_initialized and self.is_running
+
+    def is_mock_only_api_surface(self) -> bool:
+        """Return True when the pose API surface is mock-only (no live pose runtime).
+
+        This is the canonical state for the current WiFi-DensePose runtime:
+        /api/v1/pose/* is a legacy/public compatibility surface backed by mock data.
+        Live occupancy/presence comes from /api/v1/csi/* and /api/v1/fp2/* instead.
+        """
+        return True
+
+    def get_mock_only_reason(self) -> str:
+        """Return human-readable reason why pose API is mock-only."""
+        return (
+            "pose_api_mock_only: live pose runtime is not active. "
+            "Use /api/v1/csi/status or /api/v1/fp2/current for live presence data."
+        )

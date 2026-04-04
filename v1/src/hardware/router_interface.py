@@ -1,4 +1,10 @@
-"""Router interface for WiFi-DensePose system using TDD approach."""
+"""
+Legacy TDD-oriented SSH router interface surface.
+
+Current live runtime wiring uses `src.core.router_interface.RouterInterface`.
+This module is kept for older tests and compatibility only, so that the repo
+does not carry two silent "current" router backends.
+"""
 
 import asyncio
 import logging
@@ -19,8 +25,8 @@ class RouterConnectionError(Exception):
     pass
 
 
-class RouterInterface:
-    """Interface for communicating with WiFi routers via SSH."""
+class LegacySSHRouterInterface:
+    """Legacy SSH/TDD router interface kept for compatibility-oriented tests."""
     
     def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
         """Initialize router interface.
@@ -236,3 +242,10 @@ class RouterInterface:
             'uptime': '5 days, 3 hours',
             'raw_response': response
         }
+
+
+# Backward-compatible alias for older imports and tests that still expect
+# `src.hardware.router_interface.RouterInterface`.
+RouterInterface = LegacySSHRouterInterface
+
+__all__ = ["LegacySSHRouterInterface", "RouterInterface", "RouterConnectionError"]

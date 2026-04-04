@@ -14,6 +14,7 @@ from fastapi import WebSocket
 
 from src.config.settings import Settings
 from src.config.domains import DomainConfig
+from src.services.runtime_uptime import uptime_seconds, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class StreamService:
         # Service state
         self.is_running = False
         self.last_error = None
+        self.started_at = None
         
         # Streaming statistics
         self.stats = {
@@ -51,6 +53,14 @@ class StreamService:
         
         # Background tasks
         self.streaming_task = None
+
+    def _derive_service_status(self) -> tuple[str, str]:
+        """Return a user-facing runtime status and message."""
+        if self.last_error:
+            return "unhealthy", self.last_error
+        if self.is_running:
+            return "healthy", "Stream service is running normally"
+        return "inactive", "Stream service is available but not actively streaming"
     
     async def initialize(self):
         """Initialize the stream service."""
@@ -62,6 +72,8 @@ class StreamService:
             return
         
         self.is_running = True
+        self.last_error = None
+        self.started_at = utc_now()
         self.logger.info("Stream service started")
         
         # Start background streaming task
@@ -279,9 +291,13 @@ class StreamService:
     
     async def get_status(self) -> Dict[str, Any]:
         """Get service status."""
+        status, message = self._derive_service_status()
         return {
-            "status": "healthy" if self.is_running and not self.last_error else "unhealthy",
+            "status": status,
+            "message": message,
             "running": self.is_running,
+            "ready": self.last_error is None,
+            "uptime_seconds": uptime_seconds(self.started_at) if self.is_running else 0.0,
             "last_error": self.last_error,
             "connections": {
                 "active": len(self.connections),
@@ -373,11 +389,12 @@ class StreamService:
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check."""
         try:
-            status = "healthy" if self.is_running and not self.last_error else "unhealthy"
+            status, message = self._derive_service_status()
             
             return {
                 "status": status,
-                "message": self.last_error if self.last_error else "Stream service is running normally",
+                "message": message,
+                "uptime_seconds": uptime_seconds(self.started_at) if self.is_running else 0.0,
                 "active_connections": len(self.connections),
                 "metrics": {
                     "messages_sent": self.stats["messages_sent"],
@@ -394,4 +411,4 @@ class StreamService:
     
     async def is_ready(self) -> bool:
         """Check if service is ready."""
-        return self.is_running
+        return self.last_error is None

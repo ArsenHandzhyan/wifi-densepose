@@ -4,12 +4,9 @@ Hardware interface service for WiFi-DensePose API
 
 import logging
 import asyncio
-import math
-import shutil
 import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import numpy as np
 
@@ -18,6 +15,18 @@ from src.config.domains import DomainConfig
 from src.core.router_interface import RouterInterface
 
 logger = logging.getLogger(__name__)
+
+
+class LiveCSICaptureError(Exception):
+    """Raised when a live CSI capture operation fails."""
+
+    def __init__(self, message: str, http_status: int = 503, detail: Optional[Any] = None):
+        super().__init__(message)
+        self.http_status = http_status
+        self._detail = detail
+
+    def to_http_detail(self) -> Any:
+        return self._detail if self._detail is not None else str(self)
 
 
 class HardwareService:
@@ -53,17 +62,6 @@ class HardwareService:
         # Data buffers
         self.recent_samples = []
         self.max_recent_samples = 1000
-
-    def _live_collection_available(self) -> bool:
-        """True when at least one router exposes a real collector backend."""
-        return any(getattr(interface, "live_collection_available", False) for interface in self.router_interfaces.values())
-
-    def _collection_mode(self) -> str:
-        if self.settings.mock_hardware:
-            return "mock"
-        if self._live_collection_available():
-            return "live"
-        return "disabled_unimplemented"
     
     async def initialize(self):
         """Initialize the hardware service."""
@@ -83,12 +81,8 @@ class HardwareService:
             self.is_running = True
             
             # Start background tasks
-            if not self.settings.mock_hardware and self._live_collection_available():
+            if not self.settings.mock_hardware:
                 self.collection_task = asyncio.create_task(self._data_collection_loop())
-            elif not self.settings.mock_hardware:
-                self.logger.warning(
-                    "Hardware service started without collection loop: live CSI backend is not implemented in RouterInterface"
-                )
             
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
             
@@ -335,8 +329,6 @@ class HardwareService:
                 "router_id": router_id,
                 "healthy": is_healthy,
                 "connected": status.get("connected", False),
-                "live_collection_available": status.get("live_collection_available", False),
-                "collection_backend": status.get("collection_backend"),
                 "last_data_time": status.get("last_data_time"),
                 "error_count": status.get("error_count", 0),
                 "configuration": status.get("configuration", {})
@@ -386,18 +378,10 @@ class HardwareService:
     
     async def get_status(self) -> Dict[str, Any]:
         """Get service status."""
-        collection_mode = self._collection_mode()
-        if self.is_running and not self.last_error:
-            status = "healthy" if collection_mode in {"mock", "live"} else "degraded"
-        else:
-            status = "unhealthy"
         return {
-            "status": status,
+            "status": "healthy" if self.is_running and not self.last_error else "unhealthy",
             "running": self.is_running,
             "last_error": self.last_error,
-            "live_csi_collection_available": self._live_collection_available(),
-            "collection_backend": collection_mode,
-            "collection_loop_active": bool(self.collection_task and not self.collection_task.done()),
             "statistics": self.stats.copy(),
             "configuration": {
                 "mock_hardware": self.settings.mock_hardware,
@@ -469,84 +453,11 @@ class HardwareService:
             results = {"message": "Manual collection triggered for all routers"}
         
         return results
-
-    async def record_live_csi_capture(
-        self,
-        *,
-        label: str,
-        duration_sec: float,
-        out_dir: str | None = None,
-    ) -> Dict[str, Any]:
-        """Capture one short live CSI clip via the canonical recording service."""
-        from src.services.csi_prediction_service import csi_prediction_service
-        from src.services.csi_recording_service import csi_recording_service
-
-        if not csi_prediction_service._running:
-            if not csi_prediction_service.binary_model:
-                if not csi_prediction_service.load_model():
-                    raise RuntimeError("Failed to load runtime CSI model for live capture")
-            try:
-                await csi_prediction_service.start_udp_listener()
-                asyncio.create_task(csi_prediction_service.prediction_loop(interval=2.0))
-            except OSError as exc:
-                if "Address already in use" not in str(exc):
-                    raise RuntimeError(f"Failed to start CSI UDP listener: {exc}") from exc
-
-        chunk_sec = max(1, int(math.ceil(float(duration_sec))))
-        started = await csi_recording_service.start_recording(
-            label=label,
-            chunk_sec=chunk_sec,
-            with_video=False,
-            voice_prompt=False,
-            skip_preflight=False,
-        )
-        if not started.get("ok"):
-            raise RuntimeError(str(started.get("error") or "Failed to start live CSI capture"))
-
-        try:
-            await asyncio.sleep(float(duration_sec))
-        finally:
-            stopped = await csi_recording_service.stop_recording(
-                voice_prompt=False,
-                reason="training_live_csi_capture",
-            )
-
-        if not stopped.get("ok"):
-            raise RuntimeError(str(stopped.get("error") or "Failed to stop live CSI capture"))
-
-        chunk = dict(stopped.get("last_chunk") or {})
-        data_path = str(chunk.get("data_path") or "").strip()
-        summary_path = str(chunk.get("summary_path") or "").strip()
-        if not data_path or not summary_path:
-            raise RuntimeError("Live CSI capture completed without data_path/summary_path")
-
-        if out_dir:
-            target_dir = Path(out_dir).expanduser().resolve()
-            target_dir.mkdir(parents=True, exist_ok=True)
-            copied_data = target_dir / Path(data_path).name
-            copied_summary = target_dir / Path(summary_path).name
-            shutil.copy2(data_path, copied_data)
-            shutil.copy2(summary_path, copied_summary)
-            data_path = str(copied_data)
-            summary_path = str(copied_summary)
-
-        return {
-            "label": chunk.get("label") or label,
-            "data_path": data_path,
-            "summary_path": summary_path,
-            "duration_sec": chunk.get("duration_sec"),
-            "packet_count": chunk.get("packet_count"),
-            "nodes_active": chunk.get("nodes_active"),
-        }
     
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check."""
         try:
-            collection_mode = self._collection_mode()
-            if self.is_running and not self.last_error:
-                status = "healthy" if collection_mode in {"mock", "live"} else "degraded"
-            else:
-                status = "unhealthy"
+            status = "healthy" if self.is_running and not self.last_error else "unhealthy"
             
             # Check router health
             healthy_routers = 0
@@ -561,13 +472,7 @@ class HardwareService:
             
             return {
                 "status": status,
-                "message": self.last_error if self.last_error else (
-                    "Hardware service is running in mock mode"
-                    if collection_mode == "mock"
-                    else "Hardware service is running with live collection enabled"
-                    if collection_mode == "live"
-                    else "Hardware service is up, but real CSI collection is not implemented in RouterInterface"
-                ),
+                "message": self.last_error if self.last_error else "Hardware service is running normally",
                 "connected_routers": f"{healthy_routers}/{total_routers}",
                 "metrics": {
                     "total_samples": self.stats["total_samples"],
@@ -586,6 +491,52 @@ class HardwareService:
     
     async def is_ready(self) -> bool:
         """Check if service is ready."""
-        return self.is_running and len(self.router_interfaces) > 0 and (
-            self.settings.mock_hardware or self._live_collection_available()
-        )
+        return self.is_running and len(self.router_interfaces) > 0
+
+    async def record_live_csi_capture(
+        self,
+        label: str,
+        duration_sec: float,
+        out_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a live CSI capture clip for training."""
+        import subprocess
+        import time
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parents[3]
+        script = project_root / "scripts" / "run_atomic_csi_training_capture.py"
+        out_path = Path(out_dir) if out_dir else project_root / "temp" / "captures"
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "python3", "-u", str(script),
+            "--mode", "train_atomic",
+            "--label-prefix", label,
+            "--duration-sec", str(int(duration_sec)),
+            "--disable-voice",
+            "--countdown-sec", "0",
+        ]
+
+        start_time = time.time()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=duration_sec + 30,
+            )
+            elapsed = time.time() - start_time
+            return {
+                "label": label,
+                "duration_sec": elapsed,
+                "returncode": result.returncode,
+                "stdout_tail": result.stdout[-500:] if result.stdout else "",
+                "stderr_tail": result.stderr[-500:] if result.stderr else "",
+                "out_dir": str(out_path),
+            }
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Capture timed out after {exc.timeout}s") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Capture failed: {exc}") from exc

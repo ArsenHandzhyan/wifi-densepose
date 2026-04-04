@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from typing import Dict, List, Optional, Any, Set
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from collections import defaultdict
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -31,8 +31,8 @@ class WebSocketConnection:
         self.stream_type = stream_type
         self.zone_ids = zone_ids or []
         self.config = config
-        self.connected_at = datetime.utcnow()
-        self.last_ping = datetime.utcnow()
+        self.connected_at = datetime.now(UTC)
+        self.last_ping = datetime.now(UTC)
         self.message_count = 0
         self.is_active = True
     
@@ -101,7 +101,7 @@ class WebSocketConnection:
             "last_ping": self.last_ping.isoformat(),
             "message_count": self.message_count,
             "is_active": self.is_active,
-            "uptime_seconds": (datetime.utcnow() - self.connected_at).total_seconds()
+            "uptime_seconds": (datetime.now(UTC) - self.connected_at).total_seconds()
         }
 
 
@@ -117,7 +117,7 @@ class ConnectionManager:
             "active_connections": 0,
             "messages_sent": 0,
             "errors": 0,
-            "start_time": datetime.utcnow()
+            "start_time": datetime.now(UTC)
         }
         self._cleanup_task = None
         self._started = False
@@ -336,7 +336,7 @@ class ConnectionManager:
     
     async def get_metrics(self) -> Dict[str, Any]:
         """Get detailed metrics."""
-        uptime = (datetime.utcnow() - self.metrics["start_time"]).total_seconds()
+        uptime = (datetime.now(UTC) - self.metrics["start_time"]).total_seconds()
         
         return {
             **self.metrics,
@@ -388,7 +388,7 @@ class ConnectionManager:
         """Send ping to all connected clients."""
         ping_data = {
             "type": "ping",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(UTC).isoformat()
         }
         
         failed_clients = []
@@ -396,7 +396,7 @@ class ConnectionManager:
         for client_id, connection in self.connections.items():
             try:
                 await connection.send_json(ping_data)
-                connection.last_ping = datetime.utcnow()
+                connection.last_ping = datetime.now(UTC)
             except Exception as e:
                 logger.warning(f"Ping failed for client {client_id}: {e}")
                 failed_clients.append(client_id)
@@ -407,7 +407,7 @@ class ConnectionManager:
     
     async def cleanup_inactive_connections(self):
         """Clean up inactive or stale connections."""
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         stale_threshold = timedelta(minutes=5)  # 5 minutes without ping
         
         stale_clients = []
@@ -446,7 +446,7 @@ class ConnectionManager:
                     await self.cleanup_inactive_connections()
                     
                     # Send periodic ping every 2 minutes
-                    if datetime.utcnow().minute % 2 == 0:
+                    if datetime.now(UTC).minute % 2 == 0:
                         await self.ping_clients()
                         
                 except Exception as e:

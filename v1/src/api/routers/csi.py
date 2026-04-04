@@ -1,7 +1,10 @@
 """CSI Real-Time Prediction & Recording API Router."""
 
+import base64
+import gzip
 import logging
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -9,8 +12,11 @@ import sys
 import threading
 import time
 import asyncio
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+import numpy as np
 from pydantic import BaseModel, Field
 from typing import Any, Optional, List
 
@@ -24,7 +30,7 @@ from ...services.csi_management_probe import (
 from ...services.recording_truth_hardening import build_truth_hardening_report
 from ...services.tts_service import get_tts_service
 from ...services.zone_calibration_service import zone_calibration_service
-from ...services.csi_node_inventory import list_csi_nodes
+from ...services.csi_node_inventory import NODE_NAMES, list_csi_nodes, resolve_ip
 from ...services.fewshot_calibration_storage_service import fewshot_calibration_storage_service
 from ...services.fewshot_adaptation_consumer_service import fewshot_adaptation_consumer_service
 from ...services.dual_validation_service import DualValidationService
@@ -144,6 +150,500 @@ def _segment_to_status(segment: dict[str, Any], resolution: dict[str, Any] | Non
         "resolved_by": resolution.get("resolved_by") if resolution else None,
         "resolved_at": resolution.get("resolved_at") if resolution else None,
         "resolution": resolution.get("resolution") if resolution else None,
+    }
+
+
+CSI_HISTORY_CAPTURE_DIR = PROJECT_ROOT / "temp" / "captures"
+CSI_HISTORY_CORR_PAIRS = [
+    ("node04", "node05"),
+    ("node03", "node06"),
+    ("node05", "node06"),
+    ("node01", "node03"),
+    ("node02", "node04"),
+]
+_csi_history_cache: dict[str, Any] = {
+    "signature": None,
+    "packets": [],
+    "min_ts_ms": None,
+    "max_ts_ms": None,
+    "chunk_count": 0,
+    "session_count": 0,
+}
+
+
+def _history_summary_paths() -> list[Path]:
+    return sorted(CSI_HISTORY_CAPTURE_DIR.glob("*.recording_summary.json"))
+
+
+def _history_chunk_paths_for_label(label: str) -> list[Path]:
+    return sorted(CSI_HISTORY_CAPTURE_DIR.glob(f"{label}_chunk*.ndjson.gz"))
+
+
+def _history_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(signature)
+
+
+def _parse_history_iso_ms(value: Any) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(value)).timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def _summary_started_ms(payload: dict[str, Any]) -> int | None:
+    return (
+        _parse_history_iso_ms(payload.get("started_at"))
+        or _parse_history_iso_ms(payload.get("session_start"))
+        or _parse_history_iso_ms(payload.get("session_start_iso"))
+    )
+
+
+def _summary_ended_ms(payload: dict[str, Any], started_ms: int | None = None) -> int | None:
+    ended_ms = (
+        _parse_history_iso_ms(payload.get("ended_at"))
+        or _parse_history_iso_ms(payload.get("session_end"))
+        or _parse_history_iso_ms(payload.get("session_end_iso"))
+    )
+    if ended_ms is not None:
+        return ended_ms
+    duration_sec = payload.get("duration_sec")
+    if started_ms is None or duration_sec is None:
+        return None
+    try:
+        return started_ms + int(float(duration_sec) * 1000)
+    except Exception:
+        return None
+
+
+def _history_range_overlaps(
+    session_start_ms: int | None,
+    session_end_ms: int | None,
+    range_start_ms: int | None,
+    range_end_ms: int | None,
+) -> bool:
+    if range_start_ms is None and range_end_ms is None:
+        return True
+
+    effective_start = session_start_ms if session_start_ms is not None else -1
+    effective_end = session_end_ms if session_end_ms is not None else int(time.time() * 1000)
+
+    if range_end_ms is not None and effective_start > range_end_ms:
+        return False
+    if range_start_ms is not None and effective_end < range_start_ms:
+        return False
+    return True
+
+
+def _collect_history_session_descriptors(
+    range_start_ms: int | None = None,
+    range_end_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    descriptors: list[dict[str, Any]] = []
+    for summary_path in _history_summary_paths():
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            continue
+        started_ms = _summary_started_ms(payload)
+        ended_ms = _summary_ended_ms(payload, started_ms)
+        if not _history_range_overlaps(started_ms, ended_ms, range_start_ms, range_end_ms):
+            continue
+        descriptors.append(
+            {
+                "label": label,
+                "summary_path": summary_path,
+                "started_ms": started_ms,
+                "ended_ms": ended_ms,
+                "active": False,
+            }
+        )
+    return descriptors
+
+
+def _active_history_session_descriptor() -> dict[str, Any] | None:
+    if not bool(getattr(csi_recording_service, "recording", False)):
+        return None
+    label = str(getattr(csi_recording_service, "session_label", "") or "").strip()
+    if not label:
+        return None
+    started_ms = _parse_history_iso_ms(getattr(csi_recording_service, "_session_started_at_iso", None))
+    if started_ms is None:
+        session_start = getattr(csi_recording_service, "_session_start", None)
+        if session_start:
+            try:
+                started_ms = int(float(session_start) * 1000)
+            except Exception:
+                started_ms = None
+    return {
+        "label": label,
+        "summary_path": None,
+        "started_ms": started_ms,
+        "ended_ms": int(time.time() * 1000),
+        "active": True,
+    }
+
+
+def _parse_history_raw(raw: bytes) -> tuple[int, float, float] | None:
+    if not raw:
+        return None
+
+    if raw.startswith(b"CSI_DATA,"):
+        try:
+            line = raw.decode("utf-8", errors="replace").strip()
+            parts = line.split(",")
+            if len(parts) < 5:
+                return None
+            rssi = int(parts[4])
+            si = line.find('"[')
+            ei = line.find(']"', si)
+            if si < 0 or ei < 0:
+                return None
+            vals = [int(x) for x in line[si + 2 : ei].replace(",", " ").split()]
+            n = len(vals) // 2
+            if n < 40:
+                return None
+            arr = np.array(vals[: n * 2], dtype=np.float32).reshape(-1, 2)
+            amp = np.sqrt(arr[:, 0] ** 2 + arr[:, 1] ** 2)
+            phase = np.arctan2(arr[:, 1], arr[:, 0])
+            try:
+                from ...services.csi_phase_sanitization import sanitize_phase_vector
+
+                phase = sanitize_phase_vector(phase)
+            except Exception:
+                pass
+            return (
+                rssi,
+                float(np.mean(amp)),
+                float(np.std(phase)) if len(phase) > 1 else 0.0,
+            )
+        except Exception:
+            return None
+
+    try:
+        rssi, amp, phase = csi_prediction_service._parse_csi_raw(raw)
+    except Exception:
+        return None
+    if amp is None:
+        return None
+    return (
+        int(rssi),
+        float(np.mean(amp)),
+        float(np.std(phase)) if phase is not None and len(phase) > 1 else 0.0,
+    )
+
+
+def _parse_history_payload(payload_b64: str) -> tuple[int, float, float] | None:
+    try:
+        raw = base64.b64decode(payload_b64)
+    except Exception:
+        return None
+    return _parse_history_raw(raw)
+
+
+def _load_csi_history_packets(
+    range_start_ms: int | None = None,
+    range_end_ms: int | None = None,
+) -> dict[str, Any]:
+    descriptors = _collect_history_session_descriptors(
+        range_start_ms=range_start_ms,
+        range_end_ms=range_end_ms,
+    )
+    active_descriptor = _active_history_session_descriptor()
+    if active_descriptor and _history_range_overlaps(
+        active_descriptor.get("started_ms"),
+        active_descriptor.get("ended_ms"),
+        range_start_ms,
+        range_end_ms,
+    ):
+        descriptors.append(active_descriptor)
+
+    summary_paths = [Path(item["summary_path"]) for item in descriptors if item.get("summary_path")]
+    chunk_paths: list[Path] = []
+    seen_labels: set[str] = set()
+    for descriptor in descriptors:
+        label = str(descriptor.get("label") or "").strip()
+        if not label or label in seen_labels:
+            continue
+        seen_labels.add(label)
+        chunk_paths.extend(_history_chunk_paths_for_label(label))
+
+    active_chunk_packets = list(getattr(csi_recording_service, "_chunk_packets", []) or [])
+    active_signature = (
+        "__active__",
+        str(active_descriptor.get("label") or "") if active_descriptor else "",
+        int(getattr(csi_recording_service, "_chunk_num", 0) or 0),
+        len(active_chunk_packets),
+        int(float(getattr(csi_recording_service, "_chunk_start", 0) or 0) * 1000),
+    )
+    signature = (
+        _history_signature(summary_paths + chunk_paths),
+        active_signature,
+    )
+    if _csi_history_cache["signature"] == signature:
+        return _csi_history_cache
+
+    packets: list[tuple[int, str, int, float, float]] = []
+    for chunk_path in chunk_paths:
+        try:
+            with gzip.open(chunk_path, "rt", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts_ns = int(payload.get("ts_ns") or 0)
+                    src_ip_raw = str(payload.get("src_ip") or "").strip()
+                    if ts_ns <= 0 or not src_ip_raw:
+                        continue
+                    src_ip = resolve_ip(src_ip_raw)
+                    node_id = NODE_NAMES.get(src_ip)
+                    if not node_id:
+                        continue
+                    parsed = _parse_history_payload(str(payload.get("payload_b64") or ""))
+                    if parsed is None:
+                        continue
+                    rssi, amp_mean, phase_std = parsed
+                    packets.append((ts_ns // 1_000_000, node_id, rssi, amp_mean, phase_std))
+        except Exception as exc:
+            logger.warning("csi history chunk parse failed: %s (%s)", chunk_path, exc)
+
+    if active_descriptor and active_chunk_packets:
+        for ts_ns, src_ip, raw_payload in active_chunk_packets:
+            node_id = NODE_NAMES.get(resolve_ip(str(src_ip)))
+            if not node_id:
+                continue
+            parsed = _parse_history_raw(raw_payload)
+            if parsed is None:
+                continue
+            rssi, amp_mean, phase_std = parsed
+            packets.append((int(ts_ns) // 1_000_000, node_id, rssi, amp_mean, phase_std))
+
+    packets.sort(key=lambda row: row[0])
+    _csi_history_cache.update(
+        {
+            "signature": signature,
+            "packets": packets,
+            "min_ts_ms": packets[0][0] if packets else None,
+            "max_ts_ms": packets[-1][0] if packets else None,
+            "chunk_count": len(chunk_paths),
+            "session_count": len(summary_paths),
+            "active_session_label": active_descriptor.get("label") if active_descriptor else None,
+            "active_chunk_packets": len(active_chunk_packets) if active_descriptor else 0,
+        }
+    )
+    return _csi_history_cache
+
+
+def _normalize_binary_prob(binary: str | None, confidence: Any) -> float | None:
+    conf = float(confidence or 0.0)
+    token = str(binary or "").lower()
+    if token == "occupied":
+        return conf
+    if token == "empty":
+        return 1.0 - conf
+    if token == "unknown":
+        return 0.5
+    return None
+
+
+def _build_live_history_overlay(bucket_ms: int) -> list[dict[str, Any]]:
+    start_time = getattr(csi_prediction_service, "_start_time", None)
+    history_rows = list(csi_prediction_service.current.get("history") or [])
+    if not start_time or not history_rows or bucket_ms <= 0:
+        return []
+
+    overlay: dict[int, dict[str, Any]] = {}
+    for row in history_rows:
+        rel_t = float(row.get("t") or 0.0)
+        ts_ms = int((float(start_time) + rel_t) * 1000)
+        bucket_ts = (ts_ms // bucket_ms) * bucket_ms
+        prob = _normalize_binary_prob(row.get("binary"), row.get("binary_confidence"))
+        if prob is None:
+            continue
+        overlay[bucket_ts] = {
+            "timestamp": bucket_ts,
+            "node_rssi": {},
+            "node_amp": {},
+            "node_tvar": {},
+            "correlations": {},
+            "phase_stds": {},
+            "binary_prob": round(float(prob), 4),
+            "source": "live_history",
+        }
+    return [overlay[key] for key in sorted(overlay)]
+
+
+def _merge_history_entries(
+    archive_entries: list[dict[str, Any]],
+    live_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[int, dict[str, Any]] = {int(entry["timestamp"]): dict(entry) for entry in archive_entries}
+    for live in live_entries:
+        ts = int(live["timestamp"])
+        if ts not in merged:
+            merged[ts] = dict(live)
+            continue
+        if live.get("binary_prob") is not None:
+            merged[ts]["binary_prob"] = live["binary_prob"]
+        merged[ts]["source"] = "archive+live"
+    return [merged[key] for key in sorted(merged)]
+
+
+def _build_csi_history_entries(
+    range_start_ms: int | None = None,
+    range_end_ms: int | None = None,
+    bucket_sec: int | None = None,
+    max_points: int = 2400,
+) -> dict[str, Any]:
+    payload = _load_csi_history_packets(
+        range_start_ms=range_start_ms,
+        range_end_ms=range_end_ms,
+    )
+    packets: list[tuple[int, str, int, float, float]] = payload.get("packets") or []
+    requested_bucket_sec = int(bucket_sec or 0)
+    now_ms = int(time.time() * 1000)
+    if not packets:
+        if requested_bucket_sec > 0:
+            bucket_ms = requested_bucket_sec * 1000
+        else:
+            live_span_ms = max(
+                1000,
+                int(range_end_ms or now_ms) - int(range_start_ms or max(now_ms - 60_000, 0)),
+            )
+            bucket_ms = max(2000, int(math.ceil(live_span_ms / max(max_points, 1) / 1000.0) * 1000))
+        live_entries = _build_live_history_overlay(bucket_ms)
+        if range_start_ms is not None:
+            live_entries = [entry for entry in live_entries if int(entry["timestamp"]) >= int(range_start_ms)]
+        if range_end_ms is not None:
+            live_entries = [entry for entry in live_entries if int(entry["timestamp"]) <= int(range_end_ms)]
+        return {
+            "entries": live_entries,
+            "meta": {
+                "source": "recording_archive",
+                "session_count": int(payload.get("session_count") or 0),
+                "chunk_count": int(payload.get("chunk_count") or 0),
+                "available_from_ms": None,
+                "available_to_ms": None,
+                "range_start_ms": range_start_ms,
+                "range_end_ms": range_end_ms,
+                "bucket_sec": max(1, bucket_ms // 1000),
+                "max_points": max_points,
+                "archive_points": 0,
+                "live_points": len(live_entries),
+                "merged_points": len(live_entries),
+                "active_session_label": payload.get("active_session_label"),
+                "active_chunk_packets": int(payload.get("active_chunk_packets") or 0),
+            },
+        }
+
+    available_from = int(payload["min_ts_ms"])
+    available_to = int(payload["max_ts_ms"])
+    range_start = max(available_from, int(range_start_ms or available_from))
+    range_end = min(available_to, int(range_end_ms or available_to))
+    if range_end <= range_start:
+        range_start = available_from
+        range_end = available_to
+
+    if requested_bucket_sec > 0:
+        bucket_ms = requested_bucket_sec * 1000
+    else:
+        span_ms = max(1000, range_end - range_start)
+        bucket_ms = max(2000, int(math.ceil(span_ms / max(max_points, 1) / 1000.0) * 1000))
+    bucket_sec_effective = max(1, bucket_ms // 1000)
+    aligned_start = (range_start // bucket_ms) * bucket_ms
+
+    buckets: dict[int, dict[str, dict[str, list[float]]]] = defaultdict(
+        lambda: defaultdict(lambda: {"rssi": [], "amp": [], "phase": []})
+    )
+    for ts_ms, node_id, rssi, amp_mean, phase_std in packets:
+        if ts_ms < range_start or ts_ms > range_end:
+            continue
+        bucket_idx = int((ts_ms - aligned_start) // bucket_ms)
+        bucket = buckets[bucket_idx][node_id]
+        bucket["rssi"].append(float(rssi))
+        bucket["amp"].append(float(amp_mean))
+        bucket["phase"].append(float(phase_std))
+
+    entries: list[dict[str, Any]] = []
+    for bucket_idx in sorted(buckets):
+        ts_bucket = aligned_start + bucket_idx * bucket_ms
+        node_payload = buckets[bucket_idx]
+        entry = {
+            "timestamp": ts_bucket,
+            "node_rssi": {},
+            "node_amp": {},
+            "node_tvar": {},
+            "correlations": {},
+            "phase_stds": {},
+            "binary_prob": None,
+            "source": "archive",
+        }
+        for node_id, metrics in node_payload.items():
+            if metrics["rssi"]:
+                entry["node_rssi"][node_id] = round(float(np.mean(metrics["rssi"])), 1)
+            if metrics["amp"]:
+                entry["node_amp"][node_id] = round(float(np.mean(metrics["amp"])), 3)
+                entry["node_tvar"][node_id] = round(float(np.std(metrics["amp"])), 3)
+            if metrics["phase"]:
+                entry["phase_stds"][node_id] = round(float(np.mean(metrics["phase"])), 3)
+        entries.append(entry)
+
+    corr_window = max(4, min(24, int(math.ceil(120 / max(bucket_sec_effective, 1)))))
+    for idx, entry in enumerate(entries):
+        window = entries[max(0, idx - corr_window + 1) : idx + 1]
+        for node_a, node_b in CSI_HISTORY_CORR_PAIRS:
+            xs: list[float] = []
+            ys: list[float] = []
+            for win in window:
+                xa = win["node_amp"].get(node_a)
+                yb = win["node_amp"].get(node_b)
+                if xa is None or yb is None:
+                    continue
+                xs.append(float(xa))
+                ys.append(float(yb))
+            if len(xs) < 3:
+                continue
+            if float(np.std(xs)) <= 1e-6 or float(np.std(ys)) <= 1e-6:
+                continue
+            corr = float(np.corrcoef(xs, ys)[0, 1])
+            if math.isfinite(corr):
+                entry["correlations"][f"corr_{node_a}_{node_b}"] = round(corr, 4)
+
+    live_entries = _build_live_history_overlay(bucket_ms)
+    merged_entries = _merge_history_entries(entries, live_entries)
+    return {
+        "entries": merged_entries,
+        "meta": {
+            "source": "recording_archive",
+            "session_count": int(payload.get("session_count") or 0),
+            "chunk_count": int(payload.get("chunk_count") or 0),
+            "available_from_ms": available_from,
+            "available_to_ms": available_to,
+            "range_start_ms": range_start,
+            "range_end_ms": range_end,
+            "bucket_sec": bucket_sec_effective,
+            "max_points": max_points,
+            "archive_points": len(entries),
+            "live_points": len(live_entries),
+            "merged_points": len(merged_entries),
+            "active_session_label": payload.get("active_session_label"),
+            "active_chunk_packets": int(payload.get("active_chunk_packets") or 0),
+        },
     }
 
 
@@ -397,6 +897,23 @@ async def csi_status():
     return csi_prediction_service.get_status()
 
 
+@router.get("/history")
+async def csi_history(
+    max_points: int = Query(default=2400, ge=200, le=20000),
+    bucket_sec: int | None = Query(default=None, ge=1, le=300),
+    range_sec: int | None = Query(default=None, ge=60, le=14 * 24 * 3600),
+):
+    """Historical CSI signal timeline from recording archive + active live buffer."""
+    range_end_ms = int(time.time() * 1000)
+    range_start_ms = range_end_ms - (int(range_sec) * 1000) if range_sec else None
+    return _build_csi_history_entries(
+        range_start_ms=range_start_ms,
+        range_end_ms=range_end_ms,
+        bucket_sec=bucket_sec,
+        max_points=max_points,
+    )
+
+
 @router.get("/nodes/live")
 async def csi_nodes_live():
     """Per-node live signal metrics for UI monitoring.
@@ -467,7 +984,9 @@ async def csi_nodes_live():
     model, meta = _load_epoch4_model()
     if model is not None:
         try:
-            if _epoch4_model_version == "v46":
+            if _epoch4_model_version == "v47":
+                fv, ready = _extract_v47_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
+            elif _epoch4_model_version == "v46":
                 fv, ready = _extract_v46_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
             elif _epoch4_model_version == "v41":
                 fv, ready = _extract_v41_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
@@ -1604,13 +2123,13 @@ _V41_META_PATH = PROJECT_ROOT / "output" / "epoch4_v41_model" / "v41_position_cl
 _EPOCH4_MODEL_PATH = PROJECT_ROOT / "output" / "epoch4_position_model" / "epoch4_position_classifier.pkl"
 _EPOCH4_META_PATH = PROJECT_ROOT / "output" / "epoch4_position_model" / "epoch4_position_classifier_meta.json"
 _EPOCH4_NODE_IPS = [
-    "192.168.0.137", "192.168.0.117", "192.168.0.143", "192.168.0.125",
+    "192.168.0.137", "192.168.0.117", "192.168.0.144", "192.168.0.125",
     "192.168.0.110", "192.168.0.132", "192.168.0.153",
 ]
 _EPOCH4_NSUB = 64
 _EPOCH4_WIN = 7
 _EPOCH4_LABELS = {}
-_epoch4_model_version = None  # "v46", "v41" or "legacy"
+_epoch4_model_version = None  # "v47", "v46", "v41" or "legacy"
 
 
 def _load_epoch4_model():
@@ -1628,8 +2147,11 @@ def _load_epoch4_model():
         _EPOCH4_LABELS = {i: str(c) for i, c in enumerate(le.classes_)}
         if _V41_META_PATH.exists():
             _epoch4_meta = json.loads(_V41_META_PATH.read_text())
-        # Detect v46 drift-robust features
-        if bundle.get("version") == "v46" or bundle.get("feature_extractor") == "extract_features_v46":
+        # Detect model version
+        if bundle.get("version") == "v47" or bundle.get("feature_extractor") == "extract_features_v47":
+            _epoch4_model_version = "v47"
+            logger.info("Loaded v47 hybrid model (%d classes)", len(_EPOCH4_LABELS))
+        elif bundle.get("version") == "v46" or bundle.get("feature_extractor") == "extract_features_v46":
             _epoch4_model_version = "v46"
             logger.info("Loaded v46 drift-robust model (%d classes)", len(_EPOCH4_LABELS))
         else:
@@ -1663,6 +2185,92 @@ async def reload_position_model():
     if model is None:
         return {"status": "error", "message": "model file not found"}
     return {"status": "ok", "version": _epoch4_model_version, "classes": _EPOCH4_LABELS, "n_classes": len(_EPOCH4_LABELS)}
+
+
+def _extract_v47_features(packets: dict, node_ips: list[str], win: int) -> tuple[list[float], list[str]]:
+    """Extract 126-dim hybrid feature vector (18 features per node).
+
+    11 drift-robust + 7 absolute presence features per node.
+    """
+    import numpy as np
+    from scipy import stats as sp_stats
+    fv: list[float] = []
+    ready_nodes: list[str] = []
+    N_FEATS = 18
+    node_mean_amps: list[float] = []
+
+    for ip in node_ips:
+        if ip not in packets or len(packets[ip]) < win:
+            fv.extend([0.0] * N_FEATS)
+            node_mean_amps.append(0.0)
+            continue
+
+        recent = packets[ip][-win:]
+        ready_nodes.append(ip)
+        rssis = np.array([float(r[1]) for r in recent], dtype=np.float64)
+        amp_list = [np.asarray(r[2], dtype=np.float64) for r in recent]
+
+        max_sc = max(len(a) for a in amp_list) if amp_list else 0
+        if max_sc == 0:
+            fv.extend([0.0] * N_FEATS)
+            node_mean_amps.append(0.0)
+            continue
+
+        padded = np.zeros((len(amp_list), max_sc))
+        for i, a in enumerate(amp_list):
+            padded[i, :len(a)] = a
+
+        mean_amp = float(np.mean(padded))
+        std_amp = float(np.std(padded))
+        max_amp = float(np.max(padded))
+        third = max_sc // 3
+        per_pkt_means = padded.mean(axis=1)
+        sc_profile = padded.mean(axis=0)
+        sc_profile_norm = sc_profile / (sc_profile.sum() + 1e-10)
+        sc_entropy = float(-np.sum(sc_profile_norm * np.log(sc_profile_norm + 1e-10)))
+        temporal_var = float(padded.std(axis=0).mean()) if padded.shape[0] > 1 else 0.0
+        q75 = float(np.percentile(padded, 75))
+        q25 = float(np.percentile(padded, 25))
+        median_amp = float(np.median(padded))
+        amp_p90 = float(np.percentile(padded, 90))
+        flat = padded.flatten()
+        skew = float(sp_stats.skew(flat)) if len(flat) > 2 else 0.0
+        kurt = float(sp_stats.kurtosis(flat)) if len(flat) > 2 else 0.0
+
+        node_mean_amps.append(mean_amp)
+
+        fv.extend([
+            # 11 drift-robust
+            float(np.std(rssis)),
+            std_amp / (mean_amp + 1e-6),
+            (max_amp - float(np.min(padded))) / (mean_amp + 1.0),
+            temporal_var / (mean_amp + 1e-6),
+            float(np.mean(padded[:, :third])) / (mean_amp + 1.0) if third > 0 else 0.0,
+            float(np.mean(padded[:, third:2*third])) / (mean_amp + 1.0) if third > 0 else 0.0,
+            float(np.mean(padded[:, 2*third:])) / (mean_amp + 1.0) if third > 0 else 0.0,
+            float(np.std(per_pkt_means)) / (float(np.mean(per_pkt_means)) + 1e-6),
+            sc_entropy,
+            float(np.max(rssis) - np.min(rssis)),
+            (q75 - q25) / (median_amp + 1.0),
+            # 7 absolute presence
+            mean_amp,
+            max_amp,
+            float(np.mean(rssis)),
+            amp_p90,
+            0.0,  # inter_node_ratio placeholder
+            skew,
+            kurt,
+        ])
+
+    # Fill inter_node_ratio
+    active_means = [m for m in node_mean_amps if m > 0]
+    global_mean = np.mean(active_means) if active_means else 1.0
+    for node_idx in range(len(node_ips)):
+        feat_offset = node_idx * N_FEATS + 15
+        if node_mean_amps[node_idx] > 0:
+            fv[feat_offset] = node_mean_amps[node_idx] / (global_mean + 1e-6)
+
+    return fv, ready_nodes
 
 
 def _extract_v46_features(packets: dict, node_ips: list[str], win: int) -> tuple[list[float], list[str]]:
@@ -1823,74 +2431,152 @@ def _extract_legacy_features(packets: dict, node_ips: list[str], win: int, nsub:
 
 @router.get("/position")
 async def get_position_prediction():
-    """Real-time position prediction using the best available model.
+    """Real-time position prediction using V53 binary from main CSI service.
 
-    v4.1 model: 56-dim features (mean_rssi, std_rssi, mean/std/max_amp, low/mid/high_amp per node)
-    Legacy model: 258-dim features (amp/phase mean/std + rssi per node)
+    Returns the production binary prediction (empty/occupied) mapped to the
+    position endpoint format so the UI 'Позиция' panel shows correct state.
     """
-    import numpy as np
-
-    model, meta = _load_epoch4_model()
-    if model is None:
-        raise HTTPException(status_code=503, detail="position model not found")
-
     svc = csi_prediction_service
-    packets = svc._packets
+    cur = svc.current
 
-    if _epoch4_model_version == "v46":
-        fv, ready_nodes = _extract_v46_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
-    elif _epoch4_model_version == "v41":
-        fv, ready_nodes = _extract_v41_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN)
-    else:
-        fv, ready_nodes = _extract_legacy_features(packets, _EPOCH4_NODE_IPS, _EPOCH4_WIN, _EPOCH4_NSUB)
+    binary = cur.get("binary", "empty")
+    binary_conf = float(cur.get("binary_confidence", 0.0))
+    motion_state = cur.get("motion_state", "NO_MOTION")
+    model_ver = cur.get("model_version", "v53")
+    nodes_active = int(cur.get("nodes_active", 0))
 
-    X = np.array(fv, np.float32).reshape(1, -1)
-    raw_pred = model.predict(X)[0]
-    proba = model.predict_proba(X)[0]
-
-    # Handle both numeric (LabelEncoder) and string (direct) predictions
-    if isinstance(raw_pred, (int, np.integer)):
-        pred = int(raw_pred)
-        label = _EPOCH4_LABELS.get(pred, f"class_{pred}")
-        confidence = float(proba[pred])
-    else:
-        label = str(raw_pred)
-        # Find index of predicted class in proba array
-        pred_idx = list(model.classes_).index(raw_pred) if hasattr(model, 'classes_') else 0
-        confidence = float(proba[pred_idx])
-
-    top3_idx = np.argsort(proba)[::-1][:3]
-    top3 = []
-    for i in top3_idx:
-        if _EPOCH4_LABELS:
-            lbl = _EPOCH4_LABELS.get(int(i), str(model.classes_[i]) if hasattr(model, 'classes_') else f"class_{i}")
+    # Map binary state to position labels
+    if binary == "occupied":
+        if motion_state == "MOTION":
+            label = "motion"
         else:
-            lbl = str(model.classes_[i]) if hasattr(model, 'classes_') else f"class_{i}"
-        top3.append({"label": lbl, "probability": round(float(proba[i]), 4)})
+            label = "static"
+    else:
+        label = "empty"
+
+    # Build top3 probabilities
+    p_occ = 1.0 - binary_conf if binary == "empty" else binary_conf
+    p_empty = 1.0 - p_occ
+    if label == "motion":
+        top3 = [
+            {"label": "motion", "probability": round(p_occ, 4)},
+            {"label": "empty", "probability": round(p_empty, 4)},
+            {"label": "static", "probability": 0.0},
+        ]
+    elif label == "static":
+        top3 = [
+            {"label": "static", "probability": round(p_occ, 4)},
+            {"label": "empty", "probability": round(p_empty, 4)},
+            {"label": "motion", "probability": 0.0},
+        ]
+    else:
+        top3 = [
+            {"label": "empty", "probability": round(p_empty, 4)},
+            {"label": "static", "probability": round(p_occ * 0.5, 4)},
+            {"label": "motion", "probability": round(p_occ * 0.5, 4)},
+        ]
 
     node_info = {}
-    for ip in _EPOCH4_NODE_IPS:
-        if ip in packets and packets[ip]:
+    packets = svc._packets
+    for ip in sorted(packets.keys()):
+        if packets[ip]:
             last_pkt = packets[ip][-1]
             node_info[ip] = {
                 "n_packets": len(packets[ip]),
-                "amp_shape": len(last_pkt[2]),
-                "rssi": float(last_pkt[1]),
+                "amp_shape": len(last_pkt[2]) if len(last_pkt) > 2 else 0,
+                "rssi": float(last_pkt[1]) if len(last_pkt) > 1 else -100.0,
             }
-        else:
-            node_info[ip] = {"n_packets": 0}
 
     return {
         "position": label,
-        "confidence": round(confidence, 4),
+        "confidence": round(binary_conf, 4),
         "top3": top3,
-        "model_version": _epoch4_model_version,
-        "nodes_ready": len(ready_nodes),
-        "nodes_total": len(_EPOCH4_NODE_IPS),
-        "window_size": _EPOCH4_WIN,
-        "feature_dim": len(fv),
+        "model_version": model_ver,
+        "nodes_ready": nodes_active,
+        "nodes_total": 7,
+        "window_size": 10,
+        "feature_dim": len(svc.feature_names or []),
         "nodes": node_info,
     }
+
+
+# ============================================================
+# Cascade hybrid: V46 base + adaptive baseline for static/empty
+# ============================================================
+_empty_baseline = {
+    # Pre-seeded from empty_garage_2min_v46_baseline (2026-04-01 session)
+    "amp_means": [
+        [13.85, 14.52, 15.13, 14.34, 15.0, 13.45, 14.15],
+    ] * 10,  # 10 copies to pass min_samples threshold
+    "max_history": 30,
+    "threshold_ratio": 1.08,  # if current amp > baseline * 1.08 → person present
+    "min_samples": 5,
+}
+
+
+def _get_current_node_amps(packets: dict, node_ips: list[str], win: int) -> list[float]:
+    """Get current mean amplitude per node (absolute values)."""
+    import numpy as np
+    amps = []
+    for ip in node_ips:
+        if ip not in packets or len(packets[ip]) < win:
+            amps.append(0.0)
+            continue
+        recent = packets[ip][-win:]
+        amp_list = [np.asarray(r[2], dtype=np.float64) for r in recent]
+        if not amp_list:
+            amps.append(0.0)
+            continue
+        all_amps = np.concatenate(amp_list)
+        amps.append(float(np.mean(all_amps)))
+    return amps
+
+
+def _update_empty_baseline(node_amps: list[float]):
+    """Add a confident-empty snapshot to the rolling baseline."""
+    active = [a for a in node_amps if a > 0]
+    if len(active) < 5:
+        return
+    _empty_baseline["amp_means"].append(node_amps)
+    if len(_empty_baseline["amp_means"]) > _empty_baseline["max_history"]:
+        _empty_baseline["amp_means"] = _empty_baseline["amp_means"][-_empty_baseline["max_history"]:]
+
+
+def _cascade_check_static(node_amps: list[float]) -> tuple[str, float, str]:
+    """When V46 says 'static', check against empty baseline.
+
+    Returns (final_label, confidence_adjustment, reason).
+    """
+    import numpy as np
+    baseline_data = _empty_baseline["amp_means"]
+    if len(baseline_data) < _empty_baseline["min_samples"]:
+        # Not enough baseline data — can't decide, trust V46
+        return "static", 0.0, "no_baseline"
+
+    # Calculate mean baseline per node
+    baseline_arr = np.array(baseline_data)  # (N, 7)
+    baseline_mean = baseline_arr.mean(axis=0)  # (7,)
+
+    # Compare current amps to baseline
+    ratios = []
+    for i, (cur, base) in enumerate(zip(node_amps, baseline_mean)):
+        if base > 0 and cur > 0:
+            ratios.append(cur / base)
+
+    if not ratios:
+        return "static", 0.0, "no_valid_nodes"
+
+    mean_ratio = np.mean(ratios)
+    max_ratio = np.max(ratios)
+    above_count = sum(1 for r in ratios if r > _empty_baseline["threshold_ratio"])
+
+    # Decision logic:
+    # If most nodes show amplitude significantly above empty baseline → real static (person present)
+    # If amplitudes are similar to baseline → actually empty (V46 false positive)
+    if above_count >= 3 or mean_ratio > _empty_baseline["threshold_ratio"]:
+        return "static", 0.0, f"confirmed_present(ratio={mean_ratio:.2f},above={above_count})"
+    else:
+        return "empty", 0.7, f"override_to_empty(ratio={mean_ratio:.2f},above={above_count})"
 
 
 _EPOCH4_SNAPSHOTS_DIR = PROJECT_ROOT / "output" / "epoch4_live_snapshots"

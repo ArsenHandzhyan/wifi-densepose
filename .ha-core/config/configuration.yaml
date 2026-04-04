@@ -1,4 +1,6 @@
-
+# Local Home Assistant runtime config for this workspace.
+# Runtime-generated `.storage`, `.db`, `.log`, and lock files are not canonical
+# project configuration and should remain untracked.
 # Loads default set of integrations. Do not remove.
 default_config:
 

@@ -19,6 +19,7 @@ from src.api.dependencies import (
 from src.services.pose_service import PoseService
 from src.services.hardware_service import HardwareService
 from src.config.settings import get_settings
+from src.services.runtime_uptime import utc_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -148,6 +149,8 @@ async def get_current_pose_estimation(
         
         return PoseEstimationResponse(**result)
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in pose estimation: {e}")
         raise HTTPException(
@@ -186,6 +189,8 @@ async def analyze_pose_data(
         
         return PoseEstimationResponse(**result)
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in pose analysis: {e}")
         raise HTTPException(
@@ -240,12 +245,14 @@ async def get_zones_summary(
         summary = await pose_service.get_zones_summary()
         
         return {
-            "timestamp": datetime.utcnow(),
+            "timestamp": utc_now(),
             "total_persons": summary["total_persons"],
             "zones": summary["zones"],
             "active_zones": summary["active_zones"]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting zones summary: {e}")
         raise HTTPException(
@@ -329,6 +336,8 @@ async def get_detected_activities(
             "zone_id": zone_id
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting activities: {e}")
         raise HTTPException(
@@ -401,6 +410,8 @@ async def get_calibration_status(
             "last_calibration": status.get("last_calibration")
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting calibration status: {e}")
         raise HTTPException(
@@ -418,7 +429,7 @@ async def get_pose_statistics(
     """Get pose estimation statistics."""
     try:
         _ensure_live_pose_surface(pose_service)
-        end_time = datetime.utcnow()
+        end_time = utc_now()
         start_time = end_time - timedelta(hours=hours)
         
         stats = await pose_service.get_statistics(
@@ -435,6 +446,8 @@ async def get_pose_statistics(
             "statistics": stats
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting statistics: {e}")
         raise HTTPException(

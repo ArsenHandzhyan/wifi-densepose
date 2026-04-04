@@ -181,6 +181,9 @@ class ModalityTranslationNetwork(nn.Module):
         
         # Decode to visual-like features
         decoded = self.decode(encoded_features)
+
+        if decoded.shape[2:] != x.shape[2:]:
+            decoded = F.interpolate(decoded, size=x.shape[2:], mode='bilinear', align_corners=False)
         
         return decoded
     

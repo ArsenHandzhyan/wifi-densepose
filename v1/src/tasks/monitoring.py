@@ -107,7 +107,7 @@ class SystemResourceMonitoring(MonitoringTask):
     
     def __init__(self, settings: Settings):
         super().__init__("system_resources", settings)
-        self.interval_seconds = settings.system_monitoring_interval
+        self.interval_seconds = settings.monitoring_interval_seconds
     
     async def collect_metrics(self, session: AsyncSession) -> List[Dict[str, Any]]:
         """Collect system resource metrics."""
@@ -328,7 +328,7 @@ class DatabaseMonitoring(MonitoringTask):
     
     def __init__(self, settings: Settings):
         super().__init__("database", settings)
-        self.interval_seconds = settings.database_monitoring_interval
+        self.interval_seconds = settings.monitoring_interval_seconds
     
     async def collect_metrics(self, session: AsyncSession) -> List[Dict[str, Any]]:
         """Collect database metrics."""
@@ -443,7 +443,7 @@ class ApplicationMonitoring(MonitoringTask):
     
     def __init__(self, settings: Settings):
         super().__init__("application", settings)
-        self.interval_seconds = settings.application_monitoring_interval
+        self.interval_seconds = settings.monitoring_interval_seconds
         self.start_time = datetime.utcnow()
     
     async def collect_metrics(self, session: AsyncSession) -> List[Dict[str, Any]]:
@@ -561,7 +561,7 @@ class PerformanceMonitoring(MonitoringTask):
     
     def __init__(self, settings: Settings):
         super().__init__("performance", settings)
-        self.interval_seconds = settings.performance_monitoring_interval
+        self.interval_seconds = settings.monitoring_interval_seconds
         self.response_times = []
         self.error_counts = {}
     

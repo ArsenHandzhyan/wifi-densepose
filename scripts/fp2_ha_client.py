@@ -26,7 +26,7 @@ import requests
 
 # === Configuration ===
 HA_URL = os.getenv("HA_URL", "http://localhost:8123")
-HA_TOKEN = os.getenv("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI2NWQ5NjQ1ZmI1NTY0OThiOWEyNjc4ZTg0OTczN2QyNCIsImlhdCI6MTc3MjM3MTQzNCwiZXhwIjoyMDg3NzMxNDM0fQ.qpkDjaOaY4sNzz-lzd5wfVUcJXJnoR5p1ca5wQfF13g")
+HA_TOKEN = os.getenv("HA_TOKEN", "")
 FP2_ENTITY = os.getenv("FP2_ENTITY", "input_boolean.fp2_presence")
 
 # Цвета для терминала
@@ -38,6 +38,8 @@ RESET = "\033[0m"
 
 def get_headers():
     """Возвращает заголовки для запросов к HA."""
+    if not HA_TOKEN:
+        raise RuntimeError("HA_TOKEN environment variable is required")
     return {
         "Authorization": f"Bearer {HA_TOKEN}",
         "Content-Type": "application/json"
@@ -145,6 +147,10 @@ def main():
     parser.add_argument('--watch', '-w', action='store_true', help='Режим наблюдения')
     parser.add_argument('--interval', '-i', type=float, default=1.0, help='Интервал опроса (сек)')
     args = parser.parse_args()
+
+    if not HA_TOKEN:
+        print(f"{RED}❌ Требуется переменная окружения HA_TOKEN{RESET}")
+        sys.exit(1)
     
     # Проверка соединения
     if not check_ha_connection():

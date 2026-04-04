@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from src.api.dependencies import get_current_user
 from src.config.settings import get_settings
+from src.services.runtime_uptime import uptime_seconds, utc_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -58,7 +59,7 @@ async def health_check(request: Request):
         pose_service = getattr(request.app.state, 'pose_service', None)
         stream_service = getattr(request.app.state, 'stream_service', None)
         
-        timestamp = datetime.utcnow()
+        timestamp = utc_now()
         components = {}
         overall_status = "healthy"
         
@@ -134,16 +135,19 @@ async def health_check(request: Request):
         if stream_service:
             try:
                 stream_health = await stream_service.health_check()
+                stream_status = stream_health["status"]
                 components["stream"] = ComponentHealth(
                     name="Stream Service",
-                    status=stream_health["status"],
+                    status=stream_status,
                     message=stream_health.get("message"),
                     last_check=timestamp,
                     uptime_seconds=stream_health.get("uptime_seconds"),
                     metrics=stream_health.get("metrics")
                 )
                 
-                if stream_health["status"] != "healthy":
+                if stream_status == "unhealthy":
+                    overall_status = "unhealthy"
+                elif stream_status not in {"healthy", "inactive"}:
                     overall_status = "degraded" if overall_status == "healthy" else "unhealthy"
                     
             except Exception as e:
@@ -167,13 +171,13 @@ async def health_check(request: Request):
         # Get system metrics
         system_metrics = get_system_metrics()
         
-        # Calculate system uptime (placeholder - would need actual startup time)
-        uptime_seconds = 0.0  # TODO: Implement actual uptime tracking
+        app_started_at = getattr(request.app.state, "started_at", None)
+        system_uptime_seconds = uptime_seconds(app_started_at)
         
         return SystemHealth(
             status=overall_status,
             timestamp=timestamp,
-            uptime_seconds=uptime_seconds,
+            uptime_seconds=system_uptime_seconds,
             components=components,
             system_metrics=system_metrics
         )
@@ -190,43 +194,45 @@ async def health_check(request: Request):
 async def readiness_check(request: Request):
     """Check if system is ready to serve requests."""
     try:
-        timestamp = datetime.utcnow()
+        timestamp = utc_now()
         checks = {}
-        
-        # Check if services are available in app state
-        if hasattr(request.app.state, 'pose_service') and request.app.state.pose_service:
+
+        async def _get_service_ready(service_name: str) -> bool:
+            service = getattr(request.app.state, service_name, None)
+            if not service:
+                return False
+            if not hasattr(service, "is_ready"):
+                return True
             try:
-                checks["pose_ready"] = await request.app.state.pose_service.is_ready()
-            except Exception as e:
-                logger.warning(f"Pose service readiness check failed: {e}")
-                checks["pose_ready"] = False
-        else:
-            checks["pose_ready"] = False
-            
-        if hasattr(request.app.state, 'stream_service') and request.app.state.stream_service:
-            try:
-                checks["stream_ready"] = await request.app.state.stream_service.is_ready()
-            except Exception as e:
-                logger.warning(f"Stream service readiness check failed: {e}")
-                checks["stream_ready"] = False
-        else:
-            checks["stream_ready"] = False
-            
-        # Hardware service check (basic availability)
-        checks["hardware_ready"] = True  # Basic readiness - API is responding
-        
+                return bool(await service.is_ready())
+            except Exception as exc:
+                logger.warning(f"{service_name} readiness check failed: {exc}")
+                return False
+
+        checks["pose_ready"] = await _get_service_ready("pose_service")
+        checks["stream_ready"] = await _get_service_ready("stream_service")
+        checks["hardware_ready"] = await _get_service_ready("hardware_service")
+
         # Check system resources
         checks["memory_available"] = check_memory_availability()
         checks["disk_space_available"] = check_disk_space()
-        
-        # Application is ready if at least the basic services are available
-        # For now, we'll consider it ready if the API is responding
-        ready = True  # Basic readiness
-        
-        message = "System is ready" if ready else "System is not ready"
-        if not ready:
-            failed_checks = [name for name, status in checks.items() if not status]
-            message += f". Failed checks: {', '.join(failed_checks)}"
+
+        required_checks = ("memory_available", "disk_space_available")
+        advisory_checks = ("pose_ready", "stream_ready", "hardware_ready")
+
+        ready = all(checks[name] for name in required_checks)
+        failed_required = [name for name in required_checks if not checks[name]]
+        advisory_failures = [name for name in advisory_checks if not checks[name]]
+
+        if ready and not advisory_failures:
+            message = "System is ready"
+        elif ready:
+            message = (
+                "System is ready with advisory issues: "
+                + ", ".join(advisory_failures)
+            )
+        else:
+            message = "System is not ready. Failed checks: " + ", ".join(failed_required)
         
         return ReadinessCheck(
             ready=ready,
@@ -239,7 +245,7 @@ async def readiness_check(request: Request):
         logger.error(f"Readiness check failed: {e}")
         return ReadinessCheck(
             ready=False,
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             checks={},
             message=f"Readiness check failed: {str(e)}"
         )
@@ -250,7 +256,7 @@ async def liveness_check():
     """Simple liveness check for load balancers."""
     return {
         "status": "alive",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_now().isoformat()
     }
 
 
@@ -268,7 +274,7 @@ async def get_health_metrics(
             metrics.update(get_detailed_metrics())
         
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "metrics": metrics
         }
         
@@ -290,7 +296,7 @@ async def get_version_info():
         "version": settings.version,
         "environment": settings.environment,
         "debug": settings.debug,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_now().isoformat()
     }
 
 

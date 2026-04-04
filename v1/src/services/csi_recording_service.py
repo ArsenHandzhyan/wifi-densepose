@@ -207,11 +207,21 @@ class CsiRecordingService:
         for ip, probe in zip(CORE_NODE_IPS, probe_results):
             name = NODE_NAMES.get(ip, ip)
             stream = stream_health.get(name, {})
-            if probe.get("ok"):
+            stream_status = str(stream.get("status") or "offline")
+            stream_last_seen = stream.get("last_seen_sec")
+            stream_ok = stream_status in {"online", "degraded"} and (
+                stream_last_seen is None or float(stream_last_seen) <= 10.0
+            )
+            mgmt_ok = bool(probe.get("ok"))
+
+            if mgmt_ok:
                 data = probe.get("data") or {}
                 results["nodes"][name] = {
                     "ip": ip,
                     "ok": True,
+                    "management_ok": True,
+                    "stream_ok": stream_ok,
+                    "health_source": "management+stream" if stream_ok else "management",
                     "uptime": data.get("uptime_sec", 0),
                     "firmware": data.get("firmware_version", data.get("version", data.get("fw", "?"))),
                     "send_errors": data.get("send_errors", data.get("send_errors_total", 0)),
@@ -229,12 +239,17 @@ class CsiRecordingService:
             else:
                 results["nodes"][name] = {
                     "ip": ip,
-                    "ok": False,
+                    "ok": stream_ok,
+                    "management_ok": False,
+                    "stream_ok": stream_ok,
+                    "health_source": "stream_fallback" if stream_ok else "unhealthy",
                     "error": probe.get("error"),
                     "error_type": probe.get("error_type"),
                     "stream_status": stream.get("status"),
                     "last_seen_sec": stream.get("last_seen_sec"),
                 }
+                if stream_ok:
+                    nodes_ok += 1
 
         if nodes_ok < 3:
             results["ok"] = False
@@ -843,6 +858,7 @@ class CsiRecordingService:
                 port = {
                     "192.168.0.137": 1137,
                     "192.168.0.117": 1117,
+                    "192.168.0.144": 1143,
                     "192.168.0.143": 1143,
                     "192.168.0.125": 1125,
                     "192.168.0.110": 1110,

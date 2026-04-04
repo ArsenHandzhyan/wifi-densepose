@@ -3,14 +3,13 @@ Authentication middleware for WiFi-DensePose API
 """
 
 import logging
+import re
 import time
 from typing import Optional, Dict, Any, Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Request, Response, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -19,11 +18,57 @@ from src.logger import set_request_context
 
 logger = logging.getLogger(__name__)
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# JWT token handler
-security = HTTPBearer(auto_error=False)
+PUBLIC_EXACT_PATHS = {
+    "/openapi.json",
+    "/auth/login",
+    "/auth/register",
+    "/health/health",
+    "/health/ready",
+    "/health/live",
+    "/health/version",
+    "/health/metrics",
+    "/api/v1/health",
+    "/api/v1/ready",
+    "/api/v1/info",
+    "/api/v1/status",
+    "/api/v1/metrics",
+    "/api/v1/pose/current",
+    "/api/v1/pose/zones/summary",
+    "/api/v1/pose/activities",
+    "/api/v1/pose/stats",
+    "/api/v1/stream/status",
+    "/api/v1/stream/metrics",
+    "/api/v1/fp2/status",
+    "/api/v1/fp2/current",
+    "/api/v1/fp2/entities",
+    "/api/v1/fp2/recommended-entity",
+}
+
+PUBLIC_PATH_PREFIXES = (
+    "/docs",
+    "/redoc",
+    "/static",
+)
+
+PUBLIC_PATH_PATTERNS = (
+    re.compile(r"^/api/v1/pose/zones/[^/]+/occupancy$"),
+)
+
+
+def _matches_public_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def is_public_http_path(path: str) -> bool:
+    """Return True when the path belongs to the public runtime surface."""
+    if path in PUBLIC_EXACT_PATHS:
+        return True
+
+    if any(_matches_public_prefix(path, prefix) for prefix in PUBLIC_PATH_PREFIXES):
+        return True
+
+    return any(pattern.fullmatch(path) for pattern in PUBLIC_PATH_PATTERNS)
 
 
 class AuthenticationError(Exception):
@@ -34,6 +79,40 @@ class AuthenticationError(Exception):
 class AuthorizationError(Exception):
     """Authorization error."""
     pass
+
+
+def _normalize_authenticated_user(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize auth payloads to the user shape expected by API surfaces."""
+    normalized = dict(user)
+    username = (
+        normalized.get("username")
+        or normalized.get("id")
+        or normalized.get("email")
+    )
+    roles = list(normalized.get("roles") or [])
+    permissions = list(normalized.get("permissions") or roles)
+    raw_is_admin = normalized.get("is_admin")
+    is_admin = bool("admin" in roles if raw_is_admin is None else raw_is_admin)
+
+    if is_admin and "admin" not in permissions:
+        permissions.append("admin")
+
+    normalized["username"] = username
+    normalized["id"] = normalized.get("id") or username
+    normalized["roles"] = roles
+    normalized["permissions"] = permissions
+    normalized["is_admin"] = is_admin
+    normalized.setdefault("is_active", True)
+
+    return normalized
+
+
+def _check_permission(user_info: Dict[str, Any], required_role: str) -> bool:
+    """Check whether a normalized user payload grants the requested role."""
+    user_roles = user_info.get("roles", [])
+    if "admin" in user_roles:
+        return True
+    return required_role in user_roles
 
 
 class TokenManager:
@@ -48,8 +127,9 @@ class TokenManager:
     def create_access_token(self, data: Dict[str, Any]) -> str:
         """Create JWT access token."""
         to_encode = data.copy()
-        expire = datetime.utcnow() + timedelta(hours=self.expire_hours)
-        to_encode.update({"exp": expire, "iat": datetime.utcnow()})
+        now = datetime.now(UTC)
+        expire = now + timedelta(hours=self.expire_hours)
+        to_encode.update({"exp": expire, "iat": now})
         
         encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
         return encoded_jwt
@@ -71,98 +151,6 @@ class TokenManager:
             return None
 
 
-class UserManager:
-    """User management for authentication."""
-    
-    def __init__(self):
-        # In a real application, this would connect to a database
-        # For now, we'll use a simple in-memory store
-        self._users: Dict[str, Dict[str, Any]] = {
-            "admin": {
-                "username": "admin",
-                "email": "admin@example.com",
-                "hashed_password": self.hash_password("admin123"),
-                "roles": ["admin"],
-                "is_active": True,
-                "created_at": datetime.utcnow(),
-            },
-            "user": {
-                "username": "user",
-                "email": "user@example.com",
-                "hashed_password": self.hash_password("user123"),
-                "roles": ["user"],
-                "is_active": True,
-                "created_at": datetime.utcnow(),
-            }
-        }
-    
-    @staticmethod
-    def hash_password(password: str) -> str:
-        """Hash a password."""
-        return pwd_context.hash(password)
-    
-    @staticmethod
-    def verify_password(plain_password: str, hashed_password: str) -> bool:
-        """Verify a password against its hash."""
-        return pwd_context.verify(plain_password, hashed_password)
-    
-    def get_user(self, username: str) -> Optional[Dict[str, Any]]:
-        """Get user by username."""
-        return self._users.get(username)
-    
-    def authenticate_user(self, username: str, password: str) -> Optional[Dict[str, Any]]:
-        """Authenticate user with username and password."""
-        user = self.get_user(username)
-        if not user:
-            return None
-        
-        if not self.verify_password(password, user["hashed_password"]):
-            return None
-        
-        if not user.get("is_active", False):
-            return None
-        
-        return user
-    
-    def create_user(self, username: str, email: str, password: str, roles: list = None) -> Dict[str, Any]:
-        """Create a new user."""
-        if username in self._users:
-            raise ValueError("User already exists")
-        
-        user = {
-            "username": username,
-            "email": email,
-            "hashed_password": self.hash_password(password),
-            "roles": roles or ["user"],
-            "is_active": True,
-            "created_at": datetime.utcnow(),
-        }
-        
-        self._users[username] = user
-        return user
-    
-    def update_user(self, username: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Update user information."""
-        user = self._users.get(username)
-        if not user:
-            return None
-        
-        # Don't allow updating certain fields
-        protected_fields = {"username", "created_at", "hashed_password"}
-        updates = {k: v for k, v in updates.items() if k not in protected_fields}
-        
-        user.update(updates)
-        return user
-    
-    def deactivate_user(self, username: str) -> bool:
-        """Deactivate a user."""
-        user = self._users.get(username)
-        if user:
-            user["is_active"] = False
-            return True
-        return False
-
-
 class AuthenticationMiddleware(BaseHTTPMiddleware):
     """Authentication middleware for FastAPI."""
     
@@ -170,7 +158,6 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.settings = settings
         self.token_manager = TokenManager(settings)
-        self.user_manager = UserManager()
         self.enabled = settings.enable_authentication
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -230,28 +217,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     
     def _should_skip_auth(self, request: Request) -> bool:
         """Check if authentication should be skipped for this request."""
-        path = request.url.path
-        
-        # Skip authentication for these paths
-        skip_paths = [
-            "/health",
-            "/metrics",
-            "/docs",
-            "/redoc",
-            "/openapi.json",
-            "/auth/login",
-            "/auth/register",
-            "/static",
-            "/api/v1/health",
-            "/api/v1/ready",
-            "/api/v1/live",
-            "/api/v1/fp2",
-            "/api/v1/pose",
-            "/api/v1/stream",
-            "/api/v1/info",
-        ]
-        
-        return any(path.startswith(skip_path) for skip_path in skip_paths)
+        return is_public_http_path(request.url.path)
     
     async def _authenticate_request(self, request: Request) -> Optional[Dict[str, Any]]:
         """Authenticate the request and return user info."""
@@ -283,22 +249,20 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             username = payload.get("sub")
             if not username:
                 raise AuthenticationError("Invalid token payload")
-            
-            # Get user info
-            user = self.user_manager.get_user(username)
-            if not user:
-                raise AuthenticationError("User not found")
-            
-            if not user.get("is_active", False):
-                raise AuthenticationError("User account is disabled")
-            
-            # Return user info without sensitive data
-            return {
-                "username": user["username"],
-                "email": user["email"],
-                "roles": user["roles"],
-                "is_active": user["is_active"],
-            }
+
+            return _normalize_authenticated_user(
+                {
+                    "id": payload.get("id"),
+                    "username": username,
+                    "email": payload.get("email"),
+                    "roles": payload.get("roles", []),
+                    "permissions": payload.get("permissions"),
+                    "is_admin": payload.get("is_admin"),
+                    "is_active": payload.get("is_active", True),
+                    "zones": payload.get("zones", []),
+                    "routers": payload.get("routers", []),
+                }
+            )
             
         except AuthenticationError:
             raise
@@ -320,73 +284,34 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     
     async def login(self, username: str, password: str) -> Dict[str, Any]:
         """Authenticate user and return token."""
-        user = self.user_manager.authenticate_user(username, password)
-        if not user:
-            raise AuthenticationError("Invalid username or password")
-        
-        # Create token
-        token_data = {
-            "sub": user["username"],
-            "email": user["email"],
-            "roles": user["roles"],
-        }
-        
-        access_token = self.token_manager.create_access_token(token_data)
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "expires_in": self.settings.jwt_expire_hours * 3600,
-            "user": {
-                "username": user["username"],
-                "email": user["email"],
-                "roles": user["roles"],
-            }
-        }
+        raise AuthenticationError(
+            "Interactive login is not implemented in the current runtime"
+        )
     
     async def register(self, username: str, email: str, password: str) -> Dict[str, Any]:
         """Register a new user."""
-        try:
-            user = self.user_manager.create_user(username, email, password)
-            
-            # Create token for new user
-            token_data = {
-                "sub": user["username"],
-                "email": user["email"],
-                "roles": user["roles"],
-            }
-            
-            access_token = self.token_manager.create_access_token(token_data)
-            
-            return {
-                "access_token": access_token,
-                "token_type": "bearer",
-                "expires_in": self.settings.jwt_expire_hours * 3600,
-                "user": {
-                    "username": user["username"],
-                    "email": user["email"],
-                    "roles": user["roles"],
-                }
-            }
-            
-        except ValueError as e:
-            raise AuthenticationError(str(e))
+        raise AuthenticationError(
+            "Interactive registration is not implemented in the current runtime"
+        )
     
     async def refresh_token(self, token: str) -> Dict[str, Any]:
         """Refresh an access token."""
         try:
             payload = self.token_manager.verify_token(token)
             username = payload.get("sub")
-            
-            user = self.user_manager.get_user(username)
-            if not user or not user.get("is_active", False):
-                raise AuthenticationError("User not found or inactive")
+            if not username:
+                raise AuthenticationError("Invalid token payload")
             
             # Create new token
             token_data = {
-                "sub": user["username"],
-                "email": user["email"],
-                "roles": user["roles"],
+                "sub": username,
+                "email": payload.get("email"),
+                "roles": payload.get("roles", []),
+                "permissions": payload.get("permissions"),
+                "is_admin": payload.get("is_admin"),
+                "is_active": payload.get("is_active", True),
+                "zones": payload.get("zones", []),
+                "routers": payload.get("routers", []),
             }
             
             new_token = self.token_manager.create_access_token(token_data)
@@ -397,19 +322,12 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                 "expires_in": self.settings.jwt_expire_hours * 3600,
             }
             
-        except Exception as e:
+        except Exception:
             raise AuthenticationError("Token refresh failed")
     
     def check_permission(self, user_info: Dict[str, Any], required_role: str) -> bool:
         """Check if user has required role/permission."""
-        user_roles = user_info.get("roles", [])
-        
-        # Admin role has all permissions
-        if "admin" in user_roles:
-            return True
-        
-        # Check specific role
-        return required_role in user_roles
+        return _check_permission(user_info, required_role)
     
     def require_role(self, required_role: str):
         """Decorator to require specific role."""
@@ -431,21 +349,12 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         return decorator
 
 
-# Global authentication middleware instance
-_auth_middleware: Optional[AuthenticationMiddleware] = None
-
-
-def get_auth_middleware(settings: Settings) -> AuthenticationMiddleware:
-    """Get authentication middleware instance."""
-    global _auth_middleware
-    if _auth_middleware is None:
-        _auth_middleware = AuthenticationMiddleware(settings)
-    return _auth_middleware
-
-
 def get_current_user(request: Request) -> Optional[Dict[str, Any]]:
     """Get current authenticated user from request."""
-    return getattr(request.state, "user", None)
+    user = getattr(request.state, "user", None)
+    if not user:
+        return None
+    return _normalize_authenticated_user(user)
 
 
 def require_authentication(request: Request) -> Dict[str, Any]:
@@ -464,9 +373,8 @@ def require_role(role: str):
     """Dependency to require specific role."""
     def dependency(request: Request) -> Dict[str, Any]:
         user = require_authentication(request)
-        
-        auth_middleware = get_auth_middleware(request.app.state.settings)
-        if not auth_middleware.check_permission(user, role):
+
+        if not _check_permission(user, role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Role '{role}' required",

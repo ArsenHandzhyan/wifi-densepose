@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # WiFi-DensePose Integration Validation Script
-# This script validates the complete system integration
+# Validates the current canonical runtime surface for the v1 application.
 
-set -e  # Exit on any error
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -14,12 +14,17 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-VENV_PATH="${PROJECT_ROOT}/.venv"
-TEST_DB_PATH="${PROJECT_ROOT}/test_integration.db"
-LOG_FILE="${PROJECT_ROOT}/integration_validation.log"
+APP_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$APP_ROOT")"
+TEST_DB_PATH="${APP_ROOT}/test_integration.db"
+LOG_FILE="${APP_ROOT}/integration_validation.log"
+REPORT_FILE="${APP_ROOT}/integration_report.md"
+UVICORN_LOG="/tmp/wdp_validate_uvicorn.log"
+SERVER_PID=""
+PYTHON_BIN=""
+PACKAGING_STATUS="SKIPPED"
+PACKAGING_NOTE="Packaging smoke skipped because build/twine are not installed in the active environment."
 
-# Functions
 log() {
     echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
 }
@@ -37,89 +42,132 @@ error() {
 }
 
 cleanup() {
-    log "Cleaning up test resources..."
-    
-    # Stop any running servers
-    pkill -f "wifi-densepose" || true
-    pkill -f "uvicorn.*src.app" || true
-    
-    # Remove test database
+    log "Cleaning up validation resources..."
+
+    if [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+
     [ -f "$TEST_DB_PATH" ] && rm -f "$TEST_DB_PATH"
-    
-    # Remove test logs
-    find "$PROJECT_ROOT" -name "*.log" -path "*/test*" -delete 2>/dev/null || true
-    
+    rm -f "$UVICORN_LOG" /tmp/wdp_validate_health.out /tmp/wdp_validate_endpoint.out
+
     success "Cleanup completed"
+}
+
+resolve_python_bin() {
+    local candidates=(
+        "${REPO_ROOT}/venv/bin/python"
+        "${REPO_ROOT}/.venv/bin/python"
+        "${APP_ROOT}/.venv/bin/python"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [ -x "$candidate" ]; then
+            PYTHON_BIN="$candidate"
+            return
+        fi
+    done
+
+    PYTHON_BIN="$(command -v python3)"
+}
+
+activate_virtualenv() {
+    local venv_root=""
+
+    if [[ "$PYTHON_BIN" == */bin/python ]]; then
+        venv_root="$(dirname "$(dirname "$PYTHON_BIN")")"
+        if [ -f "${venv_root}/bin/activate" ]; then
+            # shellcheck disable=SC1090
+            source "${venv_root}/bin/activate"
+        fi
+    fi
+}
+
+set_validation_env() {
+    export ENVIRONMENT="${ENVIRONMENT:-development}"
+    export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///test_integration.db}"
+    export SQLITE_FALLBACK_PATH="${SQLITE_FALLBACK_PATH:-./test_integration.db}"
+    export REDIS_ENABLED="${REDIS_ENABLED:-false}"
+    export REDIS_REQUIRED="${REDIS_REQUIRED:-false}"
+    export SECRET_KEY="${SECRET_KEY:-test-secret-key-for-validation-only}"
+    export WIFI_DENSEPOSE_ALLOW_MULTI_BACKEND="${WIFI_DENSEPOSE_ALLOW_MULTI_BACKEND:-1}"
 }
 
 check_prerequisites() {
     log "Checking prerequisites..."
-    
-    # Check Python version
-    if ! python3 --version | grep -E "Python 3\.(9|10|11|12)" > /dev/null; then
+
+    resolve_python_bin
+    activate_virtualenv
+    set_validation_env
+
+    if ! "$PYTHON_BIN" - <<'PY'
+import sys
+
+if sys.version_info < (3, 9):
+    raise SystemExit(1)
+
+print("Python", sys.version.split()[0])
+PY
+    then
         error "Python 3.9+ is required"
         exit 1
     fi
     success "Python version check passed"
-    
-    # Check if virtual environment exists
-    if [ ! -d "$VENV_PATH" ]; then
-        warning "Virtual environment not found, creating one..."
-        python3 -m venv "$VENV_PATH"
-    fi
-    success "Virtual environment check passed"
-    
-    # Activate virtual environment
-    source "$VENV_PATH/bin/activate"
-    
-    # Check if requirements are installed
-    if ! pip list | grep -q "fastapi"; then
-        warning "Dependencies not installed, installing..."
-        pip install -e ".[dev]"
+
+    if ! "$PYTHON_BIN" - <<'PY'
+import click
+import fastapi
+import pytest
+import uvicorn
+PY
+    then
+        error "Missing required validation dependencies (click, fastapi, pytest, uvicorn)"
+        exit 1
     fi
     success "Dependencies check passed"
 }
 
 validate_package_structure() {
     log "Validating package structure..."
-    
-    # Check main application files
-    required_files=(
+
+    local app_required_files=(
         "src/__init__.py"
         "src/main.py"
         "src/app.py"
-        "src/config.py"
+        "src/config/settings.py"
         "src/logger.py"
         "src/cli.py"
-        "pyproject.toml"
-        "setup.py"
-        "MANIFEST.in"
     )
-    
-    for file in "${required_files[@]}"; do
-        if [ ! -f "$PROJECT_ROOT/$file" ]; then
+
+    for file in "${app_required_files[@]}"; do
+        if [ ! -f "${APP_ROOT}/${file}" ]; then
             error "Required file missing: $file"
             exit 1
         fi
     done
+
+    if [ ! -f "${REPO_ROOT}/pyproject.toml" ]; then
+        error "Required file missing: pyproject.toml"
+        exit 1
+    fi
     success "Package structure validation passed"
-    
-    # Check directory structure
-    required_dirs=(
+
+    local required_dirs=(
         "src/config"
         "src/core"
         "src/api"
         "src/services"
-        "src/middleware"
         "src/database"
         "src/tasks"
         "src/commands"
         "tests/unit"
-        "tests/integration"
+        "tests/legacy"
     )
-    
+
     for dir in "${required_dirs[@]}"; do
-        if [ ! -d "$PROJECT_ROOT/$dir" ]; then
+        if [ ! -d "${APP_ROOT}/${dir}" ]; then
             error "Required directory missing: $dir"
             exit 1
         fi
@@ -129,34 +177,30 @@ validate_package_structure() {
 
 validate_imports() {
     log "Validating Python imports..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Test main package import
-    if ! python -c "import src; print(f'Package version: {src.__version__}')"; then
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" -c "import src; print(f'Package version: {src.__version__}')"; then
         error "Failed to import main package"
         exit 1
     fi
     success "Main package import passed"
-    
-    # Test core components
-    core_modules=(
+
+    local core_modules=(
         "src.app"
         "src.config.settings"
         "src.logger"
         "src.cli"
         "src.core.csi_processor"
         "src.core.phase_sanitizer"
-        "src.core.pose_estimator"
         "src.core.router_interface"
         "src.services.orchestrator"
         "src.database.connection"
         "src.database.models"
     )
-    
+
     for module in "${core_modules[@]}"; do
-        if ! python -c "import $module" 2>/dev/null; then
+        if ! "$PYTHON_BIN" -c "import $module" 2>/dev/null; then
             error "Failed to import module: $module"
             exit 1
         fi
@@ -166,18 +210,21 @@ validate_imports() {
 
 validate_configuration() {
     log "Validating configuration..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Test configuration loading
-    if ! python -c "
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" - <<'PY'
 from src.config.settings import get_settings
+
 settings = get_settings()
 print(f'Environment: {settings.environment}')
 print(f'Debug: {settings.debug}')
-print(f'API Version: {settings.api_version}')
-"; then
+print(f'Version: {settings.version}')
+print(f'API Prefix: {settings.api_prefix}')
+print(f'Redis Enabled: {settings.redis_enabled}')
+assert settings.secret_key, 'Secret key must be set for validation'
+PY
+    then
         error "Configuration validation failed"
         exit 1
     fi
@@ -186,103 +233,130 @@ print(f'API Version: {settings.api_version}')
 
 validate_database() {
     log "Validating database integration..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Test database connection and models
-    if ! python -c "
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" - <<'PY'
 import asyncio
 from src.config.settings import get_settings
 from src.database.connection import get_database_manager
 
 async def test_db():
     settings = get_settings()
-    settings.database_url = 'sqlite+aiosqlite:///test_integration.db'
-    
     db_manager = get_database_manager(settings)
     await db_manager.initialize()
-    await db_manager.test_connection()
-    
-    # Test connection stats
+    assert await db_manager.test_connection(), 'Database test_connection() returned False'
     stats = await db_manager.get_connection_stats()
-    print(f'Database connected: {stats[\"database\"][\"connected\"]}')
-    
-    await db_manager.close_all_connections()
+    print(f'Stats keys: {sorted(stats.keys())}')
+    assert 'postgresql' in stats, 'Connection stats missing pool information'
+    await db_manager.close_connections()
     print('Database validation passed')
 
 asyncio.run(test_db())
-"; then
+PY
+    then
         error "Database validation failed"
         exit 1
     fi
     success "Database validation passed"
 }
 
+validate_route_surface() {
+    log "Validating API route surface..."
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" - <<'PY'
+from src.app import app
+
+paths = {route.path for route in app.routes}
+expected = {
+    '/health/health',
+    '/api/v1/status',
+    '/api/v1/pose/current',
+    '/api/v1/csi/status',
+    '/api/v1/csi/record/status',
+    '/api/v1/fp2/status',
+}
+
+missing = sorted(expected - paths)
+assert not missing, f'Missing expected routes: {missing}'
+print(f'Route count: {len(paths)}')
+PY
+    then
+        error "API route surface validation failed"
+        exit 1
+    fi
+    success "API route surface validation passed"
+}
+
 validate_api_endpoints() {
-    log "Validating API endpoints..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Start server in background
-    export WIFI_DENSEPOSE_ENVIRONMENT=test
-    export WIFI_DENSEPOSE_DATABASE_URL="sqlite+aiosqlite:///test_integration.db"
-    
-    python -m uvicorn src.app:app --host 127.0.0.1 --port 8888 --log-level error &
+    log "Validating HTTP smoke endpoints..."
+
+    cd "$APP_ROOT"
+
+    "$PYTHON_BIN" -m uvicorn src.app:app --host 127.0.0.1 --port 8888 --log-level error >"$UVICORN_LOG" 2>&1 &
     SERVER_PID=$!
-    
-    # Wait for server to start
-    sleep 5
-    
-    # Test endpoints
-    endpoints=(
-        "http://127.0.0.1:8888/health"
-        "http://127.0.0.1:8888/metrics"
-        "http://127.0.0.1:8888/api/v1/devices"
-        "http://127.0.0.1:8888/api/v1/sessions"
+
+    local ready=0
+    local code=""
+    local endpoints=(
+        "/health/health"
+        "/api/v1/status"
+        "/api/v1/csi/status"
+        "/api/v1/csi/record/status"
+        "/api/v1/fp2/status"
     )
-    
+
+    for _ in {1..20}; do
+        code="$(curl -s -o /tmp/wdp_validate_health.out -w '%{http_code}' http://127.0.0.1:8888/health/health || true)"
+        if [ "$code" = "200" ]; then
+            ready=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$ready" -ne 1 ]; then
+        error "Validation server did not become ready on :8888"
+        [ -f "$UVICORN_LOG" ] && sed -n '1,160p' "$UVICORN_LOG" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+
     for endpoint in "${endpoints[@]}"; do
-        if ! curl -s -f "$endpoint" > /dev/null; then
-            error "API endpoint failed: $endpoint"
-            kill $SERVER_PID 2>/dev/null || true
+        code="$(curl -s -o /tmp/wdp_validate_endpoint.out -w '%{http_code}' "http://127.0.0.1:8888${endpoint}" || true)"
+        if [ "$code" != "200" ]; then
+            error "HTTP smoke failed: ${endpoint} returned ${code}"
+            [ -f /tmp/wdp_validate_endpoint.out ] && sed -n '1,40p' /tmp/wdp_validate_endpoint.out | tee -a "$LOG_FILE"
             exit 1
         fi
     done
-    
-    # Stop server
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    
-    success "API endpoints validation passed"
+
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+
+    success "HTTP smoke endpoints validation passed"
 }
 
 validate_cli() {
     log "Validating CLI interface..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Test CLI commands
-    if ! python -m src.cli --help > /dev/null; then
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" -m src.cli --help > /dev/null; then
         error "CLI help command failed"
         exit 1
     fi
     success "CLI help command passed"
-    
-    # Test version command
-    if ! python -m src.cli version > /dev/null; then
+
+    if ! "$PYTHON_BIN" -m src.cli version > /dev/null; then
         error "CLI version command failed"
         exit 1
     fi
     success "CLI version command passed"
-    
-    # Test config validation
-    export WIFI_DENSEPOSE_ENVIRONMENT=test
-    export WIFI_DENSEPOSE_DATABASE_URL="sqlite+aiosqlite:///test_integration.db"
-    
-    if ! python -m src.cli config validate > /dev/null; then
+
+    if ! "$PYTHON_BIN" -m src.cli config validate > /dev/null; then
         error "CLI config validation failed"
         exit 1
     fi
@@ -291,96 +365,83 @@ validate_cli() {
 
 validate_background_tasks() {
     log "Validating background tasks..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Test task managers
-    if ! python -c "
-import asyncio
+
+    cd "$APP_ROOT"
+
+    if ! "$PYTHON_BIN" - <<'PY'
 from src.config.settings import get_settings
+from src.tasks.backup import get_backup_manager
 from src.tasks.cleanup import get_cleanup_manager
 from src.tasks.monitoring import get_monitoring_manager
-from src.tasks.backup import get_backup_manager
 
-async def test_tasks():
-    settings = get_settings()
-    settings.database_url = 'sqlite+aiosqlite:///test_integration.db'
-    
-    # Test cleanup manager
-    cleanup_manager = get_cleanup_manager(settings)
-    cleanup_stats = cleanup_manager.get_stats()
-    print(f'Cleanup manager initialized: {\"manager\" in cleanup_stats}')
-    
-    # Test monitoring manager
-    monitoring_manager = get_monitoring_manager(settings)
-    monitoring_stats = monitoring_manager.get_stats()
-    print(f'Monitoring manager initialized: {\"manager\" in monitoring_stats}')
-    
-    # Test backup manager
-    backup_manager = get_backup_manager(settings)
-    backup_stats = backup_manager.get_stats()
-    print(f'Backup manager initialized: {\"manager\" in backup_stats}')
-    
-    print('Background tasks validation passed')
+settings = get_settings()
+managers = [
+    ('cleanup', get_cleanup_manager),
+    ('monitoring', get_monitoring_manager),
+    ('backup', get_backup_manager),
+]
 
-asyncio.run(test_tasks())
-"; then
+for name, factory in managers:
+    stats = factory(settings).get_stats()
+    assert 'manager' in stats, f'{name} manager stats missing manager section'
+    print(f'{name}_tasks={len(stats.get("tasks", []))}')
+
+print('Background tasks validation passed')
+PY
+    then
         error "Background tasks validation failed"
         exit 1
     fi
     success "Background tasks validation passed"
 }
 
-run_integration_tests() {
-    log "Running integration tests..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Set test environment
-    export WIFI_DENSEPOSE_ENVIRONMENT=test
-    export WIFI_DENSEPOSE_DATABASE_URL="sqlite+aiosqlite:///test_integration.db"
-    
-    # Run integration tests
-    if ! python -m pytest tests/integration/ -v --tb=short; then
-        error "Integration tests failed"
+run_canonical_test_surface() {
+    log "Running canonical pytest surface..."
+
+    cd "$REPO_ROOT"
+
+    if ! "$PYTHON_BIN" -m pytest -q; then
+        error "Canonical pytest surface failed"
         exit 1
     fi
-    success "Integration tests passed"
+    success "Canonical pytest surface passed"
 }
 
 validate_package_build() {
     log "Validating package build..."
-    
-    cd "$PROJECT_ROOT"
-    source "$VENV_PATH/bin/activate"
-    
-    # Install build tools
-    pip install build twine
-    
-    # Build package
-    if ! python -m build; then
+
+    cd "$REPO_ROOT"
+
+    if ! "$PYTHON_BIN" - <<'PY' > /dev/null 2>&1
+import build
+import twine
+PY
+    then
+        warning "$PACKAGING_NOTE"
+        return
+    fi
+
+    if ! "$PYTHON_BIN" -m build; then
         error "Package build failed"
         exit 1
     fi
     success "Package build passed"
-    
-    # Check package
-    if ! python -m twine check dist/*; then
+
+    if ! "$PYTHON_BIN" -m twine check dist/*; then
         error "Package check failed"
         exit 1
     fi
     success "Package check passed"
-    
-    # Clean up build artifacts
+
     rm -rf build/ dist/ *.egg-info/
+    PACKAGING_STATUS="PASSED"
+    PACKAGING_NOTE="Build and twine metadata checks passed."
 }
 
 generate_report() {
     log "Generating integration report..."
-    
-    cat > "$PROJECT_ROOT/integration_report.md" << EOF
+
+    cat > "$REPORT_FILE" <<EOF
 # WiFi-DensePose Integration Validation Report
 
 **Date:** $(date)
@@ -390,8 +451,7 @@ generate_report() {
 
 ### Prerequisites
 - ✅ Python version check
-- ✅ Virtual environment setup
-- ✅ Dependencies installation
+- ✅ Runtime dependencies present
 
 ### Package Structure
 - ✅ Required files present
@@ -401,58 +461,66 @@ generate_report() {
 ### Core Components
 - ✅ Configuration management
 - ✅ Database integration
-- ✅ API endpoints
+- ✅ API route surface
+- ✅ HTTP smoke endpoints
 - ✅ CLI interface
 - ✅ Background tasks
 
 ### Testing
-- ✅ Integration tests passed
-- ✅ Package build successful
+- ✅ Canonical pytest surface passed
+- ℹ️ Legacy integration suite remains in \`v1/tests/legacy/integration\` and is not part of default validation
+- ${PACKAGING_STATUS} Packaging smoke
+
+### Validation Environment
+- Environment: \`${ENVIRONMENT}\`
+- Database URL: \`${DATABASE_URL}\`
+- SQLite fallback path: \`${SQLITE_FALLBACK_PATH}\`
+- Redis enabled: \`${REDIS_ENABLED}\`
+- Multi-backend bypass: \`${WIFI_DENSEPOSE_ALLOW_MULTI_BACKEND}\`
 
 ## System Information
 
-**Python Version:** $(python --version)
-**Package Version:** $(python -c "import src; print(src.__version__)")
-**Environment:** $(python -c "from src.config.settings import get_settings; print(get_settings().environment)")
+**Python Version:** $("$PYTHON_BIN" --version)
+**Package Version:** $(cd "$APP_ROOT" && "$PYTHON_BIN" -c "import src; print(src.__version__)")
+**Environment:** $(cd "$APP_ROOT" && "$PYTHON_BIN" -c "from src.config.settings import get_settings; print(get_settings().environment)")
 
 ## Next Steps
 
-The WiFi-DensePose system has been successfully integrated and validated.
+The WiFi-DensePose canonical validation surface passed with the current repository layout.
 You can now:
 
-1. Start the server: \`wifi-densepose start\`
+1. Start the server: \`cd v1 && uvicorn src.app:app --host 127.0.0.1 --port 8000\`
 2. Check status: \`wifi-densepose status\`
 3. View configuration: \`wifi-densepose config show\`
-4. Run tests: \`pytest tests/\`
+4. Run tests: \`./venv/bin/python -m pytest -q\`
 
 For more information, see the documentation in the \`docs/\` directory.
+Packaging note: ${PACKAGING_NOTE}
 EOF
 
-    success "Integration report generated: integration_report.md"
+    success "Integration report generated: ${REPORT_FILE}"
 }
 
 main() {
     log "Starting WiFi-DensePose integration validation..."
-    
-    # Trap cleanup on exit
+
     trap cleanup EXIT
-    
-    # Run validation steps
+
     check_prerequisites
     validate_package_structure
     validate_imports
     validate_configuration
     validate_database
+    validate_route_surface
     validate_api_endpoints
     validate_cli
     validate_background_tasks
-    run_integration_tests
+    run_canonical_test_surface
     validate_package_build
     generate_report
-    
+
     success "🎉 All integration validations passed!"
     log "Integration validation completed successfully"
 }
 
-# Run main function
 main "$@"

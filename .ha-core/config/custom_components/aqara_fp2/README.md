@@ -1,5 +1,14 @@
 # Aqara FP2 Cloud Integration - Установка и настройка
 
+> Канонический исходник интеграции:
+> `/Users/arsen/Desktop/wifi-densepose/custom_components/aqara_fp2`
+>
+> Shadow copy для локального Home Assistant:
+> `/Users/arsen/Desktop/wifi-densepose/.ha-core/config/custom_components/aqara_fp2`
+>
+> Для синхронизации shadow copy используйте:
+> `./scripts/sync_aqara_fp2_shadow_copy.sh`
+
 ## 📦 Установка кастомной интеграции
 
 ### Шаг 1: Скопируйте файлы в Home Assistant
@@ -45,8 +54,8 @@ docker restart homeassistant
 
 **Поля:**
 - **Region**: `europe` (Germany)
-- **Access Token**: `928a72b8088cac5c79473fca295d5523`
-- **Refresh Token** (опционально): `13ed4606510581b47ca3485365e54748`
+- **Access Token**: подставьте актуальный токен из безопасного источника
+- **Refresh Token** (опционально): подставьте актуальный refresh token из безопасного источника
 
 Нажмите **"Отправить"**
 
@@ -219,7 +228,7 @@ curl -X POST https://open-ger.aqara.com/v3.0/open/api \
   -d '{
     "intent": "account.refreshToken",
     "data": {
-      "refreshtoken": "13ed4606510581b47ca3485365e54748"
+      "refreshtoken": "YOUR_REFRESH_TOKEN"
     }
   }'
 ```

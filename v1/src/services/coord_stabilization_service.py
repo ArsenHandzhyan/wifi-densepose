@@ -44,7 +44,7 @@ ZONE_BOUNDS: dict[str, tuple[float, float, float, float]] = {
 }
 
 # ── EMA parameters ─────────────────────────────────────────────────
-ALPHA_STATIC = 0.05    # very slow tracking for static presence
+ALPHA_STATIC = 0.15    # moderate tracking for static presence (was 0.05, too laggy)
 ALPHA_MOTION = 0.40    # responsive tracking during motion
 ALPHA_TRANSITION = 0.20  # first window after motion stops
 

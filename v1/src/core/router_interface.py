@@ -208,6 +208,18 @@ class RouterInterface:
     def live_collection_available(self) -> bool:
         """Whether this interface can collect real CSI right now."""
         return bool(self.mock_mode or self.live_collection_implemented)
+
+    def _health_reason(self) -> str:
+        """Explain current health state for status surfaces."""
+        if not self.is_connected:
+            return "disconnected"
+        if self.mock_mode:
+            return "mock_mode"
+        if not self.live_collection_available:
+            return "live_collection_unimplemented"
+        if self.error_count >= 5:
+            return "error_threshold_exceeded"
+        return "ok"
     
     async def check_health(self) -> bool:
         """Check if the router connection is healthy.
@@ -222,9 +234,13 @@ class RouterInterface:
             # In mock mode, always healthy
             if self.mock_mode:
                 return True
-            
+
+            # A connected placeholder backend must not be reported as healthy.
+            if not self.live_collection_available:
+                return False
+
             # For real connections, we could ping the router or check SSH connection
-            # For now, consider healthy if error count is low
+            # For now, consider healthy if error count is low.
             return self.error_count < 5
             
         except Exception as e:
@@ -237,9 +253,12 @@ class RouterInterface:
         Returns:
             Dictionary containing router status
         """
+        healthy = await self.check_health()
         return {
             "router_id": self.router_id,
             "connected": self.is_connected,
+            "healthy": healthy,
+            "health_reason": self._health_reason(),
             "mock_mode": self.mock_mode,
             "connection_backend": self.connection_backend,
             "live_collection_available": self.live_collection_available,

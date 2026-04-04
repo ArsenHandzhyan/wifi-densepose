@@ -6,13 +6,18 @@ from homeassistant.core import callback
 
 from .const import (
     CONF_ACCESS_TOKEN,
+    CONF_APP_ID,
+    CONF_APP_KEY,
     CONF_DEVICE_ID,
+    CONF_KEY_ID,
     CONF_REFRESH_TOKEN,
     CONF_REGION,
     API_DOMAINS,
+    DEFAULT_APP_ID,
+    DEFAULT_APP_KEY,
+    DEFAULT_KEY_ID,
     DEFAULT_REGION,
     DOMAIN,
-    SCAN_INTERVAL,
 )
 
 
@@ -51,6 +56,9 @@ class AqaraFp2ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Required(CONF_ACCESS_TOKEN): str,
                     vol.Optional(CONF_REFRESH_TOKEN): str,
+                    vol.Optional(CONF_APP_ID, default=DEFAULT_APP_ID): str,
+                    vol.Optional(CONF_APP_KEY, default=DEFAULT_APP_KEY): str,
+                    vol.Optional(CONF_KEY_ID, default=DEFAULT_KEY_ID): str,
                     vol.Required(CONF_DEVICE_ID): str,
                 }
             ),
@@ -95,6 +103,33 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         description={
                             "suggested_value": self.config_entry.data.get(
                                 CONF_REFRESH_TOKEN, ""
+                            )
+                        },
+                    ): str,
+                    vol.Optional(
+                        CONF_APP_ID,
+                        description={
+                            "suggested_value": self.config_entry.options.get(
+                                CONF_APP_ID,
+                                self.config_entry.data.get(CONF_APP_ID, DEFAULT_APP_ID),
+                            )
+                        },
+                    ): str,
+                    vol.Optional(
+                        CONF_APP_KEY,
+                        description={
+                            "suggested_value": self.config_entry.options.get(
+                                CONF_APP_KEY,
+                                self.config_entry.data.get(CONF_APP_KEY, DEFAULT_APP_KEY),
+                            )
+                        },
+                    ): str,
+                    vol.Optional(
+                        CONF_KEY_ID,
+                        description={
+                            "suggested_value": self.config_entry.options.get(
+                                CONF_KEY_ID,
+                                self.config_entry.data.get(CONF_KEY_ID, DEFAULT_KEY_ID),
                             )
                         },
                     ): str,

@@ -5,31 +5,51 @@ FastAPI application factory and configuration
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
-from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from src.config.settings import Settings
-from src.services.orchestrator import ServiceOrchestrator
-from src.middleware.auth import AuthenticationMiddleware
+from .config.settings import Settings
+from .services.orchestrator import ServiceOrchestrator
+from .middleware.auth import AuthenticationMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from src.middleware.rate_limit import RateLimitMiddleware
-from src.middleware.error_handler import ErrorHandlingMiddleware
-from src.api.routers import pose, stream, health, fp2, csi, training
-from src.api.websocket.connection_manager import connection_manager
-from src.services.backend_instance_guard import (
-    acquire_backend_instance_lock,
-    release_backend_instance_lock,
-)
+from .middleware.rate_limit import RateLimitMiddleware
+from .middleware.error_handler import ErrorHandlingMiddleware
+from .api.routers import pose, stream, health, fp2, training, csi
+from .api.websocket.connection_manager import connection_manager
 
 logger = logging.getLogger(__name__)
+
+
+UI_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+def _resolve_ui_directory() -> Optional[Path]:
+    """Return the bundled UI directory when present."""
+    candidates = [
+        Path(__file__).resolve().parents[2] / "ui",
+        Path("/app/ui"),
+    ]
+    for candidate in candidates:
+        index_path = candidate / "index.html"
+        if index_path.exists():
+            return candidate
+    return None
+
+
+def _ui_file_response(path: Path) -> FileResponse:
+    """Serve UI assets without browser caching to avoid stale operator bundles."""
+    return FileResponse(path, headers=UI_NO_CACHE_HEADERS)
 
 
 @asynccontextmanager
@@ -38,9 +58,6 @@ async def lifespan(app: FastAPI):
     logger.info("Starting WiFi-DensePose API...")
     
     try:
-        lock_info = acquire_backend_instance_lock("src.app:app")
-        logger.info("Backend instance guard acquired: %s", lock_info)
-
         # Get orchestrator from app state
         orchestrator: ServiceOrchestrator = app.state.orchestrator
         
@@ -55,32 +72,7 @@ async def lifespan(app: FastAPI):
         app.state.pose_service = orchestrator.pose_service
         app.state.stream_service = orchestrator.stream_service
         app.state.fp2_service = orchestrator.fp2_service
-
-        # CSI prediction service (standalone, not part of orchestrator)
-        try:
-            from src.services.csi_prediction_service import csi_prediction_service
-            app.state.csi_prediction_service = csi_prediction_service
-        except Exception as e:
-            logger.warning(f"CSI prediction service not available: {e}")
-
-        # Auto-start CSI UDP listener and prediction loop through the
-        # canonical idempotent service hook. If it fails, keep backend alive.
-        try:
-            svc = app.state.csi_prediction_service
-            auto_start = await svc.ensure_started(interval=2.0)
-            if auto_start.get("ok"):
-                logger.info(
-                    "CSI auto-start result: %s (model=%s, listener=%s, task=%s)",
-                    auto_start.get("status", "unknown"),
-                    auto_start.get("model_version", "?"),
-                    auto_start.get("listener_running", False),
-                    auto_start.get("prediction_task_running", False),
-                )
-            else:
-                logger.warning("CSI auto-start skipped: %s", auto_start.get("status", "unknown"))
-        except Exception as e:
-            logger.warning(f"CSI auto-start failed: {e}")
-
+        
         logger.info("WiFi-DensePose API started successfully")
         
         yield
@@ -97,7 +89,6 @@ async def lifespan(app: FastAPI):
         
         if hasattr(app.state, 'orchestrator'):
             await app.state.orchestrator.shutdown()
-        release_backend_instance_lock()
         logger.info("WiFi-DensePose API shutdown complete")
 
 
@@ -130,12 +121,7 @@ def create_app(settings: Settings, orchestrator: ServiceOrchestrator) -> FastAPI
     
     # Add root endpoints
     setup_root_endpoints(app, settings)
-
-    # Serve UI static files (must be LAST - catch-all)
-    ui_dir = Path(__file__).resolve().parents[2] / "ui"
-    if ui_dir.exists():
-        app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
-
+    
     return app
 
 
@@ -231,43 +217,63 @@ def setup_routers(app: FastAPI, settings: Settings):
     )
     
     # API routers with prefix
-    app.include_router(
-        pose.router,
-        prefix=f"{settings.api_prefix}/pose",
-        tags=["Pose Estimation"]
-    )
-    
-    app.include_router(
-        stream.router,
-        prefix=f"{settings.api_prefix}/stream",
-        tags=["Streaming"]
-    )
+    if settings.csi_pipeline_enabled:
+        app.include_router(
+            pose.router,
+            prefix=f"{settings.api_prefix}/pose",
+            tags=["Pose Estimation"]
+        )
+        
+        app.include_router(
+            stream.router,
+            prefix=f"{settings.api_prefix}/stream",
+            tags=["Streaming"]
+        )
+    else:
+        logger.info("CSI pipeline disabled; skipping pose and stream routers")
 
     app.include_router(
         fp2.router,
         prefix=f"{settings.api_prefix}/fp2",
         tags=["FP2"]
     )
-
     app.include_router(
         training.router,
         prefix=f"{settings.api_prefix}/fp2/training",
-        tags=["CSI Training"]
+        tags=["Training"]
     )
-
+    # CSI real-time prediction & recording router
     app.include_router(
         csi.router,
         prefix=f"{settings.api_prefix}/csi",
-        tags=["CSI Motion Detection"]
+        tags=["CSI"]
     )
 
 
 def setup_root_endpoints(app: FastAPI, settings: Settings):
     """Setup root application endpoints."""
+
+    ui_dir = _resolve_ui_directory()
+    ui_index = ui_dir / "index.html" if ui_dir else None
+
+    def should_serve_ui() -> bool:
+        return ui_index is not None and ui_index.exists()
+
+    def resolve_ui_asset(full_path: str) -> Optional[Path]:
+        if not ui_dir or not full_path:
+            return None
+        candidate = (ui_dir / full_path.lstrip("/")).resolve()
+        try:
+            candidate.relative_to(ui_dir.resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() else None
     
     @app.get("/")
     async def root():
-        """Root endpoint with API information."""
+        """Root endpoint with embedded UI when available."""
+        if should_serve_ui():
+            return _ui_file_response(ui_index)
         return {
             "name": settings.app_name,
             "version": settings.version,
@@ -278,7 +284,10 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
                 "authentication": settings.enable_authentication,
                 "rate_limiting": settings.enable_rate_limiting,
                 "websockets": settings.enable_websockets,
-                "real_time_processing": settings.enable_real_time_processing
+                "real_time_processing": settings.enable_real_time_processing,
+                "csi_pipeline_enabled": settings.csi_pipeline_enabled,
+                "fp2_enabled": settings.fp2_enabled,
+                "fp2_only_mode": settings.fp2_only_mode
             }
         }
 
@@ -303,6 +312,21 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
             import traceback
             logger.error(f"/api/v1/ready error: {e}\n{traceback.format_exc()}")
             return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """Serve bundled UI assets and fall back to index.html for client routes."""
+        if not should_serve_ui():
+            raise StarletteHTTPException(status_code=404, detail="Not found")
+
+        normalized = full_path.lstrip("/")
+        if normalized.startswith(("api/", "health", "docs", "redoc", "openapi.json")):
+            raise StarletteHTTPException(status_code=404, detail="Not found")
+
+        asset = resolve_ui_asset(normalized)
+        if asset is not None:
+            return _ui_file_response(asset)
+        return _ui_file_response(ui_index)
     
     @app.get(f"{settings.api_prefix}/info")
     async def api_info(request: Request):
@@ -322,7 +346,10 @@ def setup_root_endpoints(app: FastAPI, settings: Settings):
                 "rate_limiting": settings.enable_rate_limiting,
                 "websockets": settings.enable_websockets,
                 "real_time_processing": settings.enable_real_time_processing,
-                "historical_data": settings.enable_historical_data
+                "historical_data": settings.enable_historical_data,
+                "csi_pipeline_enabled": settings.csi_pipeline_enabled,
+                "fp2_enabled": settings.fp2_enabled,
+                "fp2_only_mode": settings.fp2_only_mode
             },
             "limits": {
                 "rate_limit_requests": settings.rate_limit_requests,

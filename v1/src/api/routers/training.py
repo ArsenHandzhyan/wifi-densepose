@@ -24,10 +24,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from src.api.dependencies import get_csi_training_store_service
+from src.api.dependencies import get_fp2_service
 from src.api.dependencies import get_hardware_service_from_request
+from src.services.training_analysis_contract import evaluate_analysis_artifacts
+from src.services.training_analysis_contract import summarize_analysis_publication
 from src.services.csi_run_viewer import build_run_viewer
+from src.services.csi_prediction_service import csi_prediction_service
 from src.services.csi_training_store import CSITrainingStoreService
-from src.services.hardware_service import HardwareService
+from src.services.fp2_service import FP2Service
+from src.services.hardware_service import HardwareService, LiveCSICaptureError
+from src.services.training_capture_contract import evaluate_capture_artifacts
 
 
 router = APIRouter()
@@ -477,11 +483,32 @@ class VideoTeacherAnnotationsSaveRequest(BaseModel):
     is_gold: bool | None = None
 
 
-def _program_catalog() -> list[dict[str, Any]]:
+def _program_catalog(
+    *,
+    live_capture_runtime: dict[str, Any] | None = None,
+    fp2_runtime: dict[str, Any] | None = None,
+    analysis_publication: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     return [
         {
             **program,
             "steps": list(program.get("steps", [])),
+            **(
+                {
+                    "launch_gate": _build_program_launch_gate(
+                        program=program,
+                        live_capture_runtime=live_capture_runtime or {},
+                        fp2_runtime=fp2_runtime or {},
+                    )
+                }
+                if live_capture_runtime is not None and fp2_runtime is not None
+                else {}
+            ),
+            **(
+                {"publication_summary": analysis_publication}
+                if analysis_publication is not None and str(program.get("id") or "").strip() == "rebuild_baselines"
+                else {}
+            ),
         }
         for program in sorted(PROGRAMS.values(), key=lambda item: item["recommended_order"])
     ]
@@ -507,6 +534,7 @@ def _serialize_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
     progress = run.get("progress_value")
     if progress is None and expected and started_ts:
         progress = min(1.0, max(0.0, (now_ts - started_ts) / expected))
+    artifact_state = _summarize_run_artifact_state(run)
 
     return {
         "id": run["id"],
@@ -536,6 +564,10 @@ def _serialize_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
         "return_code": run.get("return_code"),
         "logs": list(run.get("logs", [])),
         "artifacts": list(run.get("artifacts", [])),
+        "artifact_status": artifact_state["artifact_status"],
+        "artifact_status_reason": artifact_state["artifact_status_reason"],
+        "viewer_ready": artifact_state["viewer_ready"],
+        "artifact_counts": artifact_state["artifact_counts"],
         "error": run.get("error"),
     }
 
@@ -552,6 +584,90 @@ def _serialize_run_summary(run: dict[str, Any] | None) -> dict[str, Any] | None:
     public["latest_capture_label"] = None
     public["progress"] = None
     return public
+
+
+def _summarize_run_artifact_state(run: dict[str, Any]) -> dict[str, Any]:
+    artifacts = list(run.get("artifacts", []))
+    existing_artifacts = [artifact for artifact in artifacts if _artifact_path_exists(artifact)]
+    existing_kinds = {str(artifact.get("kind") or "").strip() for artifact in existing_artifacts}
+    data_artifact_count = sum(1 for artifact in existing_artifacts if str(artifact.get("kind") or "").strip() in {"capture", "compare"})
+    metadata_artifact_count = sum(
+        1
+        for artifact in existing_artifacts
+        if str(artifact.get("kind") or "").strip() in {"summary", "compare_summary", "clip_manifest", "video_teacher_manifest", "manifest"}
+    )
+    validated_capture_ready = bool(
+        run.get("program_type") == "capture" and _capture_artifacts_indicate_completion(artifacts)
+    )
+
+    artifact_counts = {
+        "declared": len(artifacts),
+        "existing": len(existing_artifacts),
+        "data": data_artifact_count,
+        "metadata": metadata_artifact_count,
+    }
+
+    if str(run.get("program_type") or "").strip() != "capture":
+        analysis_state = evaluate_analysis_artifacts(run, artifacts)
+        if analysis_state.get("ok"):
+            return {
+                "artifact_status": "analysis_artifacts_ready",
+                "artifact_status_reason": str(analysis_state.get("reason_code") or "analysis_artifacts_present"),
+                "viewer_ready": False,
+                "artifact_counts": artifact_counts,
+            }
+        if existing_artifacts:
+            return {
+                "artifact_status": str(analysis_state.get("status") or "analysis_publication_incomplete"),
+                "artifact_status_reason": str(analysis_state.get("reason_code") or "analysis_publication_incomplete"),
+                "viewer_ready": False,
+                "artifact_counts": artifact_counts,
+            }
+        return {
+            "artifact_status": "analysis_artifacts_missing",
+            "artifact_status_reason": "no_analysis_artifacts",
+            "viewer_ready": False,
+            "artifact_counts": artifact_counts,
+        }
+
+    if _is_active_run_status(run.get("status")):
+        return {
+            "artifact_status": "pending",
+            "artifact_status_reason": "run_in_progress",
+            "viewer_ready": False,
+            "artifact_counts": artifact_counts,
+        }
+
+    if validated_capture_ready:
+        return {
+            "artifact_status": "validated_capture_ready",
+            "artifact_status_reason": "validated_capture_artifacts_present",
+            "viewer_ready": True,
+            "artifact_counts": artifact_counts,
+        }
+
+    if str(run.get("status") or "").strip() == "completed":
+        return {
+            "artifact_status": "completed_without_viewer",
+            "artifact_status_reason": "validated_capture_artifacts_missing",
+            "viewer_ready": False,
+            "artifact_counts": artifact_counts,
+        }
+
+    if existing_artifacts:
+        return {
+            "artifact_status": "failed_partial_artifacts",
+            "artifact_status_reason": "partial_capture_artifacts_present",
+            "viewer_ready": False,
+            "artifact_counts": artifact_counts,
+        }
+
+    return {
+        "artifact_status": "missing_artifacts",
+        "artifact_status_reason": "no_capture_artifacts",
+        "viewer_ready": False,
+        "artifact_counts": artifact_counts,
+    }
 
 
 def _discover_capture_artifacts(label_prefix: str) -> list[dict[str, Any]]:
@@ -598,33 +714,282 @@ def _discover_capture_artifacts(label_prefix: str) -> list[dict[str, Any]]:
 
 def _analysis_artifacts() -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
-    for path in [
-        _DOCS_DIR / "LEAKAGE_SAFE_BASELINE_SUITE_2026-03-10.md",
-        _DOCS_DIR / "LEAKAGE_SAFE_BASELINE_SUITE_2026-03-10.json",
-        _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.md",
-        _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.json",
-        _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.ranking.csv",
+    for kind, path in [
+        ("suite_report_md", _DOCS_DIR / "LEAKAGE_SAFE_BASELINE_SUITE_2026-03-10.md"),
+        ("suite_report_json", _DOCS_DIR / "LEAKAGE_SAFE_BASELINE_SUITE_2026-03-10.json"),
+        ("ablation_report_md", _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.md"),
+        ("ablation_report_json", _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.json"),
+        ("ablation_ranking_csv", _MODELS_DIR / "breathing_feature_ablation_tuned_2026-03-10.ranking.csv"),
     ]:
         if path.exists():
-            artifacts.append({"kind": "report", "path": str(path)})
+            artifacts.append({"kind": kind, "path": str(path)})
     return artifacts
 
 
-def _latest_artifact_mtime(artifacts: list[dict[str, Any]]) -> float | None:
-    latest: float | None = None
-    for artifact in artifacts:
-        path_value = artifact.get("path")
-        if not path_value:
-            continue
-        path = Path(str(path_value))
-        if not path.exists():
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        latest = mtime if latest is None else max(latest, mtime)
-    return latest
+def _build_analysis_publication_summary() -> dict[str, Any]:
+    return summarize_analysis_publication(
+        {"program_id": "rebuild_baselines"},
+        _analysis_artifacts(),
+    )
+
+
+async def _build_live_capture_runtime_summary(
+    *,
+    local_execution_available: bool,
+    local_execution_reason: str | None,
+    hardware_service: HardwareService,
+) -> dict[str, Any]:
+    if not local_execution_available:
+        return {
+            "ready": False,
+            "startable": False,
+            "status": "disabled",
+            "status_reason": "local_execution_unavailable",
+            "message": str(local_execution_reason or "Local training execution is unavailable."),
+            "hardware": None,
+            "csi": None,
+        }
+
+    try:
+        hardware_status = await hardware_service.get_status()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "startable": False,
+            "status": "not_ready",
+            "status_reason": "hardware_status_unavailable",
+            "message": f"Failed to read hardware runtime status: {exc}",
+            "hardware": None,
+            "csi": None,
+        }
+
+    try:
+        csi_status = csi_prediction_service.get_status()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "startable": False,
+            "status": "not_ready",
+            "status_reason": "csi_status_unavailable",
+            "message": f"Failed to read CSI runtime status: {exc}",
+            "hardware": {
+                "status": hardware_status.get("status"),
+                "status_reason": hardware_status.get("status_reason"),
+                "message": hardware_status.get("message"),
+            },
+            "csi": None,
+        }
+
+    hardware_view = {
+        "status": hardware_status.get("status"),
+        "status_reason": hardware_status.get("status_reason"),
+        "message": hardware_status.get("message"),
+        "collection_backend": hardware_status.get("collection_backend"),
+        "router_summary": hardware_status.get("router_summary"),
+    }
+    csi_view = {
+        "status": csi_status.get("status"),
+        "status_reason": csi_status.get("status_reason"),
+        "status_message": csi_status.get("status_message"),
+        "listener_running": csi_status.get("listener_running"),
+        "csv_listener_running": csi_status.get("csv_listener_running"),
+        "prediction_task_running": csi_status.get("prediction_task_running"),
+        "model_loaded": csi_status.get("model_loaded"),
+        "warmup_active": csi_status.get("warmup_active"),
+    }
+
+    hardware_ready = str(hardware_status.get("status") or "").strip() == "healthy"
+    csi_runtime_status = str(csi_status.get("status") or "").strip() or "unknown"
+    csi_runtime_reason = str(csi_status.get("status_reason") or "").strip() or "unknown"
+    csi_runtime_message = str(csi_status.get("status_message") or "").strip() or "CSI runtime status is unavailable."
+
+    if not hardware_ready:
+        return {
+            "ready": False,
+            "startable": False,
+            "status": "not_ready",
+            "status_reason": str(hardware_status.get("status_reason") or "hardware_runtime_not_ready"),
+            "message": str(hardware_status.get("message") or "Hardware runtime is not ready for live CSI capture."),
+            "hardware": hardware_view,
+            "csi": csi_view,
+        }
+
+    if csi_runtime_status == "healthy":
+        return {
+            "ready": True,
+            "startable": True,
+            "status": "ready",
+            "status_reason": "runtime_ready",
+            "message": "Live CSI capture runtime is ready.",
+            "hardware": hardware_view,
+            "csi": csi_view,
+        }
+
+    if csi_runtime_status == "inactive":
+        return {
+            "ready": False,
+            "startable": True,
+            "status": "startable_inactive",
+            "status_reason": "csi_runtime_inactive",
+            "message": "Hardware is healthy, but CSI runtime is inactive and will be started on demand.",
+            "hardware": hardware_view,
+            "csi": csi_view,
+        }
+
+    return {
+        "ready": False,
+        "startable": False,
+        "status": "not_ready",
+        "status_reason": csi_runtime_reason,
+        "message": csi_runtime_message,
+        "hardware": hardware_view,
+        "csi": csi_view,
+    }
+
+
+async def _ensure_capture_program_runtime_ready(
+    *,
+    program: dict[str, Any],
+    local_execution_available: bool,
+    local_execution_reason: str | None,
+    hardware_service: HardwareService,
+) -> dict[str, Any] | None:
+    if str(program.get("type") or "") != "capture":
+        return None
+
+    live_capture_runtime = await _build_live_capture_runtime_summary(
+        local_execution_available=local_execution_available,
+        local_execution_reason=local_execution_reason,
+        hardware_service=hardware_service,
+    )
+    runtime_status = str(live_capture_runtime.get("status") or "").strip()
+
+    if runtime_status in {"ready", "startable_inactive"}:
+        return live_capture_runtime
+
+    if runtime_status == "disabled":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "local_execution_unavailable",
+                "live_capture_runtime": live_capture_runtime,
+            },
+        )
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "live_capture_runtime_not_ready",
+            "live_capture_runtime": live_capture_runtime,
+        },
+    )
+
+
+async def _ensure_fp2_program_runtime_ready(
+    *,
+    require_fp2: bool,
+    fp2_service: FP2Service,
+) -> dict[str, Any] | None:
+    if not require_fp2:
+        return None
+
+    status = await fp2_service.get_status()
+    fp2_runtime = {
+        "status": status.get("status"),
+        "message": status.get("message"),
+        "upstream_available": status.get("upstream_available"),
+        "stale": status.get("stale"),
+        "entity_id": status.get("entity_id"),
+        "enabled": status.get("enabled"),
+    }
+
+    if str(status.get("status") or "").strip() == "healthy":
+        return fp2_runtime
+
+    if str(status.get("status") or "").strip() == "disabled":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "fp2_runtime_disabled",
+                "fp2_runtime": fp2_runtime,
+            },
+        )
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "fp2_runtime_not_ready",
+            "fp2_runtime": fp2_runtime,
+        },
+    )
+
+
+async def _build_fp2_runtime_summary(fp2_service: FP2Service) -> dict[str, Any]:
+    status = await fp2_service.get_status()
+    return {
+        "status": status.get("status"),
+        "message": status.get("message"),
+        "upstream_available": status.get("upstream_available"),
+        "stale": status.get("stale"),
+        "entity_id": status.get("entity_id"),
+        "enabled": status.get("enabled"),
+    }
+
+
+def _build_program_launch_gate(
+    *,
+    program: dict[str, Any],
+    live_capture_runtime: dict[str, Any],
+    fp2_runtime: dict[str, Any],
+) -> dict[str, Any]:
+    if str(program.get("type") or "") != "capture":
+        return {
+            "startable": True,
+            "status": "ready",
+            "reason": "analysis_program",
+            "message": "Program does not require live CSI capture runtime.",
+            "requires_fp2": False,
+        }
+
+    gate = {
+        "startable": False,
+        "status": "not_ready",
+        "reason": str(live_capture_runtime.get("status_reason") or "live_capture_runtime_not_ready"),
+        "message": str(live_capture_runtime.get("message") or "Live capture runtime is not ready."),
+        "requires_fp2": bool(program.get("require_fp2")),
+    }
+
+    live_status = str(live_capture_runtime.get("status") or "").strip()
+    if live_status not in {"ready", "startable_inactive"}:
+        return gate
+
+    gate.update(
+        {
+            "startable": True,
+            "status": live_status,
+            "reason": str(live_capture_runtime.get("status_reason") or live_status),
+            "message": str(live_capture_runtime.get("message") or "Live capture runtime is ready."),
+        }
+    )
+
+    if not bool(program.get("require_fp2")):
+        return gate
+
+    fp2_status = str(fp2_runtime.get("status") or "").strip()
+    if fp2_status == "healthy":
+        gate["fp2_runtime"] = fp2_runtime
+        return gate
+
+    gate.update(
+        {
+            "startable": False,
+            "status": "not_ready",
+            "reason": "fp2_runtime_not_ready" if fp2_status != "disabled" else "fp2_runtime_disabled",
+            "message": str(fp2_runtime.get("message") or "FP2 runtime is not ready."),
+            "fp2_runtime": fp2_runtime,
+        }
+    )
+    return gate
 
 
 def _resolve_review_output_dir(recording_label: str, review_output_dir: str | None) -> Path:
@@ -720,6 +1085,10 @@ def _pid_alive(pid: Any) -> bool:
     return True
 
 
+def _is_active_run_status(status_value: Any) -> bool:
+    return str(status_value or "").strip() in {"starting", "running", "stopping"}
+
+
 def _run_artifacts(run: dict[str, Any]) -> list[dict[str, Any]]:
     if run.get("program_type") == "capture" and run.get("label_prefix"):
         return _discover_capture_artifacts(str(run["label_prefix"]))
@@ -728,20 +1097,27 @@ def _run_artifacts(run: dict[str, Any]) -> list[dict[str, Any]]:
     return list(run.get("artifacts", []))
 
 
+def _artifact_path_exists(artifact: dict[str, Any]) -> bool:
+    path_value = artifact.get("path")
+    if not path_value:
+        return False
+    try:
+        return Path(str(path_value)).exists()
+    except Exception:
+        return False
+
+
+def _capture_artifacts_indicate_completion(artifacts: list[dict[str, Any]]) -> bool:
+    return bool(evaluate_capture_artifacts(artifacts).get("ok"))
+
+
 def _artifacts_indicate_completion(run: dict[str, Any], artifacts: list[dict[str, Any]]) -> bool:
     if not artifacts:
         return False
-    started_at = run.get("started_at")
-    if not started_at:
-        return True
-    try:
-        started_ts = datetime.fromisoformat(str(started_at)).timestamp()
-    except ValueError:
-        return True
-    latest_mtime = _latest_artifact_mtime(artifacts)
-    if latest_mtime is None:
-        return False
-    return latest_mtime >= started_ts - 2
+    if run.get("program_type") == "capture":
+        return _capture_artifacts_indicate_completion(artifacts)
+    analysis_state = evaluate_analysis_artifacts(run, artifacts)
+    return bool(analysis_state.get("ok"))
 
 
 async def _reconcile_stale_recent_runs(
@@ -750,7 +1126,7 @@ async def _reconcile_stale_recent_runs(
 ) -> list[dict[str, Any]]:
     changed = False
     for run in recent_runs:
-        if run.get("status") != "running":
+        if not _is_active_run_status(run.get("status")):
             continue
         if _pid_alive(run.get("pid")):
             continue
@@ -776,6 +1152,25 @@ async def _reconcile_stale_recent_runs(
         space_id=recent_runs[0].get("space_id") if recent_runs else None,
         limit=len(recent_runs) or 20,
     )
+
+
+async def _reconcile_active_run_if_stale(
+    training_store: CSITrainingStoreService,
+) -> dict[str, Any] | None:
+    global _ACTIVE_RUN
+
+    active_run = _ACTIVE_RUN
+    if active_run is None:
+        return None
+    if not _is_active_run_status(active_run.get("status")):
+        _ACTIVE_RUN = None
+        return None
+    if _pid_alive(active_run.get("pid")):
+        return active_run
+
+    await _reconcile_stale_recent_runs([active_run], training_store)
+    _ACTIVE_RUN = None
+    return None
 
 
 def _build_command(
@@ -898,8 +1293,24 @@ async def _wait_for_completion(
 
     if run["program_type"] == "capture" and run.get("label_prefix"):
         run["artifacts"] = _discover_capture_artifacts(run["label_prefix"])
+        if return_code == 0:
+            completion_state = evaluate_capture_artifacts(run["artifacts"])
+            if not completion_state.get("ok"):
+                run["status"] = "failed"
+                run["error"] = (
+                    "Capture process exited successfully, but validated completion contract failed: "
+                    f"{completion_state.get('status')}: {completion_state.get('reason')}"
+                )
     elif run["program_id"] == "rebuild_baselines":
         run["artifacts"] = _analysis_artifacts()
+        if return_code == 0:
+            analysis_state = evaluate_analysis_artifacts(run, run["artifacts"])
+            if not analysis_state.get("ok"):
+                run["status"] = "failed"
+                run["error"] = (
+                    "Analysis process exited successfully, but publication contract failed: "
+                    f"{analysis_state.get('status')}: {analysis_state.get('reason')}"
+                )
 
     public_copy = _serialize_run(run)
     if public_copy is not None:
@@ -914,14 +1325,30 @@ async def _wait_for_completion(
 @router.get("/catalog")
 async def training_catalog(
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
+    hardware_service: HardwareService = Depends(get_hardware_service_from_request),
+    fp2_service: FP2Service = Depends(get_fp2_service),
 ) -> dict[str, Any]:
     available, reason = _local_execution_available()
     await training_store.ensure_backfilled()
     space_state = await training_store.list_spaces_with_stats()
+    live_capture_runtime = await _build_live_capture_runtime_summary(
+        local_execution_available=available,
+        local_execution_reason=reason,
+        hardware_service=hardware_service,
+    )
+    fp2_runtime = await _build_fp2_runtime_summary(fp2_service)
+    analysis_publication = _build_analysis_publication_summary()
     return {
         "local_execution_available": available,
         "reason": reason,
-        "programs": _program_catalog(),
+        "live_capture_runtime": live_capture_runtime,
+        "fp2_runtime": fp2_runtime,
+        "analysis_publication": analysis_publication,
+        "programs": _program_catalog(
+            live_capture_runtime=live_capture_runtime,
+            fp2_runtime=fp2_runtime,
+            analysis_publication=analysis_publication,
+        ),
         "active_space_id": space_state["active_space_id"],
         "spaces": space_state["spaces"],
     }
@@ -930,19 +1357,32 @@ async def training_catalog(
 @router.get("/status")
 async def training_status(
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
+    hardware_service: HardwareService = Depends(get_hardware_service_from_request),
+    fp2_service: FP2Service = Depends(get_fp2_service),
 ) -> dict[str, Any]:
     available, reason = _local_execution_available()
+    active_run = await _reconcile_active_run_if_stale(training_store)
     space_state = await training_store.list_spaces_with_stats()
     active_space_id = space_state["active_space_id"]
     recent_runs = await training_store.list_runs(space_id=active_space_id, limit=20)
-    if _ACTIVE_RUN is None and recent_runs:
+    if active_run is None and recent_runs:
         recent_runs = await _reconcile_stale_recent_runs(recent_runs, training_store)
         space_state = await training_store.list_spaces_with_stats()
         active_space_id = space_state["active_space_id"]
+    live_capture_runtime = await _build_live_capture_runtime_summary(
+        local_execution_available=available,
+        local_execution_reason=reason,
+        hardware_service=hardware_service,
+    )
+    fp2_runtime = await _build_fp2_runtime_summary(fp2_service)
+    analysis_publication = _build_analysis_publication_summary()
     return {
         "local_execution_available": available,
         "reason": reason,
-        "active_run": _serialize_run(_ACTIVE_RUN),
+        "live_capture_runtime": live_capture_runtime,
+        "fp2_runtime": fp2_runtime,
+        "analysis_publication": analysis_publication,
+        "active_run": _serialize_run(active_run),
         "recent_runs": [item for item in (_serialize_run_summary(run) for run in recent_runs) if item is not None],
         "active_space_id": active_space_id,
         "spaces": space_state["spaces"],
@@ -970,8 +1410,10 @@ async def capture_live_csi_clip(
             duration_sec=payload.duration_sec,
             out_dir=payload.out_dir,
         )
+    except LiveCSICaptureError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=exc.to_http_detail()) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "ok": True,
         "capture": summary,
@@ -999,6 +1441,8 @@ async def set_active_training_space(
 async def start_training_run(
     payload: TrainingRunStartRequest,
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
+    hardware_service: HardwareService = Depends(get_hardware_service_from_request),
+    fp2_service: FP2Service = Depends(get_fp2_service),
 ) -> dict[str, Any]:
     global _ACTIVE_RUN
 
@@ -1016,8 +1460,23 @@ async def start_training_run(
     if not selected_space:
         raise HTTPException(status_code=404, detail=f"Unknown space_id: {resolved_space_id}")
 
+    resolved_require_fp2 = program.get("require_fp2") if payload.require_fp2 is None else bool(payload.require_fp2)
+    runtime_gate = await _ensure_capture_program_runtime_ready(
+        program=program,
+        local_execution_available=available,
+        local_execution_reason=reason,
+        hardware_service=hardware_service,
+    )
+    fp2_runtime = await _ensure_fp2_program_runtime_ready(
+        require_fp2=bool(resolved_require_fp2),
+        fp2_service=fp2_service,
+    )
+    if runtime_gate is not None and fp2_runtime is not None:
+        runtime_gate["fp2_runtime"] = fp2_runtime
+
+    await _reconcile_active_run_if_stale(training_store)
     async with _RUN_LOCK:
-        if _ACTIVE_RUN and _ACTIVE_RUN.get("status") in {"starting", "running"}:
+        if _ACTIVE_RUN and _is_active_run_status(_ACTIVE_RUN.get("status")):
             raise HTTPException(status_code=409, detail="Another local training run is already active.")
 
         suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1050,7 +1509,7 @@ async def start_training_run(
             "enable_voice": payload.enable_voice,
             "capture_mode": program.get("mode"),
             "pack_id": program.get("pack_id"),
-            "require_fp2": program.get("require_fp2") if payload.require_fp2 is None else bool(payload.require_fp2),
+            "require_fp2": bool(resolved_require_fp2),
             "video_teacher_enabled": bool(program.get("video_teacher_enabled")) or payload.video_teacher_enabled,
             "audio_teacher_enabled": bool(program.get("audio_teacher_enabled")) or payload.audio_teacher_enabled,
             "expected_duration_sec": program.get("expected_duration_sec"),
@@ -1076,7 +1535,10 @@ async def start_training_run(
     if serialized is not None:
         await training_store.save_run(serialized)
 
-    return {"run": serialized}
+    response = {"run": serialized}
+    if runtime_gate is not None:
+        response["runtime_gate"] = runtime_gate
+    return response
 
 
 @router.get("/runs/current")
@@ -1084,6 +1546,7 @@ async def current_training_run(
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
 ) -> dict[str, Any]:
     await training_store.ensure_backfilled()
+    await _reconcile_active_run_if_stale(training_store)
     return {"run": _serialize_run(_ACTIVE_RUN)}
 
 
@@ -1092,13 +1555,17 @@ async def training_run_details(
     run_id: str,
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
 ) -> dict[str, Any]:
+    global _ACTIVE_RUN
+
     await training_store.ensure_backfilled()
     run = await training_store.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Unknown run_id: {run_id}")
-    if run.get("status") == "running" and not _pid_alive(run.get("pid")):
+    if _is_active_run_status(run.get("status")) and not _pid_alive(run.get("pid")):
         reconciled = await _reconcile_stale_recent_runs([run], training_store)
         run = reconciled[0] if reconciled else run
+        if _ACTIVE_RUN and _ACTIVE_RUN.get("id") == run_id and not _is_active_run_status(run.get("status")):
+            _ACTIVE_RUN = None
     return {"run": _serialize_run(run)}
 
 
@@ -1107,11 +1574,18 @@ async def training_run_viewer(
     run_id: str,
     training_store: CSITrainingStoreService = Depends(get_csi_training_store_service),
 ) -> dict[str, Any]:
+    global _ACTIVE_RUN
+
     await training_store.ensure_backfilled()
     run = await training_store.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Unknown run_id: {run_id}")
-    if run.get("status") == "running":
+    if _is_active_run_status(run.get("status")) and not _pid_alive(run.get("pid")):
+        reconciled = await _reconcile_stale_recent_runs([run], training_store)
+        run = reconciled[0] if reconciled else run
+        if _ACTIVE_RUN and _ACTIVE_RUN.get("id") == run_id and not _is_active_run_status(run.get("status")):
+            _ACTIVE_RUN = None
+    if _is_active_run_status(run.get("status")):
         return {
             "run_id": run_id,
             "viewer": {
@@ -1195,8 +1669,9 @@ async def stop_current_training_run(
 ) -> dict[str, Any]:
     global _ACTIVE_RUN
 
+    await _reconcile_active_run_if_stale(training_store)
     async with _RUN_LOCK:
-        if not _ACTIVE_RUN or _ACTIVE_RUN.get("status") not in {"starting", "running"}:
+        if not _ACTIVE_RUN or not _is_active_run_status(_ACTIVE_RUN.get("status")):
             raise HTTPException(status_code=404, detail="No active training run.")
         pid = _ACTIVE_RUN.get("pid")
         if pid is None:

@@ -6,12 +6,15 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import COORDINATOR, DOMAIN
+from .const import (
+    COORDINATOR,
+    DOMAIN,
+    RESOURCE_LIGHT_LEVEL,
+    ZONE_OCCUPANCY_PREFIX,
+    ZONE_OCCUPANCY_SUFFIX,
+)
 from .coordinator import AqaraDataCoordinator, extract_params
 
-# FP2 zone resource IDs: "13.x.85" where x = zone index (1-30)
-ZONE_PRESENCE_PREFIX = "13."
-ZONE_PRESENCE_SUFFIX = ".85"
 MAX_ZONES = 30
 
 
@@ -45,11 +48,11 @@ async def async_setup_entry(
 
 def _parse_zone_index(res_id: str) -> int | None:
     """Parse zone index from resource ID like '13.1.85'."""
-    if not res_id.startswith(ZONE_PRESENCE_PREFIX):
+    if not res_id.startswith(ZONE_OCCUPANCY_PREFIX):
         return None
-    if not res_id.endswith(ZONE_PRESENCE_SUFFIX):
+    if not res_id.endswith(ZONE_OCCUPANCY_SUFFIX):
         return None
-    middle = res_id[len(ZONE_PRESENCE_PREFIX) : -len(ZONE_PRESENCE_SUFFIX)]
+    middle = res_id[len(ZONE_OCCUPANCY_PREFIX) : -len(ZONE_OCCUPANCY_SUFFIX)]
     try:
         idx = int(middle)
         if 1 <= idx <= MAX_ZONES:
@@ -86,7 +89,7 @@ class AqaraFp2LightSensor(CoordinatorEntity, SensorEntity):
 
         params = extract_params(self.coordinator.data)
         for param in params:
-            if param.get("resId") == "0.2.85":
+            if param.get("resId") == RESOURCE_LIGHT_LEVEL:
                 try:
                     return float(param.get("value", 0))
                 except (ValueError, TypeError):
@@ -122,10 +125,12 @@ class AqaraFp2DistanceSensor(CoordinatorEntity, SensorEntity):
 
         params = extract_params(self.coordinator.data)
         for param in params:
-            if param.get("resId") == "0.3.85":
+            if param.get("resId") == "0.63.85":
+                # Aqara exposes walking distance over a rolling half-hour window,
+                # not instantaneous range. Keep the legacy entity populated with
+                # the best available distance-like metric instead of a fake value.
                 try:
-                    value = float(param.get("value", 0))
-                    return round(value / 1000, 2)
+                    return float(param.get("value", 0))
                 except (ValueError, TypeError):
                     return None
 

@@ -7,13 +7,18 @@ import logging
 import time
 import psutil
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 
 from src.config.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -35,7 +40,7 @@ class MetricSeries:
     def add_point(self, value: float, labels: Optional[Dict[str, str]] = None):
         """Add a metric point."""
         point = MetricPoint(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             value=value,
             labels=labels or {}
         )
@@ -47,7 +52,7 @@ class MetricSeries:
     
     def get_average(self, duration: timedelta) -> Optional[float]:
         """Get average value over a time duration."""
-        cutoff = datetime.utcnow() - duration
+        cutoff = utc_now() - duration
         relevant_points = [
             point for point in self.points
             if point.timestamp >= cutoff
@@ -60,7 +65,7 @@ class MetricSeries:
     
     def get_max(self, duration: timedelta) -> Optional[float]:
         """Get maximum value over a time duration."""
-        cutoff = datetime.utcnow() - duration
+        cutoff = utc_now() - duration
         relevant_points = [
             point for point in self.points
             if point.timestamp >= cutoff

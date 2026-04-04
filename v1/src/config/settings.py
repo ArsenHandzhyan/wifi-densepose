@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     monitoring_interval_seconds: int = Field(default=60, description="Monitoring task interval in seconds")
     cleanup_interval_seconds: int = Field(default=3600, description="Cleanup task interval in seconds")
     backup_interval_seconds: int = Field(default=86400, description="Backup task interval in seconds")
-    
+
     # Storage settings
     data_storage_path: str = Field(default="./data", description="Data storage directory")
     model_storage_path: str = Field(default="./models", description="Model storage directory")
@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     enable_websockets: bool = Field(default=True, description="Enable WebSocket support")
     enable_historical_data: bool = Field(default=True, description="Enable historical data storage")
     enable_real_time_processing: bool = Field(default=True, description="Enable real-time processing")
+    csi_pipeline_enabled: bool = Field(default=True, description="Enable CSI training pipeline")
     cors_enabled: bool = Field(default=True, description="Enable CORS middleware")
     cors_allow_credentials: bool = Field(default=True, description="Allow credentials in CORS")
     
@@ -148,9 +149,12 @@ class Settings(BaseSettings):
     # Home Assistant / FP2 sensor settings
     ha_url: str = Field(default="http://localhost:8123", description="Home Assistant URL")
     ha_token: str = Field(default="", description="Home Assistant long-lived access token")
+    ha_refresh_token: str = Field(default="", description="Home Assistant refresh token for automatic access-token rotation")
+    ha_client_id: str = Field(default="", description="Home Assistant OAuth client id used with refresh token")
     fp2_entity_id: str = Field(default="binary_sensor.fp2_presence", description="FP2 presence entity ID in HA")
     fp2_poll_interval: float = Field(default=1.0, description="FP2 polling interval in seconds")
     fp2_enabled: bool = Field(default=False, description="Enable FP2 sensor integration")
+    fp2_only_mode: bool = Field(default=False, description="Run in FP2-only mode (skip WiFi CSI inference)")
     
     # Cleanup settings
     csi_data_retention_days: int = Field(default=30, description="CSI data retention in days")

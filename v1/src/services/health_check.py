@@ -6,13 +6,18 @@ import asyncio
 import logging
 import time
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 
 from src.config.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc)
 
 
 class HealthStatus(Enum):
@@ -29,7 +34,7 @@ class HealthCheck:
     name: str
     status: HealthStatus
     message: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utc_now)
     duration_ms: float = 0.0
     details: Dict[str, Any] = field(default_factory=dict)
 
@@ -332,13 +337,27 @@ class HealthCheckService:
             
             if hasattr(stream_service, 'get_status'):
                 status_info = await stream_service.get_status()
-                
-                if status_info.get("status") == "healthy":
+
+                runtime_status = status_info.get("status")
+
+                if runtime_status == "healthy":
                     status = HealthStatus.HEALTHY
                     message = "Stream service is operational"
+                elif runtime_status == "inactive":
+                    status = HealthStatus.HEALTHY
+                    message = status_info.get(
+                        "message",
+                        "Stream service is available but currently inactive",
+                    )
+                elif runtime_status == "unhealthy":
+                    status = HealthStatus.UNHEALTHY
+                    message = status_info.get(
+                        "message",
+                        "Stream service reported an unhealthy runtime state",
+                    )
                 else:
                     status = HealthStatus.DEGRADED
-                    message = f"Stream service status: {status_info.get('status', 'unknown')}"
+                    message = f"Stream service status: {runtime_status or 'unknown'}"
                 
                 details = status_info
             else:
@@ -416,7 +435,7 @@ class HealthCheckService:
         return {
             "status": overall_status.value,
             "message": message,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "uptime": time.time() - self._start_time,
             "services": {
                 name: {

@@ -39,8 +39,9 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - SECRET_KEY=${SECRET_KEY:-change-me-dev-secret}
       - HA_URL=http://host.docker.internal:8123
-      - HA_TOKEN=${HA_TOKEN}
+      - HA_TOKEN=${HA_TOKEN:-}
       - FP2_ENABLED=true
       - FP2_ENTITY_ID=input_boolean.fp2_presence
     depends_on:

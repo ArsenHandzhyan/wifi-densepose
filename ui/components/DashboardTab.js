@@ -246,33 +246,56 @@ export class DashboardTab {
     }
   }
 
+  isUnavailablePosePayload(payload) {
+    return payload?.metadata?.pose_api_surface === 'fp2_fallback'
+      && payload?.metadata?.fp2_state === 'upstream_unavailable';
+  }
+
+  getUnavailablePoseDetail(payload) {
+    return payload?.metadata?.last_error
+      || payload?.metadata?.message
+      || 'FP2 upstream unavailable';
+  }
+
   // Update pose statistics
   updatePoseStats(poseData) {
     if (!poseData) return;
+    const unavailable = this.isUnavailablePosePayload(poseData);
+    const unavailableDetail = this.getUnavailablePoseDetail(poseData);
 
     // Update person count
     const personCount = this.container.querySelector('.person-count');
     if (personCount) {
       const count = poseData.persons ? poseData.persons.length : (poseData.total_persons || 0);
-      personCount.textContent = count;
+      personCount.textContent = unavailable ? '—' : count;
+      personCount.title = unavailable ? unavailableDetail : '';
     }
 
     // Update average confidence
     const avgConfidence = this.container.querySelector('.avg-confidence');
-    if (avgConfidence && poseData.persons && poseData.persons.length > 0) {
+    if (avgConfidence && unavailable) {
+      avgConfidence.textContent = '—';
+      avgConfidence.title = unavailableDetail;
+    } else if (avgConfidence && poseData.persons && poseData.persons.length > 0) {
       const confidences = poseData.persons.map(p => p.confidence);
       const avg = confidences.length > 0
         ? (confidences.reduce((a, b) => a + b, 0) / confidences.length * 100).toFixed(1)
         : 0;
       avgConfidence.textContent = `${avg}%`;
+      avgConfidence.title = '';
     } else if (avgConfidence) {
       avgConfidence.textContent = '0%';
+      avgConfidence.title = '';
     }
 
     // Update total detections from stats if available
     const detectionCount = this.container.querySelector('.detection-count');
-    if (detectionCount && poseData.total_detections !== undefined) {
+    if (detectionCount && unavailable) {
+      detectionCount.textContent = '—';
+      detectionCount.title = unavailableDetail;
+    } else if (detectionCount && poseData.total_detections !== undefined) {
       detectionCount.textContent = this.formatNumber(poseData.total_detections);
+      detectionCount.title = '';
     }
   }
 
@@ -282,6 +305,17 @@ export class DashboardTab {
     if (!zonesContainer) return;
 
     zonesContainer.innerHTML = '';
+    if (this.isUnavailablePosePayload(zonesSummary)) {
+      const zoneElement = document.createElement('div');
+      zoneElement.className = 'zone-item zone-item--unavailable';
+      zoneElement.title = this.getUnavailablePoseDetail(zonesSummary);
+      zoneElement.innerHTML = `
+        <span class="zone-name">FP2 upstream</span>
+        <span class="zone-count">UNAVAILABLE</span>
+      `;
+      zonesContainer.appendChild(zoneElement);
+      return;
+    }
     
     // Handle different zone summary formats
     let zones = {};

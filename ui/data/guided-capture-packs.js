@@ -1,5 +1,74 @@
 export const GUIDED_CAPTURE_PACKS = [
   {
+    id: 'truth_empty_door_center_minimal',
+    code: 'T1',
+    name: 'T1 Truth Empty / Door / Center',
+    shortLabel: 'truth empty-door-center',
+    description: 'Канонический truth-backed пакет: пустой гараж, статичная стойка у двери, статичная стойка в центре и два перехода. Использовать для нового raw supervision вместо unstable runtime labels.',
+    motionType: 'truth_empty_door_center',
+    personCount: 1,
+    withVideo: true,
+    voiceEnabledByDefault: true,
+    preflightCheckVideo: true,
+    countdownSec: 4,
+    pauseBetweenStepsSec: 8,
+    labelPrefix: 'truth_empty_door_center',
+    sessionSlug: 'truth_edc1',
+    notesPrefix: 'Truth-backed canonical pack: empty / static-at-door / static-at-center / transitions',
+    steps: [
+      {
+        id: 'empty_room_hold',
+        label: 'Пустой гараж 2 мин',
+        durationSec: 120,
+        personCountExpected: 0,
+        motionType: 'empty_room',
+        instruction: 'Выйди из гаража и оставь пространство пустым на две минуты. Никто не должен заходить внутрь.',
+        voiceInstruction: 'Шаг один. Пустой гараж. Выйдите из гаража и оставьте пространство пустым на две минуты.',
+        notes: 'step=empty_room_hold, occupancy=empty, protocol_zone=empty, protocol_step=empty_hold'
+      },
+      {
+        id: 'door_static_hold',
+        label: 'Статика у двери 2 мин',
+        durationSec: 120,
+        personCountExpected: 1,
+        motionType: 'static_at_door',
+        instruction: 'Зайди в гараж и встань у двери. Стой спокойно две минуты, не уходи в центр.',
+        voiceInstruction: 'Шаг два. Статика у двери. Зайдите в гараж и стойте у двери спокойно две минуты.',
+        notes: 'step=door_static_hold, occupancy=occupied, zone=DOOR, protocol_zone=door_passage, protocol_step=door_static'
+      },
+      {
+        id: 'center_static_hold',
+        label: 'Статика в центре 2 мин',
+        durationSec: 120,
+        personCountExpected: 1,
+        motionType: 'static_at_center',
+        instruction: 'Перейди в центральную зону и стой спокойно две минуты.',
+        voiceInstruction: 'Шаг три. Статика в центре. Перейдите в центральную зону и стойте спокойно две минуты.',
+        notes: 'step=center_static_hold, occupancy=occupied, zone=CENTER, protocol_zone=center, protocol_step=center_static'
+      },
+      {
+        id: 'door_to_center_transition',
+        label: 'Переход дверь → центр 1 мин',
+        durationSec: 60,
+        personCountExpected: 1,
+        motionType: 'door_to_center_transition',
+        instruction: 'Стартуй у двери. Пройди к центру и зафиксируйся в центре. Повтори несколько раз в пределах минуты.',
+        voiceInstruction: 'Шаг четыре. Переход дверь в центр. Стартуйте у двери, пройдите к центру и зафиксируйтесь в центре. Повторяйте в пределах минуты.',
+        notes: 'step=door_to_center_transition, occupancy=occupied, protocol_zone=transition, protocol_step=door_to_center'
+      },
+      {
+        id: 'center_to_door_transition',
+        label: 'Переход центр → дверь 1 мин',
+        durationSec: 60,
+        personCountExpected: 1,
+        motionType: 'center_to_door_transition',
+        instruction: 'Стартуй в центре. Пройди к двери и зафиксируйся у двери. Повтори несколько раз в пределах минуты.',
+        voiceInstruction: 'Шаг пять. Переход центр к двери. Стартуйте в центре, пройдите к двери и зафиксируйтесь у двери. Повторяйте в пределах минуты.',
+        notes: 'step=center_to_door_transition, occupancy=occupied, protocol_zone=transition, protocol_step=center_to_door'
+      }
+    ]
+  },
+  {
     id: 'f1_in_place_motion',
     code: 'F1',
     name: 'F1 In-Place Motion',

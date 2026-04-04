@@ -1,5 +1,10 @@
 # Troubleshooting Guide
 
+> Historical note (2026-03-29):
+> this guide still contains some broad legacy workflow narrative. For current
+> runtime route truth prefer `/health/*`, `/api/v1/csi/*`, and `/api/v1/fp2/*`.
+> The public `/api/v1/pose/*` surface remains legacy/mock-only compatibility.
+
 ## Overview
 
 This guide provides solutions to common issues encountered when using the WiFi-DensePose system, including installation problems, hardware connectivity issues, performance optimization, and error resolution.
@@ -25,13 +30,14 @@ Run a comprehensive system health check to identify issues:
 
 ```bash
 # Check system status
-curl http://localhost:8000/api/v1/system/status
+curl http://localhost:8000/health/health
 
-# Run built-in diagnostics
-curl http://localhost:8000/api/v1/system/diagnostics
+# Check readiness
+curl http://localhost:8000/health/ready
 
 # Check component health
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/api/v1/csi/status
+curl http://localhost:8000/api/v1/fp2/status
 ```
 
 ### Log Analysis
@@ -284,11 +290,11 @@ wifi reload
 
 3. **Monitor Data Quality:**
 ```bash
-# Check CSI data statistics
-curl http://localhost:8000/api/v1/hardware/csi/stats
+# Check CSI runtime summary
+curl http://localhost:8000/api/v1/csi/status
 
-# View real-time quality metrics
-curl http://localhost:8000/api/v1/hardware/status
+# View node-level health and stream readiness
+curl http://localhost:8000/api/v1/csi/nodes/health
 ```
 
 ### Hardware Resource Issues
@@ -320,7 +326,7 @@ export ENABLE_HISTORICAL_DATA=false
 export WORKERS=4
 
 # Use process affinity
-taskset -c 0-3 python -m src.api.main
+taskset -c 0-3 python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 ```
 
 #### Issue: GPU Memory Errors
@@ -499,10 +505,10 @@ export WEBSOCKET_KEEPALIVE=true
 2. **Check Network Configuration:**
 ```bash
 # Test WebSocket connection
-wscat -c ws://localhost:8000/ws/pose
+wscat -c ws://localhost:8000/api/v1/fp2/ws
 
 # Check proxy settings
-curl -I http://localhost:8000/ws/pose
+curl -I http://localhost:8000/health/health
 ```
 
 ### Rate Limiting Issues
@@ -551,19 +557,19 @@ def batch_requests(requests, batch_size=10):
 
 1. **Adjust Detection Thresholds:**
 ```bash
-# Increase confidence threshold
-curl -X PUT http://localhost:8000/api/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{"detection": {"confidence_threshold": 0.8}}'
+# Inspect current model inventory and runtime status
+curl http://localhost:8000/api/v1/csi/models
+curl http://localhost:8000/api/v1/csi/status
 ```
 
 2. **Improve Environment Setup:**
 ```bash
-# Recalibrate system
-curl -X POST http://localhost:8000/api/v1/system/calibrate
+# Inspect live CSI / FP2 inputs instead of the removed system-wide calibrate route
+curl http://localhost:8000/api/v1/csi/status
+curl http://localhost:8000/api/v1/fp2/status
 
-# Check for interference
-curl http://localhost:8000/api/v1/hardware/interference
+# Check node-level health instead of the removed hardware interference route
+curl http://localhost:8000/api/v1/csi/nodes/health
 ```
 
 3. **Optimize Model Parameters:**
@@ -589,16 +595,9 @@ export ENABLE_OUTLIER_FILTERING=true
 
 1. **Tune Tracking Parameters:**
 ```bash
-# Adjust tracking thresholds
-curl -X PUT http://localhost:8000/api/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tracking": {
-      "max_age": 30,
-      "min_hits": 3,
-      "iou_threshold": 0.3
-    }
-  }'
+# Inspect stream and node health before tuning runtime settings
+curl http://localhost:8000/api/v1/stream/status
+curl http://localhost:8000/api/v1/csi/nodes/health
 ```
 
 2. **Improve Detection Consistency:**
@@ -684,7 +683,7 @@ sudo systemctl restart wifi-densepose
 3. **Debug Memory Issues:**
 ```bash
 # Run with memory debugging
-valgrind --tool=memcheck python -m src.api.main
+valgrind --tool=memcheck python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 # Check for memory leaks
 python -m tracemalloc
@@ -705,16 +704,9 @@ python -m tracemalloc
 
 1. **Adjust Sensitivity:**
 ```bash
-curl -X PUT http://localhost:8000/api/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "alerts": {
-      "fall_detection": {
-        "sensitivity": 0.7,
-        "notification_delay_seconds": 10
-      }
-    }
-  }'
+# Review current model inventory and runtime health before changing alert policy
+curl http://localhost:8000/api/v1/csi/models
+curl http://localhost:8000/api/v1/csi/status
 ```
 
 2. **Improve Training Data:**
@@ -739,17 +731,11 @@ python -m src.training.train_healthcare_model
 
 1. **Calibrate Zone Detection:**
 ```bash
-# Define entrance/exit zones
-curl -X PUT http://localhost:8000/api/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "zones": {
-      "entrance": {
-        "coordinates": [[0, 0], [100, 50]],
-        "type": "entrance"
-      }
-    }
-  }'
+# Inspect current zone status
+curl http://localhost:8000/api/v1/csi/zone/status
+
+# Start a zone calibration session
+curl -X POST http://localhost:8000/api/v1/csi/zone/calibrate/start
 ```
 
 2. **Optimize Tracking:**
@@ -769,7 +755,7 @@ export MIN_DWELL_TIME_SECONDS=5
 
 ```bash
 # Profile Python code
-python -m cProfile -o profile.stats -m src.api.main
+python -m cProfile -o profile.stats -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 
 # Analyze profile
 python -c "
@@ -864,7 +850,7 @@ docker-compose logs --tail=1000 > logs.txt
 
 # Configuration
 cat .env > config.txt
-curl http://localhost:8000/api/v1/system/status > status.json
+curl http://localhost:8000/health/health > status.json
 
 # Hardware information
 lscpu
@@ -910,7 +896,7 @@ For critical production issues:
 1. **Immediate Actions**:
    ```bash
    # Stop the system safely
-   curl -X POST http://localhost:8000/api/v1/system/stop
+   curl -X POST http://localhost:8000/api/v1/csi/record/stop
    
    # Backup current data
    cp -r ./data ./data_backup_$(date +%Y%m%d_%H%M%S)

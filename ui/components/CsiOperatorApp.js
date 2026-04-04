@@ -1,7 +1,7 @@
 import { TabManager } from './TabManager.js?v=20260326-stabilize-01';
 import { AGENT7_OPERATOR_TRUTH } from '../data/agent7-truth.js?v=20260326-stabilize-01';
 import { getOperatorCopy, localizeOperatorToken } from '../data/operator-copy.js?v=20260326-stabilize-01';
-import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack, getGuidedCapturePackSummary } from '../data/guided-capture-packs.js?v=20260326-stabilize-01';
+import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack, getGuidedCapturePackSummary } from '../data/guided-capture-packs.js?v=20260403-truth-capture-02';
 import { FEWSHOT_CALIBRATION_PROTOCOLS, getFewshotCalibrationProtocol } from '../data/fewshot-calibration-protocol.js?v=20260326-fewshot-ui-01';
 import {
   MANUAL_CAPTURE_PRESETS,
@@ -9,9 +9,12 @@ import {
   getManualCapturePresetVariant
 } from '../data/manual-capture-presets.js?v=20260326-stabilize-01';
 import { FP2Tab } from './FP2Tab.js?v=20260327-unified-01';
-import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260401-v48-rssi-vote-02';
+import { CsiOperatorService } from '../services/csi-operator.service.js?v=20260404-ui-runtime-20';
 
 const UI_LOCALE = getOperatorCopy(typeof document !== 'undefined' ? document.documentElement?.lang : 'ru');
+const TRUTH_TVAR_UI_THRESHOLD = 4.0;
+const TRUTH_TVAR_UI_CONFIDENT_OCCUPIED = 6.0;
+const TRUTH_TVAR_UI_CONFIDENT_EMPTY = 2.0;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -35,6 +38,33 @@ function safeNumber(value, fallback = null) {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toSortableTimestamp(value, fallback = -1) {
+  const numeric = safeNumber(value, null);
+  if (numeric != null) {
+    return numeric;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function sortRuntimeModelsByFreshness(items = []) {
+  return [...items].sort((left, right) => {
+    const rightUpdated = toSortableTimestamp(right?.updatedAt, -1);
+    const leftUpdated = toSortableTimestamp(left?.updatedAt, -1);
+    if (rightUpdated !== leftUpdated) {
+      return rightUpdated - leftUpdated;
+    }
+    if (Boolean(right?.isActive) !== Boolean(left?.isActive)) {
+      return right?.isActive ? 1 : -1;
+    }
+    if (Boolean(right?.isDefault) !== Boolean(left?.isDefault)) {
+      return right?.isDefault ? 1 : -1;
+    }
+    return String(left?.displayName || left?.fileName || '')
+      .localeCompare(String(right?.displayName || right?.fileName || ''), 'ru');
+  });
 }
 
 function formatNumberWithUnit(value, { digits = 0, unit = '', missing = UI_LOCALE.common.noData } = {}) {
@@ -352,7 +382,7 @@ const DEFAULT_GARAGE_LAYOUT = {
   nodes: [
     { nodeId: 'node01', ip: '192.168.0.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
     { nodeId: 'node02', ip: '192.168.0.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
-    { nodeId: 'node03', ip: '192.168.0.143', xMeters: -1.50, yMeters: 3.15, zone: 'center' },
+    { nodeId: 'node03', ip: '192.168.0.144', xMeters: -1.50, yMeters: 3.15, zone: 'center' },
     { nodeId: 'node04', ip: '192.168.0.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
     { nodeId: 'node05', ip: '192.168.0.110',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
     { nodeId: 'node06', ip: '192.168.0.132',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
@@ -1156,13 +1186,18 @@ function getCanonicalRecordingState(snapshot) {
 }
 
 function getRuntimeSessionText(snapshot) {
-  const sessionId = snapshot?.pose?.runtime_session_id || snapshot?.pose?.metadata?.runtime_session_id;
-  return sessionId || 'backend не прислал идентификатор сессии';
+  const sessionId = snapshot?.csi?.runtime_session_id
+    || snapshot?.pose?.runtime_session_id
+    || snapshot?.pose?.metadata?.runtime_session_id;
+  return sessionId || 'локальный runtime без session-id';
 }
 
 function getRuntimeStartText(snapshot) {
-  const startedTs = snapshot?.pose?.runtime_started_ts || snapshot?.pose?.metadata?.runtime_started_ts;
-  return startedTs ? formatTimestamp(startedTs) : 'backend не прислал время старта';
+  const startedTs = snapshot?.csi?.runtime_started_at
+    || snapshot?.csi?.runtime_started_ts
+    || snapshot?.pose?.runtime_started_ts
+    || snapshot?.pose?.metadata?.runtime_started_ts;
+  return startedTs ? formatTimestamp(startedTs) : 'время старта runtime не публикуется';
 }
 
 function getSupportTopologyText(signature) {
@@ -1264,6 +1299,41 @@ function getMotionActivityText(motion, primaryRuntime) {
 
 function getGarageLayout(live) {
   return live?.garage || live?.primaryRuntime?.garage || DEFAULT_GARAGE_LAYOUT;
+}
+
+function normalizeGarageNodes(nodes = []) {
+  const canonicalIpByNode = {
+    node01: '192.168.0.137',
+    node02: '192.168.0.117',
+    node03: '192.168.0.144',
+    node04: '192.168.0.125',
+    node05: '192.168.0.110',
+    node06: '192.168.0.132',
+    node07: '192.168.0.153'
+  };
+  const legacyIpAliasToNode = {
+    '192.168.0.143': 'node03'
+  };
+  const seen = new Set();
+
+  return nodes.reduce((acc, node) => {
+    if (!node) {
+      return acc;
+    }
+    const nodeId = legacyIpAliasToNode[node.ip] || node.nodeId || node.id || null;
+    const canonicalIp = nodeId ? (canonicalIpByNode[nodeId] || node.ip || null) : (node.ip || null);
+    const dedupeKey = nodeId || canonicalIp || JSON.stringify(node);
+    if (seen.has(dedupeKey)) {
+      return acc;
+    }
+    seen.add(dedupeKey);
+    acc.push({
+      ...node,
+      nodeId: nodeId || node.nodeId || node.id,
+      ip: canonicalIp || node.ip
+    });
+    return acc;
+  }, []);
 }
 
 function clampGarageCoordinate(coordinate, garage) {
@@ -1565,6 +1635,8 @@ export class CsiOperatorApp {
     this.signalCoordinateState = null;
     this._nodesLive = null;
     this._nodesLiveTimer = null;
+    this._nodesHealth = null; // from /api/v1/csi/nodes (management + stream health)
+    this._nodesHealthTimer = null;
     this._nodesRssiHistory = {}; // { node_id: [rssi, rssi, ...] } - last 20 values for sparklines
     // Signal dashboard chart state
     this._sdCharts = null;
@@ -1573,8 +1645,27 @@ export class CsiOperatorApp {
     this._sdLastBinary = null;
     this._sdSelectedRange = 60;
     this._sdSparklineData = {};
+    this._sdNodeState = {};
+    this._sdHealth = null;
+    this._sdShadow = null;
+    this._sdArchiveMeta = null;
+    this._sdTruthOccupancy = null;
+    this._sdLoadedHistoryRangeKey = null;
+    this._sdServerHistoryPromise = null;
+    this._sdPendingHistoryRangeKey = null;
     this._sdPollTimer = null;
     this._sdInitialized = false;
+    this._runtimeUiBackoffUntil = 0;
+    this._runtimeUiOptionalSurface = {
+      csiFeaturesEnabled: true
+    };
+    this._doorCenterMapOverlayState = {
+      heldZone: null,
+      holdUntilMs: 0,
+      centerConfirmStreak: 0,
+      lastAgreement: null,
+      lastConfidence: null
+    };
     this.runtimeViewSelection = readUiRuntimeViewSelection();
     this.validationFilter = 'all';
     this.runtimeRecordingUi = {
@@ -1616,32 +1707,94 @@ export class CsiOperatorApp {
     this._startNodesLivePolling();
   }
 
+  _isTabActive(tabId) {
+    return this.root?.querySelector(`.tab-content.active#${tabId}`) != null;
+  }
+
+  _isRuntimeUiBackoffActive() {
+    return this._runtimeUiBackoffUntil > Date.now();
+  }
+
+  _markRuntimeUiBackoff() {
+    this._runtimeUiBackoffUntil = Date.now() + this._RUNTIME_UI_BACKOFF_MS;
+  }
+
+  _clearRuntimeUiBackoff() {
+    this._runtimeUiBackoffUntil = 0;
+  }
+
+  _isRuntimeUiOptionalSurfaceEnabled(url) {
+    if (url === '/api/v1/csi/features') {
+      return this._runtimeUiOptionalSurface.csiFeaturesEnabled;
+    }
+    return true;
+  }
+
+  _disableRuntimeUiOptionalSurface(url) {
+    if (url === '/api/v1/csi/features') {
+      this._runtimeUiOptionalSurface.csiFeaturesEnabled = false;
+    }
+  }
+
+  async _fetchRuntimeUiJson(url, { timeoutMs = 4000 } = {}) {
+    if (this._isRuntimeUiBackoffActive() || !this._isRuntimeUiOptionalSurfaceEnabled(url)) {
+      return null;
+    }
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) {
+        if (response.status === 404) {
+          this._disableRuntimeUiOptionalSurface(url);
+          return null;
+        }
+        if (response.status >= 500) {
+          this._markRuntimeUiBackoff();
+        }
+        return null;
+      }
+      this._clearRuntimeUiBackoff();
+      return await response.json();
+    } catch (_) {
+      this._markRuntimeUiBackoff();
+      return null;
+    }
+  }
+
   _startNodesLivePolling() {
     const SPARKLINE_MAX = 20;
     const poll = async () => {
-      try {
-        const resp = await fetch('/api/v1/csi/nodes/live');
-        if (resp.ok) {
-          this._nodesLive = await resp.json();
-          // Track RSSI history for sparklines
-          if (this._nodesLive?.nodes) {
-            for (const n of this._nodesLive.nodes) {
-              if (!this._nodesRssiHistory[n.node_id]) {
-                this._nodesRssiHistory[n.node_id] = [];
-              }
-              const hist = this._nodesRssiHistory[n.node_id];
-              hist.push(n.rssi != null ? n.rssi : null);
-              if (hist.length > SPARKLINE_MAX) {
-                hist.splice(0, hist.length - SPARKLINE_MAX);
-              }
+      const payload = await this._fetchRuntimeUiJson('/api/v1/csi/nodes/live');
+      if (payload) {
+        this._nodesLive = payload;
+        // Track RSSI history for sparklines
+        if (this._nodesLive?.nodes) {
+          for (const n of this._nodesLive.nodes) {
+            if (!this._nodesRssiHistory[n.node_id]) {
+              this._nodesRssiHistory[n.node_id] = [];
+            }
+            const hist = this._nodesRssiHistory[n.node_id];
+            hist.push(n.rssi != null ? n.rssi : null);
+            if (hist.length > SPARKLINE_MAX) {
+              hist.splice(0, hist.length - SPARKLINE_MAX);
             }
           }
-          this._renderNodesLiveCards();
         }
-      } catch (_) { /* ignore */ }
+        this._renderNodesLiveCards();
+      }
     };
     poll();
     this._nodesLiveTimer = setInterval(poll, 1500);
+
+    // Poll management health at a slower rate (every 10s)
+    const pollHealth = async () => {
+      const payload = await this._fetchRuntimeUiJson('/api/v1/csi/nodes', { timeoutMs: 8000 });
+      if (payload) {
+        this._nodesHealth = payload;
+        this._renderNodesLiveCards();
+      }
+    };
+    pollHealth();
+    this._nodesHealthTimer = setInterval(pollHealth, 10000);
   }
 
   _rssiColor(rssi) {
@@ -1669,38 +1822,90 @@ export class CsiOperatorApp {
     }).join('')}</div>`;
   }
 
+  _getNodeHealthInfo(nodeId) {
+    if (!this._nodesHealth) return null;
+    const nodes = Array.isArray(this._nodesHealth) ? this._nodesHealth : (this._nodesHealth.nodes || []);
+    return nodes.find((h) => h.name === nodeId) || null;
+  }
+
   _renderNodeCard(n) {
     const online = n.online;
-    const dotColor = online ? '#22c55e' : '#ef4444';
-    const statusLabel = online ? 'online' : (n.packets > 0 ? 'stale' : 'offline');
+    const health = this._getNodeHealthInfo(n.node_id);
+
+    // Determine tri-state: stream (CSI packets) and management (HTTP :8032)
+    const streamActive = online; // based on packet age < 10s
+    const mgmtOk = health ? Boolean(health.management_ok) : null; // null = not yet probed
+
+    // Compute composite status
+    let dotColor, statusLabel, statusClass, interpretText;
+    if (streamActive && mgmtOk !== false) {
+      // Stream OK + mgmt OK (or not yet probed)
+      dotColor = '#22c55e';
+      statusLabel = mgmtOk === true ? '\u041F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430' : 'CSI \u0430\u043A\u0442\u0438\u0432\u0435\u043D';
+      statusClass = mgmtOk === true ? 'node-status-full' : '';
+      interpretText = '';
+    } else if (streamActive && mgmtOk === false) {
+      // Stream OK + mgmt FAIL = likely wrong router
+      dotColor = '#f59e0b';
+      statusLabel = 'CSI \u0410\u041A\u0422\u0418\u0412\u0415\u041D';
+      statusClass = 'node-status-stream-only';
+      interpretText = 'MGMT \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u2014 \u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E Mac \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u043C \u0440\u043E\u0443\u0442\u0435\u0440\u0435';
+    } else if (!streamActive && mgmtOk === true) {
+      // No CSI but mgmt OK = something wrong with CSI stream
+      dotColor = '#ff9800';
+      statusLabel = 'CSI \u041D\u0415 \u041F\u041E\u0421\u0422\u0423\u041F\u0410\u0415\u0422';
+      statusClass = 'node-status-mgmt-only';
+      interpretText = 'Management \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D, \u043D\u043E CSI \u043D\u0435 \u043F\u043E\u0441\u0442\u0443\u043F\u0430\u0435\u0442';
+    } else {
+      // Both down
+      dotColor = '#ef4444';
+      statusLabel = '\u041D\u041E\u0414\u0410 \u041D\u0415\u0414\u041E\u0421\u0422\u0423\u041F\u041D\u0410';
+      statusClass = 'node-status-offline';
+      interpretText = '';
+    }
+
     const rssiColor = this._rssiColor(n.rssi);
     const tvColor = n.temporal_var > 2.0 ? '#ef4444' : n.temporal_var > 0.5 ? '#f59e0b' : '#22c55e';
     const pps = n.packets_window != null && n.last_age_sec > 0
       ? Math.round(n.packets_window / Math.max(n.last_age_sec, 1))
       : null;
     const lastSeenText = n.last_age_sec != null
-      ? (n.last_age_sec < 2 ? 'только что' : `${n.last_age_sec.toFixed(0)} с назад`)
-      : '—';
+      ? (n.last_age_sec < 2 ? '\u0442\u043E\u043B\u044C\u043A\u043E \u0447\u0442\u043E' : `${n.last_age_sec.toFixed(0)} \u0441 \u043D\u0430\u0437\u0430\u0434`)
+      : '\u2014';
+
+    // Status pills for stream and management
+    const streamPill = streamActive
+      ? '<span class="node-signal-card__status-pill node-status-full">\u2705 CSI</span>'
+      : '<span class="node-signal-card__status-pill node-status-offline">\u274C CSI</span>';
+    const mgmtPill = mgmtOk === true
+      ? '<span class="node-signal-card__status-pill node-status-full">\u2705 MGMT</span>'
+      : mgmtOk === false
+        ? '<span class="node-signal-card__status-pill node-status-stream-only">\u26A0\uFE0F MGMT</span>'
+        : '';
+
+    const dimCard = !streamActive && mgmtOk !== true;
 
     return `
-      <div class="node-signal-card${online ? '' : ' node-signal-card--offline'}">
+      <div class="node-signal-card${dimCard ? ' node-signal-card--offline' : ''}">
         <div class="node-signal-card__header">
           <div class="node-signal-card__name">
             <span class="node-signal-card__dot" style="background:${dotColor}"></span>
             ${escapeHtml(n.node_id)}
-            <span style="font-size:10px;font-weight:400;color:${dotColor}">${statusLabel}</span>
+            <span style="font-size:10px;font-weight:400;color:${dotColor}">${escapeHtml(statusLabel)}</span>
           </div>
           <span class="node-signal-card__ip">${escapeHtml(n.ip)}</span>
         </div>
+        <div class="node-signal-card__status-row">${streamPill}${mgmtPill}</div>
+        ${interpretText ? `<div class="node-signal-card__status-interpret">${escapeHtml(interpretText)}</div>` : ''}
         <div style="display:flex;align-items:center;gap:8px">
-          <span class="node-signal-card__rssi-label" style="color:${rssiColor}">${n.rssi != null ? n.rssi + '' : '—'}<small style="font-size:10px;font-weight:400"> dBm</small></span>
+          <span class="node-signal-card__rssi-label" style="color:${rssiColor}">${n.rssi != null ? n.rssi + '' : '\u2014'}<small style="font-size:10px;font-weight:400"> dBm</small></span>
           <div style="flex:1">${this._renderSparkline(n.node_id)}</div>
         </div>
         <div class="node-signal-card__metrics">
-          <div class="node-signal-card__metric"><span>amp avg</span><span class="node-signal-card__metric-value">${n.amp_mean != null ? n.amp_mean.toFixed(1) : '—'}</span></div>
-          <div class="node-signal-card__metric"><span>tvar</span><span class="node-signal-card__metric-value" style="color:${tvColor}">${n.temporal_var != null ? n.temporal_var.toFixed(3) : '—'}</span></div>
-          <div class="node-signal-card__metric"><span>пакеты</span><span class="node-signal-card__metric-value">${n.packets || 0}${pps != null ? ' <small style="opacity:0.6">(' + pps + '/с)</small>' : ''}</span></div>
-          <div class="node-signal-card__metric"><span>amp max</span><span class="node-signal-card__metric-value">${n.amp_max != null ? n.amp_max.toFixed(0) : '—'}</span></div>
+          <div class="node-signal-card__metric"><span>amp avg</span><span class="node-signal-card__metric-value">${n.amp_mean != null ? n.amp_mean.toFixed(1) : '\u2014'}</span></div>
+          <div class="node-signal-card__metric"><span>tvar</span><span class="node-signal-card__metric-value" style="color:${tvColor}">${n.temporal_var != null ? n.temporal_var.toFixed(3) : '\u2014'}</span></div>
+          <div class="node-signal-card__metric"><span>\u043F\u0430\u043A\u0435\u0442\u044B</span><span class="node-signal-card__metric-value">${n.packets || 0}${pps != null ? ' <small style="opacity:0.6">(' + pps + '/\u0441)</small>' : ''}</span></div>
+          <div class="node-signal-card__metric"><span>amp max</span><span class="node-signal-card__metric-value">${n.amp_max != null ? n.amp_max.toFixed(0) : '\u2014'}</span></div>
         </div>
         <div class="node-signal-card__last-seen">${escapeHtml(lastSeenText)}</div>
       </div>`;
@@ -1720,10 +1925,42 @@ export class CsiOperatorApp {
     return `<div style="height:3px;margin-top:2px;background:#333;border-radius:2px"><div style="width:${pct}%;height:100%;background:${color};border-radius:2px"></div></div>`;
   }
 
+  _renderNetworkMismatchBanner() {
+    if (!this._nodesLive?.nodes || !this._nodesHealth) return '';
+    const nodes = this._nodesLive.nodes;
+    const healthNodes = Array.isArray(this._nodesHealth) ? this._nodesHealth : (this._nodesHealth.nodes || []);
+    if (!nodes.length || !healthNodes.length) return '';
+
+    let streamOkMgmtFail = 0;
+    let totalWithStream = 0;
+    for (const n of nodes) {
+      if (!n.online) continue;
+      totalWithStream++;
+      const h = healthNodes.find((h) => h.name === n.node_id);
+      if (h && !h.management_ok) {
+        streamOkMgmtFail++;
+      }
+    }
+
+    if (totalWithStream >= 3 && streamOkMgmtFail === totalWithStream) {
+      return `
+        <div class="network-mismatch-banner">
+          <span class="network-mismatch-banner__icon">\u26A0\uFE0F</span>
+          <div class="network-mismatch-banner__text">
+            <strong>\u0412\u0441\u0435 \u043D\u043E\u0434\u044B \u043F\u0435\u0440\u0435\u0434\u0430\u044E\u0442 CSI, \u043D\u043E management HTTP \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D.</strong>
+            \u0412\u0435\u0440\u043E\u044F\u0442\u043D\u043E Mac \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D \u043A \u0434\u0440\u0443\u0433\u043E\u043C\u0443 \u0440\u043E\u0443\u0442\u0435\u0440\u0443 (\u043D\u0435 Tenda). CSI \u0434\u0430\u043D\u043D\u044B\u0435 \u043F\u043E\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u043D\u043E\u0440\u043C\u0430\u043B\u044C\u043D\u043E, \u043D\u043E HTTP-\u043F\u0440\u043E\u0431\u044B \u043A \u043D\u043E\u0434\u0430\u043C \u043D\u0435 \u043F\u0440\u043E\u0445\u043E\u0434\u044F\u0442.
+          </div>
+        </div>
+      `;
+    }
+
+    return '';
+  }
+
   _renderNodesLiveCards() {
     const el = this.root.querySelector('#nodes-live-grid');
     if (!el) return;
-    el.innerHTML = this._renderNodesLiveRows();
+    el.innerHTML = this._renderNetworkMismatchBanner() + this._renderNodesLiveRows();
     // Update position info
     const posEl = this.root.querySelector('#nodes-live-position');
     if (posEl && this._nodesLive?.position) {
@@ -1746,6 +1983,7 @@ export class CsiOperatorApp {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     this.clearForensicSearchPrefetch();
     if (this._nodesLiveTimer) clearInterval(this._nodesLiveTimer);
+    if (this._nodesHealthTimer) clearInterval(this._nodesHealthTimer);
     this._destroySignalDashboard();
     this.unsubscribe?.();
     this.service.stop();
@@ -1935,7 +2173,7 @@ export class CsiOperatorApp {
 
     const refreshButton = event.target.closest('[data-action="refresh-forensics"]');
     if (refreshButton) {
-      void this.service.refreshForensicRuns(true);
+      void this.service.refreshForensicRuns({ force: true, manual: true });
       return;
     }
 
@@ -2596,9 +2834,15 @@ export class CsiOperatorApp {
     const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const topologyLabel = getTopologyHeadline(topology, primaryRuntime);
     const sessionId = getRuntimeSessionText(snapshot);
-    const liveBinaryLabel = displayMaybeToken(shadowDisagreement.primaryBinary || primaryRuntime.binary || 'unknown');
-    const liveZoneLabel = displayMaybeToken(primaryRuntime.targetZone || runtimeView.targetZone || 'unknown');
-    const liveShadowLabel = displayMaybeToken(shadowDisagreement.shadowBinary || 'unknown');
+    const csiRaw = snapshot?.csi || {};
+    const productionBinary = csiRaw.binary || primaryRuntime.binary || shadowDisagreement.primaryBinary || 'unknown';
+    const productionZone = csiRaw.target_zone || csiRaw.zone || primaryRuntime.targetZone || runtimeView.targetZone || 'unknown';
+    const productionBinaryConfidence = csiRaw.binary_confidence ?? primaryRuntime.binaryConfidence ?? shadowDisagreement.primaryBinaryConfidence ?? null;
+    const productionZoneSource = csiRaw.zone_source || primaryRuntime.zoneSource || 'unknown';
+    const liveBinaryLabel = displayMaybeToken(productionBinary);
+    const liveZoneLabel = displayMaybeToken(productionZone);
+    const activeBackend = csiRaw.decision_model_backend || 'unknown';
+    const modelCalloutHtml = this._renderModelCalloutCard(activeBackend, csiRaw);
 
     this.sections.overview.innerHTML = `
       <div class="summary-stack">
@@ -2611,9 +2855,8 @@ export class CsiOperatorApp {
           <div class="summary-card__label">Live verdict</div>
           <div class="summary-card__value">${escapeHtml(String(liveBinaryLabel || 'unknown')).toUpperCase()}</div>
           <div class="summary-card__meta">
-            binary ${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.primaryBinaryConfidence ?? primaryRuntime.binaryConfidence, 0))}
-            <br>zone ${escapeHtml(liveZoneLabel)} / ${escapeHtml(primaryRuntime.zoneSource || 'unknown')}${primaryRuntime.n02RssiEma != null ? ` / RSSI ${formatNumber(primaryRuntime.n02RssiEma, 1)}` : ''}
-            <br>shadow ${escapeHtml(liveShadowLabel)} / ${escapeHtml(formatPercent(shadowDisagreement.shadowBinaryConfidence, 0))} / ${escapeHtml(getShadowDisagreementLabel(shadowDisagreement))} · ${escapeHtml(shadowDisagreement.summary || 'данные не переданы')}
+            binary ${escapeHtml(liveBinaryLabel)} / ${escapeHtml(formatPercent(productionBinaryConfidence, 0))}
+            <br>zone ${escapeHtml(liveZoneLabel)} / ${escapeHtml(productionZoneSource)}${primaryRuntime.n02RssiEma != null ? ` / RSSI ${formatNumber(primaryRuntime.n02RssiEma, 1)}` : ''}
           </div>
         </div>
         <div class="summary-card tone-neutral">
@@ -2629,6 +2872,65 @@ export class CsiOperatorApp {
             <br>${escapeHtml(poseSurface.detail || 'детали не переданы')}
           </div>
         </div>
+      </div>
+      ${modelCalloutHtml}
+    `;
+  }
+
+  _renderModelCalloutCard(activeBackend, csiRaw) {
+    if (!activeBackend || activeBackend === 'unknown') {
+      return '';
+    }
+
+    const backendLower = activeBackend.toLowerCase();
+    let activeStepKey = null;
+    let displayName = activeBackend;
+    let badgeClass = 'model-badge-legacy';
+
+    if (backendLower.includes('truth_tvar')) {
+      activeStepKey = 'truth_tvar';
+      displayName = 'Truth TVAR v2';
+      badgeClass = 'model-badge-truth';
+    } else if (backendLower.includes('v8_empty') || backendLower.includes('empty_priority')) {
+      activeStepKey = 'v8_empty';
+      displayName = 'V8 Empty Priority Guard';
+      badgeClass = 'model-badge-warn';
+    } else if (backendLower.includes('track_b')) {
+      activeStepKey = 'track_b';
+      displayName = 'Track B Candidate';
+      badgeClass = 'model-badge-legacy';
+    } else if (backendLower.includes('v60') || backendLower.includes('mesh')) {
+      activeStepKey = 'v60';
+      displayName = 'V60 Mesh Binary';
+      badgeClass = 'model-badge-legacy';
+    } else if (backendLower.includes('v48') || backendLower.includes('random_forest')) {
+      activeStepKey = 'v48';
+      displayName = 'V48 Random Forest';
+      badgeClass = 'model-badge-legacy';
+    } else if (backendLower.includes('hysteresis')) {
+      activeStepKey = 'hysteresis';
+      displayName = 'Hysteresis Gate';
+      badgeClass = 'model-badge-legacy';
+    }
+
+    const productionBinary = displayMaybeToken(csiRaw.binary || 'unknown');
+    const productionZone = displayMaybeToken(csiRaw.target_zone || csiRaw.zone || csiRaw.binary || 'unknown');
+    const binaryConfidence = Number.isFinite(Number(csiRaw.binary_confidence)) ? Number(csiRaw.binary_confidence) : null;
+    const zoneSource = csiRaw.zone_source || 'unknown';
+    const metaLines = [
+      `Backend: ${escapeHtml(activeBackend)}`,
+      `binary: ${escapeHtml(productionBinary)}${binaryConfidence != null ? ` / ${escapeHtml(formatPercent(binaryConfidence, 0))}` : ''}`,
+      `zone: ${escapeHtml(productionZone)} / ${escapeHtml(zoneSource)}`
+    ];
+
+    return `
+      <div class="model-callout-card">
+        <div class="model-callout-card__eyebrow">\u0410\u043A\u0442\u0438\u0432\u043D\u0430\u044F \u043C\u043E\u0434\u0435\u043B\u044C \u043F\u0440\u0438\u043D\u044F\u0442\u0438\u044F \u0440\u0435\u0448\u0435\u043D\u0438\u044F</div>
+        <div class="model-callout-card__headline">
+          ${escapeHtml(displayName)}
+          <span class="${badgeClass}">${activeStepKey === 'truth_tvar' ? 'TRUTH' : activeStepKey === 'v8_empty' ? 'GUARD' : 'ACTIVE'}</span>
+        </div>
+        <div class="model-callout-card__meta">${metaLines.join(' &middot; ')}</div>
       </div>
     `;
   }
@@ -3012,19 +3314,155 @@ export class CsiOperatorApp {
     `;
   }
 
+  _getDoorCenterMapOverlay(live) {
+    const candidate = live?.doorCenterCandidateShadow || {};
+    const temporal = live?.temporalZoneOverlayShadow || {};
+    const state = this._doorCenterMapOverlayState || {
+      heldZone: null,
+      holdUntilMs: 0,
+      centerConfirmStreak: 0,
+      lastAgreement: null,
+      lastConfidence: null
+    };
+    const nowMs = Date.now();
+    const candidateZone = candidate?.candidateZone || candidate?.zone || null;
+    const stableZone = candidate?.stableZone || candidate?.stable_zone || null;
+    const agreement = candidate?.agreement || null;
+    const confidence = Number.isFinite(Number(candidate?.confidence)) ? Number(candidate.confidence) : null;
+    const temporalScore = Number.isFinite(Number(temporal?.directionalScore)) ? Number(temporal.directionalScore) : null;
+
+    if (['door_passage', 'center'].includes(stableZone)) {
+      const anchor = stableZone === 'center'
+        ? { xMeters: 1.5, yMeters: 3.0 }
+        : { xMeters: 1.0, yMeters: 1.0 };
+      state.heldZone = stableZone;
+      state.holdUntilMs = nowMs + 12000;
+      state.centerConfirmStreak = 0;
+      state.lastAgreement = agreement;
+      state.lastConfidence = confidence;
+      this._doorCenterMapOverlayState = state;
+      return {
+        zone: stableZone,
+        xMeters: anchor.xMeters,
+        yMeters: anchor.yMeters,
+        source: `door_center_candidate_shadow stable (${agreement || 'shadow_live'})`,
+        reason: 'backend_stable_zone',
+        confidence
+      };
+    }
+
+    const strongDoor = candidateZone === 'door_passage'
+      && (
+        ['full', 'prototype_temporal'].includes(agreement)
+        || (agreement === 'temporal_threshold' && (temporalScore == null || temporalScore <= -0.05))
+      )
+      && (confidence == null || confidence >= 0.60);
+    const strongCenter = candidateZone === 'center'
+      && ['full', 'prototype_temporal'].includes(agreement)
+      && (confidence == null || confidence >= 0.72);
+
+    if (strongDoor) {
+      state.heldZone = 'door_passage';
+      state.holdUntilMs = nowMs + 12000;
+      state.centerConfirmStreak = 0;
+      state.lastAgreement = agreement;
+      state.lastConfidence = confidence;
+    } else if (strongCenter) {
+      if (state.heldZone === 'door_passage' && state.holdUntilMs > nowMs) {
+        state.centerConfirmStreak += 1;
+        if (state.centerConfirmStreak >= 4) {
+          state.heldZone = null;
+          state.holdUntilMs = 0;
+          state.centerConfirmStreak = 0;
+          state.lastAgreement = null;
+          state.lastConfidence = null;
+        }
+      } else {
+        state.heldZone = null;
+        state.holdUntilMs = 0;
+        state.centerConfirmStreak = 0;
+        state.lastAgreement = null;
+        state.lastConfidence = null;
+      }
+    } else if (state.heldZone === 'door_passage' && state.holdUntilMs <= nowMs) {
+      state.heldZone = null;
+      state.holdUntilMs = 0;
+      state.centerConfirmStreak = 0;
+      state.lastAgreement = null;
+      state.lastConfidence = null;
+    }
+
+    this._doorCenterMapOverlayState = state;
+
+    if (state.heldZone === 'door_passage' && state.holdUntilMs > nowMs) {
+      return {
+        zone: 'door_passage',
+        xMeters: 1.0,
+        yMeters: 1.0,
+        source: `door_center_candidate_shadow hold (${state.lastAgreement || 'full'})`,
+        reason: 'door_hold_grace',
+        confidence: state.lastConfidence
+      };
+    }
+
+    return null;
+  }
+
   renderSignal() {
     const snapshot = this.snapshot;
+    const signalRenderSignature = JSON.stringify({
+      binary: snapshot?.csi?.binary ?? snapshot?.live?.primaryRuntime?.binary ?? null,
+      zone: snapshot?.csi?.target_zone ?? snapshot?.csi?.zone ?? snapshot?.live?.primaryRuntime?.targetZone ?? null,
+      backend: snapshot?.csi?.decision_model_backend ?? null,
+      packets: snapshot?.live?.topology?.liveTotalPackets ?? snapshot?.live?.primaryRuntime?.packetsInWindow ?? null
+    });
+    if (
+      this._isTabActive('signal')
+      && this._sdInitialized
+      && this.sections.signal?.childElementCount
+      && this._lastSignalRenderSignature === signalRenderSignature
+    ) {
+      this._refreshSignalLiveSurface();
+      return;
+    }
+    this._lastSignalRenderSignature = signalRenderSignature;
     const recording = snapshot.recording || {};
     const recordingStatus = recording.status || {};
     const topology = snapshot.live.topology;
     const motion = snapshot.live.motion;
     const live = snapshot.live;
     const primaryRuntime = snapshot.live.primaryRuntime || {};
+    const primaryRuntimeDisplay = snapshot.live.primaryRuntimeDisplay || primaryRuntime;
     const secondaryRuntime = snapshot.live.secondaryRuntime || {};
+    const csiRaw = snapshot.csi || {};
     const trackBShadow = snapshot.live.trackBShadow || {};
     const v8Shadow = snapshot.live.v8Shadow || snapshot.live.v7Shadow || snapshot.live.v15Shadow || {};
     const fingerprint = snapshot.live.fingerprint;
-    const coordinate = snapshot.live.coordinate;
+    const baseCoordinate = snapshot.live.coordinate || {};
+    const productionBinary = csiRaw.binary || primaryRuntime.binary || 'unknown';
+    const productionZone = csiRaw.target_zone || csiRaw.zone || primaryRuntime.targetZone || primaryRuntime.zone || productionBinary;
+    const productionZoneSource = csiRaw.zone_source || primaryRuntime.zoneSource || 'unknown';
+    const productionBinaryConfidence = csiRaw.binary_confidence ?? primaryRuntime.binaryConfidence ?? null;
+    const binarySafeOnly = productionZoneSource === 'binary_safe_only';
+    const doorCenterMapOverlay = binarySafeOnly ? null : this._getDoorCenterMapOverlay(live);
+    const coordinate = doorCenterMapOverlay
+      ? {
+          ...baseCoordinate,
+          xCm: doorCenterMapOverlay.xMeters != null ? doorCenterMapOverlay.xMeters * 100 : baseCoordinate.xCm,
+          yCm: doorCenterMapOverlay.yMeters != null ? doorCenterMapOverlay.yMeters * 100 : baseCoordinate.yCm,
+          xMeters: doorCenterMapOverlay.xMeters ?? baseCoordinate.xMeters,
+          yMeters: doorCenterMapOverlay.yMeters ?? baseCoordinate.yMeters,
+          targetZone: doorCenterMapOverlay.zone,
+          source: doorCenterMapOverlay.source,
+          displaySource: doorCenterMapOverlay.source,
+          displayMode: 'shadow_candidate_hold',
+          displayReason: doorCenterMapOverlay.reason,
+          shadowCandidateConfidence: doorCenterMapOverlay.confidence ?? baseCoordinate.shadowCandidateConfidence,
+          operatorXMeters: doorCenterMapOverlay.xMeters ?? baseCoordinate.operatorXMeters,
+          operatorYMeters: doorCenterMapOverlay.yMeters ?? baseCoordinate.operatorYMeters,
+          operatorTargetZone: doorCenterMapOverlay.zone
+        }
+      : baseCoordinate;
     const operatorPresence = snapshot.live.operatorPresence || {};
     const ambiguity = snapshot.live.ambiguity || {};
     const activeCoordinate = coordinate?.activeForMap ? {
@@ -3033,7 +3471,8 @@ export class CsiOperatorApp {
       yMeters: coordinate.operatorYMeters ?? coordinate.yMeters,
       targetZone: coordinate.operatorTargetZone || coordinate.targetZone
     } : null;
-    const diagnosticShadowCoordinate = !ambiguity.active
+    const diagnosticShadowCoordinate = !binarySafeOnly
+      && !ambiguity.active
       && !activeCoordinate
       && safeNumber(coordinate?.shadowXMeters) != null
       && safeNumber(coordinate?.shadowYMeters) != null
@@ -3053,14 +3492,14 @@ export class CsiOperatorApp {
     const mpConfidence = mpEstimate.confidence || 0;
     // Multi-target diagnostic only when production is NOT confidently empty.
     // Prevents showing "2 people" in empty garage from shadow disagreement.
-    const prodBinaryEmpty = primaryRuntime.binary === 'empty'
-      && (primaryRuntime.binaryConfidence || 0) > 0.75;
+    const prodBinaryEmpty = productionBinary === 'empty'
+      && (productionBinaryConfidence || 0) > 0.75;
     const multiTargetDiagnosticActive = !ambiguity.active
       && !activeCoordinate
       && !prodBinaryEmpty
       && (mpState === 'multi' || mpState === 'unresolved')
       && mpTracks.length > 1;
-    const displayCoordinate = activeCoordinate || (prodBinaryEmpty ? null : diagnosticShadowCoordinate);
+    const displayCoordinate = activeCoordinate || ((prodBinaryEmpty || binarySafeOnly) ? null : diagnosticShadowCoordinate);
     const garage = getGarageLayout(live);
     const smoothedCoordinate = this.getSmoothedSignalCoordinate(displayCoordinate, garage);
     const currentPoint = mapGarageCoordinateToPercent(smoothedCoordinate, garage);
@@ -3094,17 +3533,21 @@ export class CsiOperatorApp {
       : null;
     const garageZones = getGarageZoneBands(garage);
     const ambiguityZone = garageZones.find((zone) => zone.id === ambiguity.targetZone) || null;
-    const garageNodes = Array.isArray(garage?.nodes) ? garage.nodes : [];
+    const garageNodes = normalizeGarageNodes(Array.isArray(garage?.nodes) ? garage.nodes : []);
     const aggregateNodeNote = getAggregateNodeNote(topology.nodes || [], primaryRuntime);
     const liveTotalPackets = topology.liveTotalPackets ?? primaryRuntime.packetsInWindow;
     const lastPacketAgeSec = topology.lastPacketAgeSec ?? primaryRuntime.windowAgeSec;
     const liveWindowSeconds = topology.liveWindowSeconds ?? primaryRuntime.windowAgeSec;
     const motionWindowSeconds = topology.motionWindowSeconds ?? primaryRuntime.windowAgeSec;
     const vitalsWindowSeconds = snapshot.pose?.metadata?.vitals_window_seconds ?? topology.vitalsWindowSeconds ?? primaryRuntime.windowAgeSec;
-    const mapModeLabel = ambiguity.active
+    const mapModeLabel = binarySafeOnly
+      ? 'binary-safe-only'
+      : ambiguity.active
       ? 'ambiguity safe-mode'
       : activeCoordinate
-        ? 'single-target safe'
+        ? (coordinate?.displayMode === 'shadow_candidate_zone_anchor'
+          ? 'single-target safe (shadow zone overlay)'
+          : 'single-target safe')
         : multiTargetDiagnosticActive
           ? (mpState === 'multi'
             ? `multi-person diagnostic (${mpEstimate.personCountEstimate || '?'} est, ${Math.round(mpConfidence * 100)}%)`
@@ -3117,8 +3560,8 @@ export class CsiOperatorApp {
     // Shadow presence only counts when production is NOT confidently empty.
     // If production says empty with >0.80 confidence, shadow signals are likely
     // false positives (Track B warmup noise, V8 calibration drift).
-    const productionConfidentlyEmpty = primaryRuntime.binary === 'empty'
-      && (primaryRuntime.binaryConfidence || 0) > 0.80;
+    const productionConfidentlyEmpty = productionBinary === 'empty'
+      && (productionBinaryConfidence || 0) > 0.80;
     const shadowPresenceDetected = !ambiguity.active && !activeCoordinate
       && !productionConfidentlyEmpty
       && (
@@ -3144,12 +3587,16 @@ export class CsiOperatorApp {
     const shadowPresenceDetail = shadowPresenceDetected
       ? `Production motion-runtime пока не выдал движение, поэтому объект на карте скрыт. ${shadowConsensusBits.join(' / ') || 'shadow verdict активен.'}`
       : null;
-    const signalMapZoneLabel = ambiguity.active
+    const signalMapZoneLabel = binarySafeOnly
+      ? (productionZone || productionBinary || 'unknown')
+      : ambiguity.active
       ? ambiguity.targetZone || coordinate?.ambiguityTargetZone || 'unknown'
       : multiTargetDiagnosticActive
         ? `${mpEstimate.personCountEstimate || mpTracks.length} diagnostic tracks (${mpState})`
       : displayCoordinate?.targetZone || (shadowPresenceDetected ? 'обнаружен shadow-presence' : 'нет активного движения');
-    const smoothingLabel = ambiguity.active
+    const smoothingLabel = binarySafeOnly
+      ? 'binary-safe-only: диагностические координаты скрыты'
+      : ambiguity.active
       ? 'отключено в ambiguity safe-mode'
       : activeCoordinate
         ? 'по motion-history и runtime-геометрии'
@@ -3158,15 +3605,26 @@ export class CsiOperatorApp {
         : diagnosticShadowCoordinate
           ? 'мягкое диагностическое сглаживание V8 shadow'
           : (shadowPresenceDetected ? 'сглаживание отключено; доступен только shadow-presence' : 'отключено без active motion');
-    const displayCoordinateXcm = displayCoordinate?.xMeters != null ? displayCoordinate.xMeters * 100 : coordinate.xCm;
-    const displayCoordinateYcm = displayCoordinate?.yMeters != null ? displayCoordinate.yMeters * 100 : coordinate.yCm;
-    const displayCoordinateSource = activeCoordinate
-      ? getCoordinateSourceText(coordinate)
+    const displayCoordinateXcm = binarySafeOnly
+      ? null
+      : (displayCoordinate?.xMeters != null ? displayCoordinate.xMeters * 100 : coordinate.xCm);
+    const displayCoordinateYcm = binarySafeOnly
+      ? null
+      : (displayCoordinate?.yMeters != null ? displayCoordinate.yMeters * 100 : coordinate.yCm);
+    const displayCoordinateSource = binarySafeOnly
+      ? 'binary_safe_only'
+      : activeCoordinate
+      ? (coordinate?.displaySource || getCoordinateSourceText(coordinate))
       : multiTargetDiagnosticActive
         ? `runtime multi-person estimator (${mpState}, conf=${Math.round(mpConfidence * 100)}%)`
       : diagnosticShadowCoordinate
         ? 'V8 shadow diagnostic target'
         : (shadowPresenceDetected ? 'V8 shadow diagnostics (без active motion)' : getCoordinateSourceText(coordinate));
+    const displayZoneSource = binarySafeOnly
+      ? `${productionZoneSource || 'binary_safe_only'}${productionBinaryConfidence != null ? ` / binary ${Math.round(productionBinaryConfidence * 100)}%` : ''}`
+      : coordinate?.displayMode === 'shadow_candidate_zone_anchor'
+      ? `${coordinate?.displaySource || 'door_center_candidate_shadow'}${coordinate?.shadowCandidateConfidence != null ? ` (conf ${Math.round(coordinate.shadowCandidateConfidence * 100)}%)` : ''}`
+      : `${primaryRuntimeDisplay?.zoneSource || primaryRuntime?.zoneSource || 'unknown'}${primaryRuntimeDisplay?.n02RssiEma != null ? ` (RSSI n02: ${formatNumber(primaryRuntimeDisplay.n02RssiEma, 1)} dBm${primaryRuntimeDisplay?.rssiVotes ? ` / votes: ${escapeHtml(primaryRuntimeDisplay.rssiVotes)}` : ''})` : ''}`;
     const coordinateDisplayLabel = coordinate?.displayGuided ? 'Координата (guided)' : 'Координата';
     const coordinateRawAvailable = coordinate?.displayGuided
       && (coordinate?.rawXcm != null || coordinate?.rawYcm != null);
@@ -3318,7 +3776,7 @@ export class CsiOperatorApp {
               </div>
               <div class="garage-map__metric">
                 <span>Источник зоны</span>
-                <strong>${escapeHtml(primaryRuntime?.zoneSource || 'unknown')}${primaryRuntime?.n02RssiEma != null ? ` (RSSI n02: ${formatNumber(primaryRuntime.n02RssiEma, 1)} dBm${primaryRuntime?.rssiVotes ? ` / votes: ${escapeHtml(primaryRuntime.rssiVotes)}` : ''})` : ''}</strong>
+                <strong>${escapeHtml(displayZoneSource)}</strong>
               </div>
               <div class="garage-map__metric">
                 <span>Координата</span>
@@ -3345,6 +3803,12 @@ export class CsiOperatorApp {
           <div class="panel__eyebrow">Позиция (epoch4 RF)</div>
           ${(() => {
             const pos = snapshot.live.position;
+            if (binarySafeOnly) {
+              return `
+                <div class="panel__headline" style="opacity:0.8">DIAGNOSTIC HIDDEN</div>
+                <div class="panel__footer">Epoch4 RF позиция скрыта в режиме <b>binary_safe_only</b>, чтобы не конфликтовать с основным occupancy verdict.</div>
+              `;
+            }
             if (!pos) {
               return '<div class="panel__headline" style="opacity:0.5">Загрузка...</div>';
             }
@@ -3372,42 +3836,9 @@ export class CsiOperatorApp {
         </article>
 
         <article class="panel">
-          <div class="panel__eyebrow">Теневая диагностика</div>
-          <div class="diagnostic-grid">
-            ${snapshot.live.shadowDiagnostics.map((item) => `
-              <div class="diagnostic-card ${toneClass(statusTone(item.status))}">
-                <span>${escapeHtml(displayToken(item.label))}</span>
-                <strong>${escapeHtml(displayToken(item.prediction))}</strong>
-                <small>${escapeHtml(displayToken(item.status))} / ${escapeHtml(displayToken(item.detail))}</small>
-              </div>
-            `).join('')}
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel__eyebrow">Multi-person runtime estimator</div>
-          <div class="panel__headline mp-estimator-state mp-estimator-state--${mpState}">${escapeHtml(mpState === 'single' ? 'один человек' : mpState === 'multi' ? `${mpEstimate.personCountEstimate || '?'} человек (diagnostic)` : 'multi-person unresolved')}</div>
-          <div class="kv-list">
-            <div class="kv"><span>Состояние</span><strong>${escapeHtml(mpState)}</strong></div>
-            <div class="kv"><span>Уверенность</span><strong>${escapeHtml(String(Math.round(mpConfidence * 100)))}%</strong></div>
-            <div class="kv"><span>Оценка кол-ва</span><strong>${escapeHtml(String(mpEstimate.personCountEstimate || 1))}</strong></div>
-            <div class="kv"><span>Треков</span><strong>${escapeHtml(String(mpTracks.length))}</strong></div>
-            <div class="kv"><span>Источник</span><strong>${escapeHtml(mpEstimate.estimatorSource || 'unknown')}</strong></div>
-            <div class="kv"><span>Причины</span><strong>${escapeHtml((mpEstimate.estimatorReasons || []).join(', ') || 'нет')}</strong></div>
-            <div class="kv"><span>Recording hint</span><strong>${escapeHtml(String(mpEstimate.recordingHint || 0))}</strong></div>
-          </div>
-          ${mpTracks.length > 0 ? `
-            <div class="diagnostic-grid" style="margin-top: 8px">
-              ${mpTracks.map((track) => `
-                <div class="diagnostic-card ${track.source === 'production' ? 'tone-ok' : 'tone-info'}">
-                  <span>${escapeHtml(track.id)}</span>
-                  <strong>${escapeHtml(track.class || 'unknown')} (${escapeHtml(track.source)})</strong>
-                  <small>x=${escapeHtml(String(track.x))} y=${escapeHtml(String(track.y))} zone=${escapeHtml(track.zone)} conf=${escapeHtml(String(Math.round((track.confidence || 0) * 100)))}%</small>
-                </div>
-              `).join('')}
-            </div>
-          ` : ''}
-          <div class="panel__footer">Это диагностический runtime estimator. Использует координатный spread, class disagreement между production и shadow, и motion confidence. Это не confirmed targets — не заменяет production single-target path.</div>
+          <div class="panel__eyebrow">Диагностические прогнозы</div>
+          <div class="panel__headline" style="opacity:0.8">СКРЫТЫ</div>
+          <div class="panel__footer">На основной поверхности оставлены только актуальные production/latest-model verdicts. Shadow, fallback и multi-person diagnostics убраны, чтобы не смешивать источники.</div>
         </article>
       </div>
 
@@ -3436,6 +3867,14 @@ export class CsiOperatorApp {
           </div>
         </article>
 
+        <div class="signal-dashboard__status-strip" id="sd-status-strip">
+          <div class="sd-status-card sd-status-card--neutral">
+            <div class="sd-status-card__eyebrow">Runtime / shadow</div>
+            <div class="sd-status-card__headline">Ожидание данных...</div>
+            <div class="sd-status-card__detail">Поднимаю live-статус и health-флаги.</div>
+          </div>
+        </div>
+
         <div class="signal-dashboard__node-cards" id="sd-node-cards"></div>
 
         <div class="signal-dashboard__charts">
@@ -3449,11 +3888,10 @@ export class CsiOperatorApp {
 
         <div class="signal-dashboard__event-log">
           <h3>
-            <span>Журнал событий (переходы)</span>
-            <span id="sd-event-count" style="font-weight:400; font-size:11px; color:var(--operator-text-muted)">0 событий</span>
+            <span>Журнал событий</span>
           </h3>
           <div class="sd-event-log" id="sd-event-log">
-            <div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Ожидание данных...</div>
+            <div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Скрыт на основной поверхности. Показаны только текущие verdict’ы активной модели.</div>
           </div>
         </div>
       </div>
@@ -3461,12 +3899,20 @@ export class CsiOperatorApp {
     this._initSignalDashboard();
   }
 
+  _refreshSignalLiveSurface() {
+    this._renderNodesLiveCards();
+    this._sdRenderStatusStrip();
+    this._sdRenderNodeCards();
+    this._sdRenderEventLog();
+    this._sdUpdateCharts();
+  }
+
   // ============================================================
   //  Signal Dashboard — Chart.js time-series monitor
   // ============================================================
 
   _SD_NODE_IDS = ['node01','node02','node03','node04','node05','node06','node07'];
-  _SD_NODE_IPS = ['192.168.0.137','192.168.0.117','192.168.0.143','192.168.0.125','192.168.0.110','192.168.0.132','192.168.0.153'];
+  _SD_NODE_IPS = ['192.168.0.137','192.168.0.117','192.168.0.144','192.168.0.125','192.168.0.110','192.168.0.132','192.168.0.153'];
   _SD_NODE_COLORS = ['#4fc3f7','#ff9800','#56f39a','#f06292','#ab47bc','#ffc107','#00e5ff'];
   _SD_CORR_PAIRS = [['node04','node05'],['node03','node06'],['node05','node06'],['node01','node03'],['node02','node04']];
   _SD_CORR_COLORS = ['#4fc3f7','#ff9800','#56f39a','#f06292','#ab47bc'];
@@ -3474,24 +3920,31 @@ export class CsiOperatorApp {
   _SD_SPARKLINE_LEN = 50;
   _SD_LS_KEY = 'csi_signal_history';
   _SD_POLL_MS = 2000;
+  _RUNTIME_UI_BACKOFF_MS = 15000;
+  _SD_HISTORY_ENDPOINT = '/api/v1/csi/history';
+  _SD_HISTORY_MAX_POINTS = 2400;
 
   _initSignalDashboard() {
     if (typeof Chart === 'undefined') return;
-    // Avoid re-init on every render — only init charts once, then update data
-    if (this._sdInitialized && this._sdCharts) {
-      this._sdUpdateCharts();
-      this._sdRenderNodeCards();
-      this._sdRenderEventLog();
-      this._sdBindTimeRange();
-      return;
+    const container = this.root.querySelector('#signal-dashboard');
+    if (!container) return;
+    // The whole signal tab DOM is re-rendered часто, поэтому старые chart
+    // instances нельзя переиспользовать — они остаются привязаны к удалённым canvas.
+    if (!this._sdInitialized) {
+      this._sdLoadHistory();
+      this._sdBootstrapHistoryFromServer(this._sdSelectedRange);
     }
-    this._sdLoadHistory();
+    if (this._sdCharts) {
+      Object.values(this._sdCharts).forEach((chart) => { try { chart.destroy(); } catch (_) {} });
+      this._sdCharts = null;
+    }
     this._sdInitNodeCards();
     this._sdInitCharts();
     this._sdBindTimeRange();
     this._sdRenderEventLog();
+    this._sdRenderStatusStrip();
     // Restore sparklines from recent history
-    if (this._sdHistory.length > 0) {
+    if (this._sdHistory.length > 0 && Object.keys(this._sdSparklineData).length === 0) {
       const recent = this._sdHistory.slice(-this._SD_SPARKLINE_LEN);
       recent.forEach(entry => {
         this._SD_NODE_IDS.forEach(nid => {
@@ -3506,8 +3959,9 @@ export class CsiOperatorApp {
           this._sdSparklineData[nid] = this._sdSparklineData[nid].slice(-this._SD_SPARKLINE_LEN);
         }
       });
-      this._sdUpdateCharts();
     }
+    this._sdRenderNodeCards();
+    this._sdUpdateCharts();
     // Start independent polling for dashboard
     if (!this._sdPollTimer) {
       this._sdPollData();
@@ -3550,6 +4004,86 @@ export class CsiOperatorApp {
     }
   }
 
+  _sdMergeHistoryEntries(primary = [], secondary = []) {
+    const merged = new Map();
+    const upsert = (entry) => {
+      const ts = Number(entry?.timestamp);
+      if (!Number.isFinite(ts)) return;
+      const key = Math.round(ts / 1000);
+      const normalized = {
+        timestamp: ts,
+        node_rssi: { ...(entry?.node_rssi || {}) },
+        node_amp: { ...(entry?.node_amp || {}) },
+        node_tvar: { ...(entry?.node_tvar || {}) },
+        correlations: { ...(entry?.correlations || {}) },
+        phase_stds: { ...(entry?.phase_stds || {}) },
+        binary_prob: entry?.binary_prob ?? null
+      };
+      if (!merged.has(key)) {
+        merged.set(key, normalized);
+        return;
+      }
+      const current = merged.get(key);
+      current.timestamp = Math.max(current.timestamp, normalized.timestamp);
+      current.node_rssi = { ...current.node_rssi, ...normalized.node_rssi };
+      current.node_amp = { ...current.node_amp, ...normalized.node_amp };
+      current.node_tvar = { ...current.node_tvar, ...normalized.node_tvar };
+      current.correlations = { ...current.correlations, ...normalized.correlations };
+      current.phase_stds = { ...current.phase_stds, ...normalized.phase_stds };
+      if (normalized.binary_prob != null) {
+        current.binary_prob = normalized.binary_prob;
+      }
+    };
+    primary.forEach(upsert);
+    secondary.forEach(upsert);
+    return [...merged.values()].sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  _sdGetHistoryRangeKey(rangeSec = this._sdSelectedRange) {
+    const normalized = Number(rangeSec || 0);
+    return normalized > 0 ? String(normalized) : 'all';
+  }
+
+  _sdBuildHistoryEndpoint(rangeSec = this._sdSelectedRange) {
+    const params = new URLSearchParams({
+      max_points: String(this._SD_HISTORY_MAX_POINTS)
+    });
+    const normalized = Number(rangeSec || 0);
+    if (normalized > 0) {
+      params.set('range_sec', String(normalized));
+    }
+    return `${this._SD_HISTORY_ENDPOINT}?${params.toString()}`;
+  }
+
+  async _sdBootstrapHistoryFromServer(rangeSec = this._sdSelectedRange, { force = false } = {}) {
+    const rangeKey = this._sdGetHistoryRangeKey(rangeSec);
+    if (!force && this._sdLoadedHistoryRangeKey === rangeKey) return;
+    if (this._sdServerHistoryPromise && this._sdPendingHistoryRangeKey === rangeKey) {
+      await this._sdServerHistoryPromise;
+      return;
+    }
+    this._sdServerHistoryPromise = (async () => {
+      this._sdPendingHistoryRangeKey = rangeKey;
+      try {
+        const resp = await fetch(this._sdBuildHistoryEndpoint(rangeSec), { signal: AbortSignal.timeout(15000) });
+        if (!resp.ok) return;
+        const payload = await resp.json();
+        const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+        this._sdArchiveMeta = payload?.meta || null;
+        this._sdHistory = entries;
+        this._sdLoadedHistoryRangeKey = rangeKey;
+        this._sdSaveHistory();
+        this._sdUpdateCharts();
+      } catch (_) {
+        // Fallback silently to browser-local history.
+      } finally {
+        this._sdServerHistoryPromise = null;
+        this._sdPendingHistoryRangeKey = null;
+      }
+    })();
+    await this._sdServerHistoryPromise;
+  }
+
   _sdSaveHistory() {
     try {
       if (this._sdHistory.length > this._SD_MAX_HISTORY) {
@@ -3579,7 +4113,7 @@ export class CsiOperatorApp {
             <span class="sd-node-card__name" style="color:${this._SD_NODE_COLORS[i]}">${id}</span>
             <span class="sd-node-card__ip">${this._SD_NODE_IPS[i]}</span>
           </div>
-          <span class="sd-node-card__status offline" id="sd-nc-st-${id}">OFFLINE</span>
+          <span class="sd-node-card__status offline" id="sd-nc-st-${id}">\u041E\u0416\u0418\u0414\u0410\u041D\u0418\u0415</span>
         </div>
         <div class="sd-node-card__metrics">
           <div class="sd-node-card__metric"><span class="sd-node-card__metric-label">RSSI</span><span class="sd-node-card__metric-value" id="sd-nc-rssi-${id}">--</span></div>
@@ -3592,18 +4126,40 @@ export class CsiOperatorApp {
         <div class="sd-node-card__sparkline"><canvas id="sd-spark-${id}"></canvas></div>
       </div>
     `).join('');
+    this._SD_NODE_IDS.forEach((nodeId) => {
+      if (this._sdNodeState[nodeId]) {
+        this._sdUpdateNodeCard(nodeId, this._sdNodeState[nodeId]);
+      } else if (this._sdSparklineData[nodeId]?.length) {
+        this._sdDrawSparkline(nodeId);
+      }
+    });
   }
 
   _sdUpdateNodeCard(nodeId, data) {
+    this._sdNodeState[nodeId] = { ...data };
     const card = this.root.querySelector(`#sd-nc-${nodeId}`);
     const stEl = this.root.querySelector(`#sd-nc-st-${nodeId}`);
     if (!card || !stEl) return;
     const rssi = data.rssi;
+    const health = this._getNodeHealthInfo(nodeId);
+    const mgmtOk = health ? Boolean(health.management_ok) : null;
     let status = 'offline';
-    if (data.online) status = (rssi != null && rssi > -70) ? 'online' : 'weak';
+    let statusText = '\u041D\u041E\u0414\u0410 \u041D\u0415\u0414\u041E\u0421\u0422\u0423\u041F\u041D\u0410';
+    if (data.online) {
+      if (mgmtOk === false) {
+        status = 'weak';
+        statusText = 'CSI \u0410\u041A\u0422\u0418\u0412\u0415\u041D';
+      } else {
+        status = (rssi != null && rssi > -70) ? 'online' : 'weak';
+        statusText = status === 'online' ? 'OK' : 'WEAK';
+      }
+    } else if (mgmtOk === true) {
+      status = 'weak';
+      statusText = 'CSI \u041D\u0415\u0422';
+    }
     card.className = `sd-node-card ${status}`;
     stEl.className = `sd-node-card__status ${status}`;
-    stEl.textContent = status === 'online' ? 'OK' : status === 'weak' ? 'WEAK' : 'OFFLINE';
+    stEl.textContent = statusText;
     const set = (sfx, val) => {
       const el = this.root.querySelector(`#sd-nc-${sfx}-${nodeId}`);
       if (el) el.textContent = val;
@@ -3776,7 +4332,14 @@ export class CsiOperatorApp {
     if (filtered.length === 0) return;
     const span = filtered.length > 1 ? (filtered[filtered.length - 1].timestamp - filtered[0].timestamp) / 1000 : 0;
     const infoEl = this.root.querySelector('#sd-range-info');
-    if (infoEl) infoEl.textContent = `${filtered.length} точек | ${this._sdFormatDuration(span)}`;
+    if (infoEl) {
+      const bucket = this._sdArchiveMeta?.bucket_sec;
+      const sourceSuffix = this._sdArchiveMeta?.archive_points
+        ? ` | архив ${this._sdArchiveMeta.archive_points} т.`
+        : '';
+      const bucketSuffix = bucket ? ` | bucket ${bucket}s` : '';
+      infoEl.textContent = `${filtered.length} точек | ${this._sdFormatDuration(span)}${sourceSuffix}${bucketSuffix}`;
+    }
     const rssiData = this._SD_NODE_IDS.map(() => []);
     const ampData = this._SD_NODE_IDS.map(() => []);
     const tvarData = this._SD_NODE_IDS.map(() => []);
@@ -3840,56 +4403,525 @@ export class CsiOperatorApp {
       const newBtn = btn.cloneNode(true);
       newBtn.classList.toggle('active', rangeVal === this._sdSelectedRange);
       btn.parentNode.replaceChild(newBtn, btn);
-      newBtn.addEventListener('click', () => {
+      newBtn.addEventListener('click', async () => {
         container.querySelectorAll('.signal-dashboard__range-btn').forEach(b => b.classList.remove('active'));
         newBtn.classList.add('active');
         this._sdSelectedRange = rangeVal;
+        await this._sdBootstrapHistoryFromServer(rangeVal, { force: true });
         this._sdUpdateCharts();
       });
     });
   }
 
   _sdAddEvent(from, to, confidence) {
-    this._sdEvents.push({ from, to, confidence, ts: Date.now() });
-    if (this._sdEvents.length > 500) this._sdEvents = this._sdEvents.slice(-500);
-    this._sdRenderEventLog();
+    return;
   }
 
   _sdRenderEventLog() {
     const el = this.root.querySelector('#sd-event-log');
     const countEl = this.root.querySelector('#sd-event-count');
     if (!el) return;
-    if (countEl) countEl.textContent = `${this._sdEvents.length} событий`;
-    if (this._sdEvents.length === 0) {
-      el.innerHTML = '<div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Ожидание данных...</div>';
+    if (countEl) countEl.textContent = '';
+    el.innerHTML = '<div style="color:var(--operator-text-muted); padding:8px 0; text-align:center;">Скрыт на основной поверхности. Показаны только текущие verdict’ы активной модели.</div>';
+  }
+
+  _sdBuildHealthPayload(statusData) {
+    const dropout = statusData?.dropout_summary || {};
+    const quality = statusData?.signal_quality || {};
+    const degraded = Array.isArray(dropout?.degraded_nodes) ? dropout.degraded_nodes : [];
+    const offline = Array.isArray(dropout?.offline_nodes) ? dropout.offline_nodes : [];
+    const flags = [];
+    const ampDrift = Number.isFinite(Number(quality?.amp_drift_max)) ? Number(quality.amp_drift_max) : null;
+    const phaseJump = Number.isFinite(Number(quality?.phase_jump_max)) ? Number(quality.phase_jump_max) : null;
+    const deadSc = Number.isFinite(Number(quality?.dead_sc_max)) ? Number(quality.dead_sc_max) : null;
+    const coherence = Number.isFinite(Number(quality?.phase_coherence_mean)) ? Number(quality.phase_coherence_mean) : null;
+    if ((degraded.length + offline.length) > 0) {
+      flags.push({
+        label: offline.length ? 'dropout нод' : 'деградация нод',
+        severity: offline.length ? 'risk' : 'warn',
+        detail: [...degraded, ...offline].join(', ') || 'часть нод нестабильна'
+      });
+    }
+    if (ampDrift != null && ampDrift >= 0.2) {
+      flags.push({
+        label: 'common-mode drift',
+        severity: ampDrift >= 0.35 ? 'risk' : 'warn',
+        detail: `amp ${ampDrift.toFixed(3)}`
+      });
+    }
+    if (phaseJump != null && phaseJump >= 0.25) {
+      flags.push({
+        label: 'скачки фазы',
+        severity: phaseJump >= 0.45 ? 'risk' : 'warn',
+        detail: `jump ${phaseJump.toFixed(3)}`
+      });
+    }
+    if (deadSc != null && deadSc >= 0.15) {
+      flags.push({
+        label: 'dead/null SC',
+        severity: deadSc >= 0.3 ? 'risk' : 'warn',
+        detail: `dead ${deadSc.toFixed(3)}`
+      });
+    }
+    if (coherence != null && coherence <= 0.55) {
+      flags.push({
+        label: 'низкая coherence',
+        severity: coherence <= 0.4 ? 'risk' : 'warn',
+        detail: `coh ${coherence.toFixed(3)}`
+      });
+    }
+    if ((degraded.length + offline.length) === 1 && (Number(dropout?.healthy_total_count || 0) >= 4)) {
+      flags.push({
+        label: 'single-node glitch',
+        severity: 'warn',
+        detail: [...degraded, ...offline][0] || 'одна нода выбивается'
+      });
+    }
+    const tone = flags.some(item => item.severity === 'risk')
+      ? 'risk'
+      : flags.some(item => item.severity === 'warn')
+        ? 'warn'
+        : 'ok';
+    return {
+      tone,
+      coreOnlineCount: Number(dropout?.core_online_count || 0),
+      healthyCoreCount: Number(dropout?.healthy_core_count || 0),
+      degraded,
+      offline,
+      ampDrift,
+      phaseJump,
+      deadSc,
+      coherence,
+      flags
+    };
+  }
+
+  _sdBuildShadowPayload(statusData) {
+    const candidate = statusData?.door_center_candidate_shadow || {};
+    const prototypeShadow = statusData?.prototype_zone_shadow || {};
+    const prototype = prototypeShadow?.last_prediction || prototypeShadow || {};
+    const temporal = statusData?.temporal_zone_overlay_shadow || {};
+    const stableZone = candidate?.stable_zone || candidate?.stableZone || null;
+    const candidateZone = candidate?.candidate_zone || candidate?.zone || null;
+    const productionZone = statusData?.target_zone || 'unknown';
+    return {
+      binary: statusData?.binary_prediction || statusData?.binary || 'unknown',
+      primaryZone: stableZone || candidateZone || productionZone,
+      productionZone,
+      stableZone,
+      candidateZone,
+      agreement: candidate?.agreement || 'not_ready',
+      confidence: Number.isFinite(Number(candidate?.confidence)) ? Number(candidate.confidence) : null,
+      prototypeZone: prototype?.zone || prototypeShadow?.zone || null,
+      prototypeZoneRaw: prototype?.zone_raw || prototypeShadow?.zone_raw || null,
+      temporalZone: temporal?.zone || null,
+      thresholdZone: temporal?.threshold_zone || null,
+      directionalScore: Number.isFinite(Number(temporal?.directional_score)) ? Number(temporal.directional_score) : null,
+      status: candidate?.status || temporal?.status || prototype?.status || prototypeShadow?.status || 'not_ready'
+    };
+  }
+
+  // ── Signal Quality Summary Card ──
+  _sdRenderSignalQualitySummary() {
+    const csiRaw = this.snapshot?.csi || {};
+    const ttvar = csiRaw.truth_tvar || this._sdTruthTvar || {};
+    const t = {
+      ...(this._sdTruthOccupancy || {}),
+      verdict: ttvar.truth_verdict || this._sdTruthOccupancy?.verdict,
+      confidence: Number.isFinite(Number(ttvar.truth_conf)) ? Number(ttvar.truth_conf) : this._sdTruthOccupancy?.confidence,
+      tvarMedian: Number.isFinite(Number(ttvar.tvar_median)) ? Number(ttvar.tvar_median) : this._sdTruthOccupancy?.tvarMedian
+    };
+    const nodesActive = csiRaw.nodes_active != null ? csiRaw.nodes_active : this._sdNodesActive;
+    const totalNodes = this._SD_NODE_IDS.length;
+    const ppsTotal = csiRaw.pps != null ? parseFloat(csiRaw.pps) : this._sdPpsTotal;
+    const tvarMed = t?.tvarMedian;
+
+    // Determine how many nodes have recent data
+    const lastEntry = this._sdHistory.length > 0 ? this._sdHistory[this._sdHistory.length - 1] : null;
+    let activeCount = nodesActive != null ? nodesActive : 0;
+    if (activeCount === 0 && lastEntry) {
+      activeCount = this._SD_NODE_IDS.filter(nid => lastEntry.node_tvar?.[nid] != null).length;
+    }
+
+    // Color coding: green=all good, yellow=degraded, red=critical
+    let qualityTone = 'ok';
+    let qualityLabel = 'Healthy';
+    if (activeCount < totalNodes * 0.5 || (ppsTotal != null && ppsTotal < 10)) {
+      qualityTone = 'risk';
+      qualityLabel = 'Critical';
+    } else if (activeCount < totalNodes || (ppsTotal != null && ppsTotal < 50)) {
+      qualityTone = 'warn';
+      qualityLabel = 'Degraded';
+    }
+
+    // Determine verdict source
+    const backend = csiRaw.decision_model_backend || this._sdDecisionBackend || 'unknown';
+    let sourceLabel = 'production';
+    if (backend === 'truth_tvar_override') sourceLabel = 'truth_tvar_override';
+    else if (backend.includes('diagnostic') || backend.includes('shadow')) sourceLabel = 'diagnostic';
+
+    return `
+      <div class="sd-status-card sd-status-card--${qualityTone}" style="border-left:4px solid ${qualityTone === 'ok' ? '#4caf50' : qualityTone === 'warn' ? '#ff9800' : '#ff5252'}">
+        <div class="sd-status-card__eyebrow">Signal Quality Summary</div>
+        <div class="sd-status-card__headline">${qualityLabel} <span style="font-size:13px;opacity:0.7">${activeCount}/${totalNodes} nodes</span></div>
+        <div class="sd-status-card__meta">
+          <span>tvar_med=${tvarMed != null ? tvarMed.toFixed(2) : '--'}</span>
+          <span>pps=${ppsTotal != null ? ppsTotal.toFixed(0) : '--'}</span>
+          <span>source: <b style="color:${sourceLabel === 'truth_tvar_override' ? '#4caf50' : sourceLabel === 'diagnostic' ? '#ab47bc' : 'inherit'}">${escapeHtml(sourceLabel)}</b></span>
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Decision Backend Label Card ──
+  _sdRenderDecisionBackendCard() {
+    const csiRaw = this.snapshot?.csi || {};
+    const backend = csiRaw.decision_model_backend || this._sdDecisionBackend;
+    const version = csiRaw.decision_model_version || this._sdDecisionModelVersion;
+    if (!backend) return '';
+
+    let backendColor = 'inherit';
+    let backendTone = 'neutral';
+    if (backend === 'truth_tvar_override') {
+      backendColor = '#4caf50';
+      backendTone = 'ok';
+    } else if (backend.includes('v8_empty') || backend.includes('empty_priority')) {
+      backendColor = '#ff5252';
+      backendTone = 'risk';
+    } else if (backend.includes('v48') || backend.includes('random_forest')) {
+      backendColor = '#90a4ae';
+      backendTone = 'neutral';
+    } else if (backend.includes('mesh') || backend.includes('v60')) {
+      backendColor = '#4fc3f7';
+      backendTone = 'neutral';
+    }
+
+    return `
+      <div class="sd-status-card sd-status-card--${backendTone}" style="border-left:4px solid ${backendColor}">
+        <div class="sd-status-card__eyebrow">Decision Backend</div>
+        <div class="sd-status-card__headline" style="font-size:14px;color:${backendColor}">${escapeHtml(backend)}</div>
+        <div class="sd-status-card__meta">
+          <span>model: ${escapeHtml(version || 'unknown')}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  _sdRenderOccupancyPolicyCard() {
+    const snapshot = this.snapshot || {};
+    const csiRaw = snapshot.csi || {};
+    const primaryRuntime = snapshot?.live?.primaryRuntime || {};
+    const truthTvar = csiRaw.truth_tvar || this._sdTruthTvar || {};
+    const emptySubregime = snapshot?.live?.emptySubregimeShadow
+      || snapshot?.live?.empty_subregime_shadow
+      || csiRaw.empty_subregime_shadow
+      || csiRaw.emptySubregimeShadow
+      || {};
+    const v8Shadow = snapshot?.live?.v8Shadow || snapshot?.live?.v7Shadow || snapshot?.live?.v15Shadow || {};
+    const backend = String(csiRaw.decision_model_backend || this._sdDecisionBackend || 'unknown');
+    const primaryBinary = primaryRuntime.binary || csiRaw.binary || 'unknown';
+    const primaryZone = primaryRuntime.targetZone || primaryRuntime.zone || csiRaw.target_zone || csiRaw.zone || 'unknown';
+    const primaryMotion = primaryRuntime.motionState || csiRaw.motion_state || 'unknown';
+
+    const policyMode = backend.includes('truth_tvar')
+      ? (truthTvar.override_fired ? 'truth_tvar_override' : 'truth_tvar_review')
+      : backend.includes('v8_empty') || backend.includes('empty_priority')
+        ? 'v8_empty_guard'
+        : backend.includes('track_b')
+          ? 'track_b_shadow'
+          : backend.includes('hysteresis')
+            ? 'hysteresis'
+            : 'production';
+    const tone = policyMode === 'truth_tvar_override' ? 'ok' : policyMode === 'v8_empty_guard' ? 'warn' : 'neutral';
+
+    const primaryChips = [
+      `binary=${primaryBinary}`,
+      `zone=${primaryZone}`,
+      `motion=${primaryMotion}`
+    ];
+    return `
+      <div class="sd-status-card sd-status-card--${tone}">
+        <div class="sd-status-card__eyebrow">Runtime policy / occupancy</div>
+        <div class="sd-status-card__headline">${escapeHtml(policyMode)}</div>
+        <div class="sd-status-card__detail">
+          backend=${escapeHtml(backend)} · показан только активный production/latest-model verdict без shadow и fallback слоёв.
+        </div>
+        <div class="sd-status-card__chips" style="margin-top:10px">
+          ${primaryChips.map((chip) => `<span class="sd-flag-chip sd-flag-chip--ok">${escapeHtml(chip)}</span>`).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  _sdRenderShadowZonePathsCard() {
+    const snapshot = this.snapshot || {};
+    const csiRaw = snapshot.csi || {};
+    const paths = [
+      {
+        id: 'prototype_zone_shadow',
+        label: 'prototype',
+        value: snapshot?.live?.prototypeZoneShadow || snapshot?.live?.prototype_zone_shadow || csiRaw.prototype_zone_shadow || csiRaw.prototypeZoneShadow || {}
+      },
+      {
+        id: 'temporal_zone_overlay_shadow',
+        label: 'temporal',
+        value: snapshot?.live?.temporalZoneOverlayShadow || snapshot?.live?.temporal_zone_overlay_shadow || csiRaw.temporal_zone_overlay_shadow || csiRaw.temporalZoneOverlayShadow || {}
+      },
+      {
+        id: 'garage_ratio_v3_shadow',
+        label: 'garage_ratio_v3',
+        value: snapshot?.live?.garageRatioV3Shadow || snapshot?.live?.garage_ratio_v3_shadow || csiRaw.garage_ratio_v3_shadow || csiRaw.garageRatioV3Shadow || {}
+      },
+      {
+        id: 'garage_ratio_v2_shadow',
+        label: 'garage_ratio_v2',
+        value: snapshot?.live?.garageRatioV2Shadow || snapshot?.live?.garage_ratio_v2_shadow || csiRaw.garage_ratio_v2_shadow || csiRaw.garageRatioV2Shadow || {}
+      },
+      {
+        id: 'door_center_candidate_shadow',
+        label: 'door_center_candidate',
+        value: snapshot?.live?.doorCenterCandidateShadow || snapshot?.live?.door_center_candidate_shadow || csiRaw.door_center_candidate_shadow || csiRaw.doorCenterCandidateShadow || {}
+      }
+    ];
+
+    const readZone = (value) => {
+      const zone = value?.zone
+        || value?.targetZone
+        || value?.predictedZone
+        || value?.candidate_zone
+        || value?.stable_zone
+        || value?.candidateZone
+        || value?.stableZone
+        || value?.rawPredictedZone
+        || value?.raw_predicted_zone
+        || value?.zone_raw
+        || value?.predicted_zone
+        || value?.last_prediction?.zone
+        || value?.lastPrediction?.zone
+        || 'n/a';
+      const detail = [
+        value?.status || null,
+        value?.agreement ? `agr=${value.agreement}` : null,
+        value?.directionalScore != null ? `dir=${Number(value.directionalScore).toFixed(3)}` : null,
+        value?.candidate_name || value?.candidateName || null
+      ].filter(Boolean).join(' · ');
+      return { zone: String(zone || 'n/a'), detail: String(detail || '').trim() };
+    };
+
+    return `
+      <div class="sd-status-card sd-status-card--warn">
+        <div class="sd-status-card__eyebrow">Shadow-only zone paths</div>
+        <div class="sd-status-card__headline">prototype · temporal · garage ratio · door-center</div>
+        <div class="sd-status-card__detail">
+          Показаны только shadow-пути зоны. Production target_zone здесь не меняется и остаётся боевым.
+        </div>
+        <div class="sd-status-card__chips" style="margin-top:10px">
+          ${paths.map((path) => {
+            const { zone, detail } = readZone(path.value);
+            const hasZone = zone && zone !== 'n/a' && zone !== 'unknown';
+            const chipTone = hasZone ? 'ok' : 'risk';
+            const chipTitle = detail ? `${path.id} · ${detail}` : path.id;
+            return `<span class="sd-flag-chip sd-flag-chip--${chipTone}" title="${escapeHtml(chipTitle)}">${escapeHtml(`${path.label}=${zone}`)}</span>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Multi-Person Count Indicator ──
+  _sdRenderMultiPersonCard() {
+    const mp = this._sdMultiPerson;
+    if (!mp || mp.person_count == null) return '';
+
+    const count = mp.person_count;
+    const conf = mp.confidence != null ? (mp.confidence * 100).toFixed(0) : '--';
+    const source = mp.source || 'unknown';
+    const tone = count > 1 ? 'warn' : 'neutral';
+
+    return `
+      <div class="sd-status-card sd-status-card--${tone}">
+        <div class="sd-status-card__eyebrow">Multi-Person Count <span style="font-size:10px;opacity:0.6">(diagnostic estimate)</span></div>
+        <div class="sd-status-card__headline">${count} ${count === 1 ? 'person' : 'persons'} <span style="font-size:13px;opacity:0.7">${conf}%</span></div>
+        <div class="sd-status-card__meta">
+          <span>source: ${escapeHtml(source)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Raw Feature Gauges ──
+  _sdRenderRawFeatureGauges() {
+    const t = this._sdTruthOccupancy;
+    if (!t) return '';
+
+    const tvarMed = t.tvarMedian;
+    const ampStdMed = t.ampStdMedian;
+    const rssiStdMed = t.rssiStdMedian;
+    const ppsTotal = this._sdPpsTotal;
+
+    const makeGauge = (label, value, max, threshold, unit) => {
+      const pct = value != null ? Math.min(100, Math.max(0, (value / max) * 100)) : 0;
+      const threshPct = threshold != null ? Math.min(100, (threshold / max) * 100) : null;
+      const valStr = value != null ? value.toFixed(2) : '--';
+      const overThresh = threshold != null && value != null && value > threshold;
+      const barColor = overThresh ? '#ff9800' : '#4caf50';
+      return `
+        <div style="flex:1;min-width:110px;max-width:180px">
+          <div style="font-size:10px;opacity:0.6;margin-bottom:2px">${escapeHtml(label)}</div>
+          <div style="font-size:14px;font-weight:600;margin-bottom:3px">${valStr}<span style="font-size:10px;opacity:0.5"> ${escapeHtml(unit)}</span></div>
+          <div style="background:rgba(255,255,255,0.08);border-radius:3px;height:8px;position:relative;overflow:hidden">
+            ${threshPct != null ? `<div style="position:absolute;left:${threshPct}%;top:0;bottom:0;width:1px;background:#ff5252;z-index:2" title="threshold ${threshold}"></div>` : ''}
+            <div style="width:${pct}%;height:100%;background:${barColor};border-radius:3px;transition:width 0.3s"></div>
+          </div>
+        </div>
+      `;
+    };
+
+    return `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px">
+        ${makeGauge('TVAR median', tvarMed, 15, TRUTH_TVAR_UI_THRESHOLD, '')}
+        ${makeGauge('AMP_STD median', ampStdMed, 10, null, '')}
+        ${makeGauge('RSSI_STD median', rssiStdMed, 10, null, '')}
+        ${makeGauge('PPS total', ppsTotal, 200, null, 'p/s')}
+      </div>
+    `;
+  }
+
+  _sdRenderTruthOccupancyCard() {
+    const csiRaw = this.snapshot?.csi || {};
+    const ttvar = csiRaw.truth_tvar || this._sdTruthTvar || {};
+    const v8guard = csiRaw.v8_empty_priority_guard || this._sdV8Guard || {};
+    const t = {
+      ...(this._sdTruthOccupancy || {}),
+      verdict: ttvar.truth_verdict || this._sdTruthOccupancy?.verdict,
+      confidence: Number.isFinite(Number(ttvar.truth_conf)) ? Number(ttvar.truth_conf) : this._sdTruthOccupancy?.confidence,
+      tvarMedian: Number.isFinite(Number(ttvar.tvar_median)) ? Number(ttvar.tvar_median) : this._sdTruthOccupancy?.tvarMedian
+    };
+    if (!t || t.verdict === 'unknown') {
+      return `
+        <div class="sd-status-card sd-status-card--neutral">
+          <div class="sd-status-card__eyebrow">Truth-backed Occupancy (TVAR)</div>
+          <div class="sd-status-card__headline">Ожидание данных...</div>
+          <div class="sd-status-card__detail">Нужно минимум 3 ноды с tvar > 0</div>
+        </div>
+      `;
+    }
+
+    const tone = t.verdict === 'occupied' ? 'warn' : 'ok';
+    const verdictLabel = t.verdict === 'occupied' ? 'OCCUPIED' : 'EMPTY';
+    const confPct = Math.round(t.confidence * 100);
+    const tvarStr = t.tvarMedian != null ? t.tvarMedian.toFixed(2) : '--';
+    const ampStdStr = t.ampStdMedian != null ? t.ampStdMedian.toFixed(2) : '--';
+    const rssiStdStr = t.rssiStdMedian != null ? t.rssiStdMedian.toFixed(2) : '--';
+
+    // Visual bar for tvar relative to thresholds
+    const barPct = Math.min(100, Math.max(0, (t.tvarMedian / 10) * 100));
+    const threshPct = (TRUTH_TVAR_UI_THRESHOLD / 10) * 100;
+    const overrideFired = ttvar.override_fired === true;
+    const v8Vetoed = v8guard.truth_tvar_veto === true;
+
+    // Node-by-node tvar sparkline bars
+    const nodeTvars = ttvar.node_tvars || {};
+    const nodeTvarBars = Object.entries(nodeTvars).map(([nid, val]) => {
+      const pct = Math.min(100, Math.max(0, (val / 15) * 100));
+      const color = val > TRUTH_TVAR_UI_THRESHOLD ? '#ff9800' : '#4caf50';
+      const label = nid.replace('node', 'n');
+      return `<span style="display:inline-flex;align-items:center;gap:2px;font-size:10px;margin-right:4px" title="${nid}: ${val}">
+        <span style="opacity:0.6">${label}</span>
+        <span style="display:inline-block;width:30px;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;position:relative;overflow:hidden">
+          <span style="position:absolute;left:0;top:0;bottom:0;width:${pct}%;background:${color};border-radius:3px"></span>
+        </span>
+      </span>`;
+    }).join('');
+
+    return `
+      <div class="sd-status-card sd-status-card--${tone}" style="border-left:4px solid ${t.verdict === 'occupied' ? '#ff9800' : '#4caf50'}">
+        <div class="sd-status-card__eyebrow">Truth-backed Occupancy (TVAR threshold)</div>
+        <div class="sd-status-card__headline" style="font-size:18px">${verdictLabel} <span style="font-size:13px;opacity:0.7">${confPct}%</span></div>
+        ${overrideFired ? `<div style="margin:4px 0;padding:3px 8px;border-radius:4px;background:rgba(76,175,80,0.2);border:1px solid rgba(76,175,80,0.4);font-size:11px;font-weight:600;color:#4caf50">TVAR OVERRIDE ACTIVE <span style="font-weight:400;opacity:0.8">truth_verdict=${escapeHtml(ttvar.truth_verdict || '--')}, conf=${(ttvar.truth_conf || 0).toFixed(2)}</span></div>` : ''}
+        ${v8Vetoed ? `<div style="margin:4px 0;padding:3px 8px;border-radius:4px;background:rgba(255,82,82,0.15);border:1px solid rgba(255,82,82,0.3);font-size:11px;color:#ff5252">V8 empty guard VETOED by TVAR <span style="opacity:0.7">(tvar_med=${v8guard.truth_tvar_median || '--'})</span></div>` : ''}
+        <div style="margin:6px 0;background:rgba(255,255,255,0.08);border-radius:4px;height:12px;position:relative;overflow:hidden">
+          <div style="position:absolute;left:${threshPct}%;top:0;bottom:0;width:2px;background:#ff5252;z-index:2" title="threshold ${TRUTH_TVAR_UI_THRESHOLD.toFixed(1)}"></div>
+          <div style="width:${barPct}%;height:100%;background:${t.verdict === 'occupied' ? '#ff9800' : '#4caf50'};border-radius:4px;transition:width 0.3s"></div>
+        </div>
+        <div class="sd-status-card__meta">
+          <span>tvar_med=${tvarStr}</span>
+          <span>amp_std=${ampStdStr}</span>
+          <span>rssi_std=${rssiStdStr}</span>
+        </div>
+        ${nodeTvarBars ? `<div style="margin:4px 0;line-height:1.6">${nodeTvarBars}</div>` : ''}
+        <div class="sd-status-card__detail">
+          Порог: tvar_median ≥ ${TRUTH_TVAR_UI_THRESHOLD.toFixed(1)} = occupied. Основано на truth-backed анализе текущего runtime.
+        </div>
+      </div>
+    `;
+  }
+
+  _sdRenderStatusStrip() {
+    const container = this.root.querySelector('#sd-status-strip');
+    if (!container) return;
+    const health = this._sdHealth;
+    const shadow = this._sdShadow;
+    if (!health && !shadow) {
+      container.innerHTML = `
+        <div class="sd-status-card sd-status-card--neutral">
+          <div class="sd-status-card__eyebrow">Runtime</div>
+          <div class="sd-status-card__headline">Ожидание данных...</div>
+          <div class="sd-status-card__detail">Поднимаю live-статус и активную production-модель.</div>
+        </div>
+      `;
       return;
     }
-    const recent = this._sdEvents.slice(-50).reverse();
-    el.innerHTML = recent.map(ev => {
-      const d = new Date(ev.ts);
-      const timeStr = d.toLocaleTimeString('ru-RU');
-      const isOccupied = ev.to === 'occupied';
-      return `<div class="sd-event-log__row">
-        <span class="sd-event-log__time">${timeStr}</span>
-        <span class="sd-event-log__arrow ${isOccupied ? 'to-occupied' : 'to-empty'}">${escapeHtml(ev.from)} → ${escapeHtml(ev.to)}</span>
-        <span class="sd-event-log__conf">уверенность: ${(ev.confidence * 100).toFixed(1)}%</span>
-      </div>`;
-    }).join('');
+    const healthTone = health?.tone || 'neutral';
+    const flags = Array.isArray(health?.flags) ? health.flags : [];
+    const sigQualHtml = this._sdRenderSignalQualitySummary();
+    const occupancyPolicyHtml = this._sdRenderOccupancyPolicyCard();
+    const backendHtml = this._sdRenderDecisionBackendCard();
+
+    container.innerHTML = `
+      ${sigQualHtml}
+      ${occupancyPolicyHtml}
+      <div class="sd-status-card sd-status-card--${healthTone}">
+        <div class="sd-status-card__eyebrow">Здоровье узлов</div>
+        <div class="sd-status-card__headline">${escapeHtml(`${health?.healthyCoreCount ?? 0}/${health?.coreOnlineCount ?? 0} core online`)}</div>
+        <div class="sd-status-card__detail">
+          degraded: ${escapeHtml((health?.degraded || []).join(', ') || '\u043D\u0435\u0442')} \u00B7 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u044B: ${escapeHtml((health?.offline || []).join(', ') || '\u043D\u0435\u0442')}
+        </div>
+        <div class="sd-status-card__meta">
+          <span>amp drift=${escapeHtml(health?.ampDrift != null ? health.ampDrift.toFixed(3) : '--')}</span>
+          <span>phase jump=${escapeHtml(health?.phaseJump != null ? health.phaseJump.toFixed(3) : '--')}</span>
+          <span>coh=${escapeHtml(health?.coherence != null ? health.coherence.toFixed(3) : '--')}</span>
+        </div>
+      </div>
+      <div class="sd-status-card sd-status-card--${flags.length ? healthTone : 'ok'}">
+        <div class="sd-status-card__eyebrow">Anomaly flags</div>
+        <div class="sd-status-card__headline">${flags.length ? `${flags.length} flags` : 'stable'}</div>
+        <div class="sd-status-card__chips">
+          ${flags.length
+            ? flags.map((flag) => `<span class="sd-flag-chip sd-flag-chip--${escapeHtml(flag.severity)}" title="${escapeHtml(flag.detail || '')}">${escapeHtml(flag.label)}</span>`).join('')
+            : '<span class="sd-flag-chip sd-flag-chip--ok">без аномалий</span>'}
+        </div>
+        <div class="sd-status-card__detail">
+          ${flags.length ? escapeHtml(flags.map((flag) => `${flag.label}: ${flag.detail}`).join(' · ')) : 'Общий сдвиг и packet-glitch сейчас не детектируются.'}
+        </div>
+      </div>
+      ${backendHtml}
+    `;
   }
 
   async _sdPollData() {
-    const fetchJSON = async (url) => {
-      try {
-        const resp = await fetch(url, { signal: AbortSignal.timeout(4000) });
-        if (!resp.ok) return null;
-        return await resp.json();
-      } catch(_) { return null; }
-    };
-    const [statusData, nodesData, featData] = await Promise.all([
-      fetchJSON('/api/v1/csi/status'),
-      fetchJSON('/api/v1/csi/nodes/live'),
-      fetchJSON('/api/v1/csi/features')
+    const [statusData, nodesData] = await Promise.all([
+      this._fetchRuntimeUiJson('/api/v1/csi/status'),
+      this._fetchRuntimeUiJson('/api/v1/csi/nodes/live')
     ]);
+    const hasLiveWindow = Boolean(
+      (safeNumber(statusData?.pps, 0) || 0) > 0
+      || (safeNumber(statusData?.packets_in_window, 0) || 0) > 0
+      || (safeNumber(statusData?.nodes_active, 0) || 0) > 0
+    );
+    const featData = this._runtimeUiOptionalSurface.csiFeaturesEnabled && hasLiveWindow
+      ? await this._fetchRuntimeUiJson('/api/v1/csi/features')
+      : null;
     const now = Date.now();
     const entry = {
       timestamp: now,
@@ -3905,6 +4937,8 @@ export class CsiOperatorApp {
     if (statusData) {
       binary = statusData.binary || 'unknown';
       binaryConf = parseFloat(statusData.binary_confidence || 0);
+      this._sdHealth = this._sdBuildHealthPayload(statusData);
+      this._sdShadow = this._sdBuildShadowPayload(statusData);
       if (binary === 'occupied') entry.binary_prob = binaryConf;
       else if (binary === 'empty') entry.binary_prob = 1.0 - binaryConf;
       else entry.binary_prob = 0.5;
@@ -3912,6 +4946,14 @@ export class CsiOperatorApp {
         this._sdAddEvent(this._sdLastBinary, binary, binaryConf);
       }
       if (binary !== 'unknown') this._sdLastBinary = binary;
+      // Extract telemetry fields for enhanced panels
+      this._sdTruthTvar = statusData.truth_tvar || null;
+      this._sdMultiPerson = statusData.multi_person || null;
+      this._sdDecisionBackend = statusData.decision_model_backend || null;
+      this._sdDecisionModelVersion = statusData.decision_model_version || null;
+      this._sdV8Guard = statusData.v8_empty_priority_guard || null;
+      this._sdPpsTotal = statusData.pps != null ? parseFloat(statusData.pps) : null;
+      this._sdNodesActive = statusData.nodes_active != null ? statusData.nodes_active : null;
     }
     if (nodesData && nodesData.nodes) {
       nodesData.nodes.forEach(n => {
@@ -3962,9 +5004,90 @@ export class CsiOperatorApp {
         if (val != null) entry.correlations[key] = parseFloat(val);
       });
     }
+    this._sdTruthOccupancy = null;
+    this._sdRenderStatusStrip();
+
     this._sdHistory.push(entry);
     if (this._sdHistory.length % 10 === 0) this._sdSaveHistory();
     this._sdUpdateCharts();
+  }
+
+  // ============================================================
+  //  Truth-backed occupancy detector (client-side fallback only)
+  //  Uses TVAR median as primary discriminator and mirrors runtime
+  //  thresholds as closely as possible.
+  // ============================================================
+
+  _sdComputeTruthOccupancy(entry) {
+    const tvars = [];
+    const ampStds = [];
+    const rssiStds = [];
+    this._SD_NODE_IDS.forEach(nid => {
+      const tvar = entry.node_tvar?.[nid];
+      if (tvar != null && tvar > 0) tvars.push(tvar);
+    });
+
+    // Also compute amp_std and rssi_std from recent history (last 5 entries)
+    const recentLen = Math.min(5, this._sdHistory.length);
+    if (recentLen >= 2) {
+      this._SD_NODE_IDS.forEach(nid => {
+        const vals = [];
+        const rssiVals = [];
+        for (let i = this._sdHistory.length - recentLen; i < this._sdHistory.length; i++) {
+          const h = this._sdHistory[i];
+          if (h.node_amp?.[nid] != null) vals.push(h.node_amp[nid]);
+          if (h.node_rssi?.[nid] != null) rssiVals.push(h.node_rssi[nid]);
+        }
+        if (vals.length >= 2) {
+          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const std = Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length);
+          ampStds.push(std);
+        }
+        if (rssiVals.length >= 2) {
+          const mean = rssiVals.reduce((a, b) => a + b, 0) / rssiVals.length;
+          const std = Math.sqrt(rssiVals.reduce((a, v) => a + (v - mean) ** 2, 0) / rssiVals.length);
+          rssiStds.push(std);
+        }
+      });
+    }
+
+    if (tvars.length < 3) {
+      return { verdict: 'unknown', tvarMedian: null, ampStdMedian: null, rssiStdMedian: null, confidence: 0, reason: 'insufficient_nodes' };
+    }
+
+    tvars.sort((a, b) => a - b);
+    const tvarMedian = tvars[Math.floor(tvars.length / 2)];
+
+    ampStds.sort((a, b) => a - b);
+    const ampStdMedian = ampStds.length > 0 ? ampStds[Math.floor(ampStds.length / 2)] : null;
+
+    rssiStds.sort((a, b) => a - b);
+    const rssiStdMedian = rssiStds.length > 0 ? rssiStds[Math.floor(rssiStds.length / 2)] : null;
+
+    // Decision: tvar_median is the primary feature (zero overlap in truth data)
+    // Runtime uses a stricter occupied threshold of 4.0.
+    const TVAR_THRESHOLD = TRUTH_TVAR_UI_THRESHOLD;
+    const TVAR_CONFIDENT_OCCUPIED = TRUTH_TVAR_UI_CONFIDENT_OCCUPIED;
+    const TVAR_CONFIDENT_EMPTY = TRUTH_TVAR_UI_CONFIDENT_EMPTY;
+
+    let verdict;
+    let confidence;
+    if (tvarMedian >= TVAR_CONFIDENT_OCCUPIED) {
+      verdict = 'occupied';
+      confidence = Math.min(1.0, 0.8 + (tvarMedian - TVAR_CONFIDENT_OCCUPIED) * 0.04);
+    } else if (tvarMedian >= TVAR_THRESHOLD) {
+      verdict = 'occupied';
+      confidence = 0.6 + (tvarMedian - TVAR_THRESHOLD) / (TVAR_CONFIDENT_OCCUPIED - TVAR_THRESHOLD) * 0.2;
+    } else if (tvarMedian <= TVAR_CONFIDENT_EMPTY) {
+      verdict = 'empty';
+      confidence = Math.min(1.0, 0.8 + (TVAR_CONFIDENT_EMPTY - tvarMedian) * 0.2);
+    } else {
+      // Gray zone between empty and occupied thresholds
+      verdict = 'empty';
+      confidence = 0.5 + (TVAR_THRESHOLD - tvarMedian) / (TVAR_THRESHOLD - TVAR_CONFIDENT_EMPTY) * 0.3;
+    }
+
+    return { verdict, tvarMedian, ampStdMedian, rssiStdMedian, confidence, reason: 'tvar_threshold' };
   }
 
   renderModel() {
@@ -3979,6 +5102,8 @@ export class CsiOperatorApp {
     const fewshotCalibration = this.snapshot?.recording?.fewshotCalibration || {};
     const runtimeModels = this.snapshot?.runtimeModels || {};
     const models = Array.isArray(runtimeModels.items) ? runtimeModels.items : [];
+    const sortedModels = sortRuntimeModelsByFreshness(models);
+    const latestRuntimeModel = sortedModels[0] || null;
     const zoneGate = buildDoorCenterCalibrationGate(zoneCalibrationShadow, fewshotCalibration);
     const trackAConnected = Boolean(primaryRuntime.running && primaryRuntime.modelLoaded);
     const selectedRuntimeView = this.runtimeViewSelection === UI_RUNTIME_VIEW_OPTIONS.TRACK_B
@@ -4008,6 +5133,19 @@ export class CsiOperatorApp {
       : (runtimeModels.actionError || runtimeModels.error)
         ? `${UI_LOCALE.models.actionErrorPrefix} ${runtimeModels.actionError || runtimeModels.error}`
         : UI_LOCALE.models.catalogSummary;
+    const latestModelHeadline = latestRuntimeModel?.displayName || latestRuntimeModel?.fileName || 'последняя модель не найдена';
+    const latestModelButtonLabel = latestRuntimeModel?.isActive
+      ? 'Последняя уже активна'
+      : runtimeModels.switching
+        ? UI_LOCALE.models.switching
+        : 'Сделать последнюю активной';
+    const latestModelBadges = latestRuntimeModel ? [
+      'последняя',
+      latestRuntimeModel.isActive ? UI_LOCALE.models.currentBadge : null,
+      latestRuntimeModel.isDefault ? UI_LOCALE.models.defaultBadge : null,
+      latestRuntimeModel.loaded ? UI_LOCALE.models.loadedBadge : UI_LOCALE.models.notLoadedBadge,
+      latestRuntimeModel.kind || null
+    ].filter(Boolean) : [];
 
     const fewshotZone = this.snapshot?.live?.primaryRuntime || {};
     const fewshotZoneModel = fewshotZone.zoneModel || null;
@@ -4281,11 +5419,45 @@ export class CsiOperatorApp {
             ${escapeHtml(UI_LOCALE.models.refresh)}
           </button>
         </div>
-          <div class="panel__footer">${escapeHtml(catalogSummary)} Track B и V8 сюда не входят: этот селектор управляет только совместимыми с Track A runtime bundles и не должен подменять shadow/test candidates.</div>
-        ${models.length ? `
+        <div class="panel__footer">${escapeHtml(catalogSummary)} Track B и V8 сюда не входят: этот селектор управляет только совместимыми с Track A runtime bundles и не должен подменять shadow/test candidates.</div>
+        ${latestRuntimeModel ? `
+          <div class="runtime-model-callout ${latestRuntimeModel.isActive ? 'is-active' : ''}">
+            <div class="runtime-model-callout__main">
+              <div class="runtime-model-callout__eyebrow">Последняя runtime-ready модель</div>
+              <div class="runtime-model-callout__headline">${escapeHtml(latestModelHeadline)}</div>
+              <div class="capture-pack__meta">
+                ${latestModelBadges.map((badge) => `<span class="token">${escapeHtml(badge)}</span>`).join('')}
+                <span class="token">${escapeHtml(UI_LOCALE.models.thresholdLabel)} ${escapeHtml(formatNumber(latestRuntimeModel.threshold, 3))}</span>
+              </div>
+              <div class="kv-list runtime-model-callout__details">
+                <div class="kv"><span>${escapeHtml(UI_LOCALE.models.fileLabel)}</span><strong>${escapeHtml(latestRuntimeModel.fileName || UI_LOCALE.common.noData)}</strong></div>
+                <div class="kv"><span>${escapeHtml(UI_LOCALE.models.kindLabel)}</span><strong>${escapeHtml(latestRuntimeModel.kind || UI_LOCALE.common.unknown)}</strong></div>
+                <div class="kv"><span>Обновлено</span><strong>${escapeHtml(formatTimestamp(latestRuntimeModel.updatedAt))}</strong></div>
+                <div class="kv"><span>${escapeHtml(UI_LOCALE.models.runtimeScopeLabel)}</span><strong>motion-only runtime</strong></div>
+                ${latestRuntimeModel.metrics?.f1_macro != null ? `<div class="kv"><span>F1 (CV)</span><strong>${(latestRuntimeModel.metrics.f1_macro * 100).toFixed(2)}%</strong></div>` : ''}
+                ${latestRuntimeModel.metrics?.mae_combined != null ? `<div class="kv"><span>MAE</span><strong>${latestRuntimeModel.metrics.mae_combined.toFixed(3)} м</strong></div>` : ''}
+                ${latestRuntimeModel.metrics?.n_windows != null ? `<div class="kv"><span>Окон</span><strong>${latestRuntimeModel.metrics.n_windows}</strong></div>` : ''}
+              </div>
+            </div>
+            <div class="capture-pack__actions runtime-model-callout__actions">
+              <button
+                type="button"
+                class="capture-pack__button ${latestRuntimeModel.isActive ? 'capture-pack__button--ghost' : 'capture-pack__button--primary'}"
+                data-action="select-runtime-model"
+                data-model-id="${escapeHtml(latestRuntimeModel.modelId)}"
+                ${latestRuntimeModel.isActive || runtimeModels.switching ? 'disabled' : ''}
+              >
+                ${escapeHtml(latestModelButtonLabel)}
+              </button>
+            </div>
+          </div>
+        ` : ''}
+        ${sortedModels.length ? `
           <div class="runtime-model-grid">
-            ${models.map((item) => {
+            ${sortedModels.map((item) => {
+              const isLatest = Boolean(latestRuntimeModel && item.modelId === latestRuntimeModel.modelId);
               const badges = [
+                isLatest ? 'последняя' : null,
                 item.isActive ? UI_LOCALE.models.currentBadge : null,
                 item.isDefault ? UI_LOCALE.models.defaultBadge : null,
                 item.loaded ? UI_LOCALE.models.loadedBadge : UI_LOCALE.models.notLoadedBadge,
@@ -4299,7 +5471,7 @@ export class CsiOperatorApp {
                   : UI_LOCALE.models.select;
 
               return `
-                <div class="runtime-model-card ${item.isActive ? 'is-active' : ''}">
+                <div class="runtime-model-card ${item.isActive ? 'is-active' : ''} ${isLatest ? 'is-latest' : ''}">
                   <div class="runtime-model-card__eyebrow">${escapeHtml(item.version || UI_LOCALE.common.unknown)}</div>
                   <h3>${escapeHtml(item.displayName || item.fileName || UI_LOCALE.common.unknown)}</h3>
                   <p>${escapeHtml(item.fileName || UI_LOCALE.common.unknown)}</p>
@@ -5191,6 +6363,7 @@ export class CsiOperatorApp {
           <h3>${escapeHtml(pack.name)}</h3>
           <p>${escapeHtml(pack.description)}</p>
           <div class="capture-pack__meta">
+            ${isSelected ? renderStatusPill('выбран', 'ok') : ''}
             ${renderStatusPill('архив', 'warn')}
             ${renderStatusPill(`${summary.clipCount} ${UI_LOCALE.capture.clips}`, 'info')}
             ${renderStatusPill(`${UI_LOCALE.capture.activeTime} ${formatDurationCompact(summary.activeSeconds)}`, 'neutral')}
@@ -5203,6 +6376,14 @@ export class CsiOperatorApp {
           </div>
         </button>
         <div class="capture-pack__actions">
+          <button
+            type="button"
+            class="capture-pack__button ${isSelected ? 'capture-pack__button--ghost' : 'capture-pack__button--primary'}"
+            data-pack-select="${escapeHtml(pack.id)}"
+            ${isActivePack || isAnotherPackActive || foreignRecordingActive ? 'disabled' : ''}
+          >
+            ${escapeHtml(isSelected ? 'Пакет выбран' : 'Выбрать пакет')}
+          </button>
           <button type="button" class="capture-pack__button capture-pack__button--ghost" data-action="capture-preflight" data-pack-id="${escapeHtml(pack.id)}">
             ${escapeHtml(UI_LOCALE.capture.rerunPreflight)}
           </button>
@@ -5218,6 +6399,7 @@ export class CsiOperatorApp {
         </div>
         <div class="capture-pack__footer">
           ${renderStatusPill(preflightLabel, preflightTone)}
+          ${isSelected && !isActivePack ? renderStatusPill('готов к предпроверке и старту', 'ok') : ''}
           ${isActivePack ? renderStatusPill(guidedStatus === 'cueing' ? UI_LOCALE.capture.statusCueing : UI_LOCALE.capture.statusRunning, guidedStatus === 'cueing' ? 'info' : 'risk') : ''}
           ${recordingMode === 'manual' ? renderStatusPill('backend занят ручной записью', 'warn') : ''}
           ${recordingMode === 'freeform' ? renderStatusPill('backend занят freeform-записью', 'warn') : ''}
@@ -6359,7 +7541,7 @@ export class CsiOperatorApp {
         </article>
       </div>
 
-      <div class="surface-grid surface-grid--three">
+      <div class="surface-grid surface-grid--one">
         <article class="panel">
           <div class="panel__eyebrow">Здоровье сервисов</div>
           <div class="service-grid">
@@ -6371,30 +7553,6 @@ export class CsiOperatorApp {
               </div>
             `).join('')}
           </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel__eyebrow">Активные runtime-paths</div>
-          <div class="runtime-paths">
-            ${snapshot.live.runtimePaths.map((item) => `
-              <div class="runtime-path ${toneClass(statusTone(item.status))}">
-                <span>${escapeHtml(item.label)}</span>
-                <strong>${escapeHtml(displayToken(item.status))}</strong>
-                <small>${escapeHtml(displayToken(item.role))} / ${escapeHtml(displayToken(item.mode))}</small>
-              </div>
-            `).join('')}
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel__eyebrow">Экспериментальная диагностика</div>
-          <div class="kv-list">
-            <div class="kv"><span>Бинарный</span><strong>${escapeHtml(displayToken(secondaryRuntime.binary || 'unknown'))}</strong></div>
-            <div class="kv"><span>Уверенность binary</span><strong>${escapeHtml(formatPercent(secondaryRuntime.binaryConfidence, 0))}</strong></div>
-            <div class="kv"><span>Грубый</span><strong>${escapeHtml(displayToken(secondaryRuntime.coarse || 'unknown'))}</strong></div>
-            <div class="kv"><span>Уверенность coarse</span><strong>${escapeHtml(formatPercent(secondaryRuntime.coarseConfidence, 0))}</strong></div>
-          </div>
-          <div class="panel__footer">Эти поля остаются debug-only и не подменяют primary motion verdict.</div>
         </article>
       </div>
 

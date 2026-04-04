@@ -1,20 +1,60 @@
 # REST API Endpoints
 
+> Historical note (2026-03-29):
+> this document predates the current CSI/FP2 runtime semantics and still
+> contains stale routes such as `/api/v1/pose/latest`, `/api/v1/pose/history`,
+> `/api/v1/system/*`, and `/api/v1/health`.
+> For current operational truth use repo-root `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`,
+> `docs/CURRENT_PROJECT_STATE_20260329.md`, and `v1/docs/api_reference.md`.
+
+## Current Canonical Runtime Surface
+
+Use the following routes for current runtime/operator work instead of the
+historical catalog preserved below:
+
+- health:
+  - `GET /health/health`
+  - `GET /health/ready`
+  - `GET /health/live`
+  - `GET /health/metrics`
+- app-level info aliases:
+  - `GET /api/v1/info`
+  - `GET /api/v1/status`
+  - `GET /api/v1/metrics`
+- CSI runtime:
+  - `GET /api/v1/csi/status`
+  - `GET /api/v1/csi/models`
+  - `GET /api/v1/csi/nodes/health`
+  - `GET /api/v1/csi/record/status`
+  - `POST /api/v1/csi/record/start`
+  - `POST /api/v1/csi/record/stop`
+- FP2/runtime fallback:
+  - `GET /api/v1/fp2/status`
+  - `GET /api/v1/fp2/current`
+  - `WS /api/v1/fp2/ws`
+- streaming:
+  - `GET /api/v1/stream/status`
+- legacy compatibility:
+  - `GET /api/v1/pose/current` exists, but the current expected behavior is
+    `503 pose_api_mock_only`
+
 ## Overview
 
-The WiFi-DensePose REST API provides comprehensive access to pose estimation data, system configuration, and analytics. This document details all available endpoints, request/response formats, authentication requirements, and usage examples.
+The remainder of this file is preserved as a historical endpoint catalog from an
+older architecture phase. It is useful for archaeology, but it is not the
+authoritative source for the current live runtime.
 
-## Table of Contents
+## Archived Table of Contents
 
 1. [API Overview](#api-overview)
 2. [Authentication](#authentication)
 3. [Common Response Formats](#common-response-formats)
 4. [Error Handling](#error-handling)
-5. [Pose Estimation Endpoints](#pose-estimation-endpoints)
-6. [System Management Endpoints](#system-management-endpoints)
+5. [Archived Pose Estimation Endpoints](#archived-pose-estimation-endpoints-2025-snapshot)
+6. [Archived System Management Endpoints](#archived-system-management-endpoints-not-current-runtime)
 7. [Configuration Endpoints](#configuration-endpoints)
 8. [Analytics Endpoints](#analytics-endpoints)
-9. [Health and Status Endpoints](#health-and-status-endpoints)
+9. [Archived Health and Status Endpoints](#archived-health-and-status-endpoints)
 10. [Rate Limiting](#rate-limiting)
 
 ## API Overview
@@ -164,7 +204,7 @@ Content-Type: application/json
 | `HARDWARE_ERROR` | Hardware communication error |
 | `MODEL_ERROR` | Neural network model error |
 
-## Pose Estimation Endpoints
+## Archived Pose Estimation Endpoints (2025 Snapshot)
 
 ### Get Latest Pose Data
 
@@ -384,7 +424,7 @@ Content-Type: application/json
 }
 ```
 
-## System Management Endpoints
+## Archived System Management Endpoints (Not Current Runtime)
 
 ### Start System
 
@@ -810,7 +850,7 @@ Authorization: Bearer <token>
 }
 ```
 
-## Health and Status Endpoints
+## Archived Health and Status Endpoints
 
 ### Health Check
 

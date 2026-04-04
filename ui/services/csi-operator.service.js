@@ -1,9 +1,10 @@
 import { API_CONFIG } from '../config/api.config.js';
 import { NODES as CANONICAL_GARAGE_NODES } from '../config/garage-layout-v3.js';
-import { apiService } from './api.service.js';
-import { healthService } from './health.service.js';
-import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack } from '../data/guided-capture-packs.js';
-import { FEWSHOT_CALIBRATION_PROTOCOLS, getFewshotCalibrationProtocol } from '../data/fewshot-calibration-protocol.js';
+import { apiService } from './api.service.js?v=20260404-ui-runtime-20';
+import { healthService } from './health.service.js?v=20260404-ui-runtime-20';
+import { poseService } from './pose.service.js?v=20260404-ui-runtime-20';
+import { GUIDED_CAPTURE_PACKS, getGuidedCapturePack } from '../data/guided-capture-packs.js?v=20260403-truth-capture-01';
+import { FEWSHOT_CALIBRATION_PROTOCOLS, getFewshotCalibrationProtocol } from '../data/fewshot-calibration-protocol.js?v=20260326-fewshot-ui-01';
 import {
   buildManualCaptureLabel,
   buildManualCaptureNotes,
@@ -15,25 +16,27 @@ const KNOWN_RUNTIME_NODES = CANONICAL_GARAGE_NODES.map((node) => ({ id: node.id,
 const NODE_ORDER = KNOWN_RUNTIME_NODES.map((node) => node.id);
 const NODE_IP_TO_ID = Object.fromEntries(KNOWN_RUNTIME_NODES.map((node) => [node.ip, node.id]));
 const DEFAULT_VISIBLE_NODE_COUNT = Math.max(CANONICAL_GARAGE_NODES.length, 7);
+const CENTER_ZONE_DISPLAY_ANCHOR = { xMeters: 1.5, yMeters: 3.0 };
+const DOOR_ZONE_DISPLAY_ANCHOR = { xMeters: 1.0, yMeters: 1.0 };
 const DEFAULT_GARAGE_LAYOUT = {
-  // Garage Planner v3 (2026-03-26): 3×7m, single door 2.4m at bottom.
+  // Garage Planner v3 (2026-03-26): 3×7m, narrow 1m door inside right-side passage.
   // Backend uses center-based X: x ∈ [-1.5, +1.5]. Y: 0=door, 7=deep end.
   widthMeters: 3.0,
   heightMeters: 7.0,
-  door: { xMeters: 0.0, yMeters: 0.0 },
+  door: { xMeters: 1.0, yMeters: 0.0, widthMeters: 1.0, offsetMeters: 2.0 },
   zones: {
     doorMaxY: 3.5,
     deepMinY: 5.0
   },
   nodes: [
     // Center-based coords (matching backend): x = planner_x - 1.5
-    { nodeId: 'node01', ip: '192.168.1.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
-    { nodeId: 'node02', ip: '192.168.1.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
-    { nodeId: 'node03', ip: '192.168.1.101', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
-    { nodeId: 'node04', ip: '192.168.1.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
-    { nodeId: 'node05', ip: '192.168.1.33',  xMeters: 0.00, yMeters: 3.50, zone: 'center' },
-    { nodeId: 'node06', ip: '192.168.1.77',  xMeters: -1.50, yMeters: 4.35, zone: 'center' },
-    { nodeId: 'node07', ip: '192.168.1.41',  xMeters: 1.50, yMeters: 3.70, zone: 'center' }
+    { nodeId: 'node01', ip: '192.168.0.137', xMeters: -1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node02', ip: '192.168.0.117', xMeters: 1.50, yMeters: 0.55, zone: 'door' },
+    { nodeId: 'node03', ip: '192.168.0.144', xMeters: -1.50, yMeters: 3.15, zone: 'door' },
+    { nodeId: 'node04', ip: '192.168.0.125', xMeters: 1.50, yMeters: 2.50, zone: 'door' },
+    { nodeId: 'node05', ip: '192.168.0.110', xMeters: 0.00, yMeters: 3.50, zone: 'center' },
+    { nodeId: 'node06', ip: '192.168.0.132', xMeters: -1.50, yMeters: 4.35, zone: 'center' },
+    { nodeId: 'node07', ip: '192.168.0.153', xMeters: 1.50, yMeters: 3.70, zone: 'center' }
   ]
 };
 const CSI_ENDPOINTS = API_CONFIG?.ENDPOINTS?.CSI || {};
@@ -75,6 +78,7 @@ const CSI_RECORD_ENDPOINTS = CSI_ENDPOINTS.RECORD || {
 const DEFAULT_POLLING = {
   csi: 500,
   pose: 1000,
+  position: 1500,
   status: 15000,
   metrics: 10000,
   info: 60000,
@@ -83,6 +87,9 @@ const DEFAULT_POLLING = {
   recording: 2000,
   validation: 15000
 };
+const RUNTIME_NETWORK_BACKOFF_MS = 15000;
+const POSE_UNAVAILABLE_BACKOFF_MS = 15000;
+const CSI_POSITION_ENDPOINT = '/api/v1/csi/position';
 const STARTUP_SIGNAL_GUARD_DEFAULTS = {
   graceSec: 6,
   minActiveCoreNodes: 3,
@@ -117,6 +124,15 @@ function nodeOrderIndex(nodeId) {
 
 function isLocalHostname(hostname) {
   return ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
+}
+
+function isLocalRuntimeOrigin() {
+  const location = typeof window !== 'undefined' ? window.location : null;
+  return Boolean(
+    location
+    && isLocalHostname(location.hostname)
+    && String(location.port || '') === '8000'
+  );
 }
 
 function asArray(value) {
@@ -423,7 +439,7 @@ function buildTeacherSourceContract(
     contract.teacherDevice = String(teacherSource.macDevice || DEFAULT_MAC_CAMERA_DEVICE).trim() || DEFAULT_MAC_CAMERA_DEVICE;
     contract.teacherDeviceName = String(teacherSource.macDeviceName || DEFAULT_MAC_CAMERA_DEVICE_NAME).trim()
       || DEFAULT_MAC_CAMERA_DEVICE_NAME;
-    contract.teacherSourceName = 'Камера Mac';
+    contract.teacherSourceName = 'Mac Camera';
     return contract;
   }
 
@@ -631,7 +647,17 @@ function normalizeGarageLayout(csiPayload) {
   const garage = csiPayload?.garage || {};
   const widthMeters = DEFAULT_GARAGE_LAYOUT.widthMeters;
   const heightMeters = DEFAULT_GARAGE_LAYOUT.heightMeters;
-  const door = { ...DEFAULT_GARAGE_LAYOUT.door };
+  const rawDoorWidth = safeNumber(garage?.door_width_m, DEFAULT_GARAGE_LAYOUT.door.widthMeters);
+  const doorWidthMeters = clamp(rawDoorWidth ?? DEFAULT_GARAGE_LAYOUT.door.widthMeters, 0.2, widthMeters);
+  const rawDoorOffset = safeNumber(garage?.door_x_m, DEFAULT_GARAGE_LAYOUT.door.offsetMeters);
+  const doorOffsetMeters = clamp(rawDoorOffset ?? DEFAULT_GARAGE_LAYOUT.door.offsetMeters, 0, Math.max(0, widthMeters - doorWidthMeters));
+  const doorCenterXMeters = -widthMeters / 2 + doorOffsetMeters + doorWidthMeters / 2;
+  const door = {
+    ...DEFAULT_GARAGE_LAYOUT.door,
+    xMeters: doorCenterXMeters,
+    widthMeters: doorWidthMeters,
+    offsetMeters: doorOffsetMeters
+  };
   const rawNodes = Object.entries(garage?.nodes || {})
     .map(([ip, node]) => ({
       nodeId: NODE_IP_TO_ID[ip] || ip,
@@ -694,19 +720,131 @@ function buildCoordinateHistory(csiPayload, garageLayout, { motionOnly = false }
     .filter(Boolean);
 }
 
+function buildDisplayCoordinateGuideFromSnapshot(snapshotLike, { zoneTopLabel = null, zoneTopConfidence = null } = {}) {
+  const rawX = safeNumber(snapshotLike?.target_x);
+  const rawY = safeNumber(snapshotLike?.target_y);
+  const rawZone = snapshotLike?.target_zone || snapshotLike?.zone || 'unknown';
+  const binary = String(snapshotLike?.binary || 'unknown').toLowerCase();
+  const coordinateValid = snapshotLike?.coordinate_valid !== false;
+  const coordinateReliability = String(snapshotLike?.coordinate_reliability || 'unknown');
+
+  const guide = {
+    rawXMeters: rawX,
+    rawYMeters: rawY,
+    rawTargetZone: rawZone,
+    displayXMeters: rawX,
+    displayYMeters: rawY,
+    displayTargetZone: rawZone,
+    displayMode: 'raw_coordinate',
+    displayReason: 'raw_runtime_coordinate',
+    guided: false
+  };
+
+  const singlePersonRuntime = coordinateValid
+    && binary === 'occupied'
+    && coordinateReliability === 'single_person_runtime';
+  const confidentCenterZone = rawZone === 'center'
+    && (zoneTopLabel == null || zoneTopLabel === 'center')
+    && (zoneTopConfidence == null || zoneTopConfidence >= 0.55);
+
+  if (singlePersonRuntime && confidentCenterZone) {
+    guide.displayXMeters = CENTER_ZONE_DISPLAY_ANCHOR.xMeters;
+    guide.displayYMeters = CENTER_ZONE_DISPLAY_ANCHOR.yMeters;
+    guide.displayTargetZone = 'center';
+    guide.displayMode = 'zone_guided_center_anchor';
+    guide.displayReason = 'zone_center_confident';
+    guide.guided = true;
+  }
+
+  return guide;
+}
+
+function buildDoorCenterCandidateGuide(csiPayload) {
+  if (csiPayload?.zone_overlay_mode === 'diagnostic_only') {
+    return null;
+  }
+  const candidate = csiPayload?.door_center_candidate_shadow || {};
+  const candidateZone = candidate?.candidate_zone || candidate?.zone || null;
+  const stableZone = candidate?.stable_zone || candidate?.stableZone || null;
+  const displayZone = stableZone || candidateZone;
+  const agreement = candidate?.agreement || null;
+  const status = candidate?.status || null;
+  const binary = String(csiPayload?.binary || csiPayload?.binary_prediction || 'unknown').toLowerCase();
+  const activeNodes = safeNumber(candidate?.active_nodes, safeNumber(csiPayload?.nodes_active));
+  const confidence = safeNumber(candidate?.confidence);
+  const stableDisplayReady = ['door_passage', 'center'].includes(displayZone)
+    && (confidence == null || confidence >= (displayZone === 'door_passage' ? 0.50 : 0.62));
+  const agreementDisplayReady = (
+    (['full', 'prototype_temporal', 'temporal_threshold', 'temporal_override'].includes(agreement)
+      && candidateZone === 'door_passage'
+      && (confidence == null || confidence >= 0.60))
+    || (['full', 'prototype_temporal', 'temporal_override'].includes(agreement)
+      && candidateZone === 'center'
+      && (confidence == null || confidence >= 0.70))
+  );
+
+  if (
+    status !== 'shadow_live'
+    || !(stableDisplayReady || agreementDisplayReady)
+    || binary === 'empty'
+    || (activeNodes != null && activeNodes < 3)
+  ) {
+    return null;
+  }
+
+  const anchor = displayZone === 'center'
+    ? CENTER_ZONE_DISPLAY_ANCHOR
+    : DOOR_ZONE_DISPLAY_ANCHOR;
+
+  return {
+    zone: displayZone,
+    xMeters: anchor.xMeters,
+    yMeters: anchor.yMeters,
+    mode: 'shadow_candidate_zone_anchor',
+    reason: stableZone ? 'door_center_candidate_stable_zone' : `door_center_candidate_${agreement}`,
+    source: stableZone
+      ? `door_center_candidate_shadow stable (${agreement || 'shadow_live'})`
+      : `door_center_candidate_shadow (${agreement})`,
+    confidence
+  };
+}
+
+function buildDisplayCoordinateGuide(csiPayload) {
+  const zoneTop = getTopProbability(csiPayload?.zone_probabilities || null);
+  const guide = buildDisplayCoordinateGuideFromSnapshot(csiPayload, {
+    zoneTopLabel: zoneTop.label,
+    zoneTopConfidence: zoneTop.confidence
+  });
+  const shadowGuide = buildDoorCenterCandidateGuide(csiPayload);
+  if (shadowGuide) {
+    guide.displayXMeters = shadowGuide.xMeters;
+    guide.displayYMeters = shadowGuide.yMeters;
+    guide.displayTargetZone = shadowGuide.zone;
+    guide.displayMode = shadowGuide.mode;
+    guide.displayReason = shadowGuide.reason;
+    guide.displaySource = shadowGuide.source;
+    guide.guided = true;
+    guide.shadowCandidateConfidence = shadowGuide.confidence;
+  }
+  return guide;
+}
+
 function buildOperatorPresenceEntries(csiPayload) {
   const history = asArray(csiPayload?.history);
   const normalizedHistory = history
-    .map((entry) => ({
-      t: safeNumber(entry?.t),
-      motionState: entry?.motion_state || 'unknown',
-      binary: entry?.binary || 'unknown',
-      xMeters: safeNumber(entry?.target_x),
-      yMeters: safeNumber(entry?.target_y),
-      zone: entry?.zone || 'unknown',
-      nodesActive: safeNumber(entry?.nodes_active, safeNumber(csiPayload?.nodes_active, 0)) || 0,
-      confidence: safeNumber(entry?.motion_confidence)
-    }))
+    .map((entry) => {
+      const displayGuide = buildDisplayCoordinateGuideFromSnapshot(entry);
+      return {
+        t: safeNumber(entry?.t),
+        motionState: entry?.motion_state || 'unknown',
+        binary: entry?.binary || 'unknown',
+        xMeters: displayGuide.displayXMeters,
+        yMeters: displayGuide.displayYMeters,
+        zone: displayGuide.displayTargetZone || entry?.zone || 'unknown',
+        nodesActive: safeNumber(entry?.nodes_active, safeNumber(csiPayload?.nodes_active, 0)) || 0,
+        confidence: safeNumber(entry?.motion_confidence)
+      };
+    })
     .filter((entry) => entry.motionState !== 'unknown' && entry.t != null)
     .sort((left, right) => left.t - right.t);
 
@@ -723,13 +861,15 @@ function buildOperatorPresenceEntries(csiPayload) {
     return [];
   }
 
+  const displayGuide = buildDisplayCoordinateGuide(csiPayload);
+
   return [{
     t: 0,
     motionState: csiPayload?.motion_state || 'unknown',
     binary: csiPayload?.binary || 'unknown',
-    xMeters: safeNumber(csiPayload?.target_x),
-    yMeters: safeNumber(csiPayload?.target_y),
-    zone: csiPayload?.target_zone || 'unknown',
+    xMeters: displayGuide.displayXMeters,
+    yMeters: displayGuide.displayYMeters,
+    zone: displayGuide.displayTargetZone || csiPayload?.target_zone || 'unknown',
     nodesActive: safeNumber(csiPayload?.nodes_active, 0) || 0,
     confidence: safeNumber(csiPayload?.motion_confidence),
     ageSec: safeNumber(csiPayload?.window_age_sec)
@@ -879,6 +1019,10 @@ function buildMotionRuntime(csiPayload, posePayload) {
     packetsPerSecond: safeNumber(csiPayload?.pps),
     windowAgeSec: safeNumber(csiPayload?.window_age_sec),
     targetZone: csiPayload?.target_zone || 'unknown',
+    zoneSource: csiPayload?.zone_source || 'unknown',
+    rssiZone: csiPayload?.rssi_zone || null,
+    n02RssiEma: safeNumber(csiPayload?.n02_rssi_ema),
+    rssiVotes: csiPayload?.rssi_votes || null,
     zoneProbabilities,
     zoneConfidence: zoneTop.confidence,
     zoneTopLabel: zoneTop.label,
@@ -894,6 +1038,67 @@ function buildMotionRuntime(csiPayload, posePayload) {
     binaryConfidence: safeNumber(csiPayload?.binary_confidence),
     history: asArray(csiPayload?.history),
     garage
+  };
+}
+
+function buildPoseSurfaceStatus(posePayload) {
+  const metadata = posePayload?.metadata || {};
+  const poseApiSurface = metadata?.pose_api_surface || 'pose_current';
+  const fp2State = metadata?.fp2_state || null;
+  const message = metadata?.message || null;
+  const lastError = metadata?.last_error || null;
+  const entityId = metadata?.entity_id || null;
+
+  if (!posePayload) {
+    return {
+      state: 'unknown',
+      label: 'No data',
+      tone: 'neutral',
+      summary: 'pose snapshot ещё не загружен',
+      detail: 'оператор видит только CSI/runtime слой'
+    };
+  }
+
+  if (fp2State === 'upstream_unavailable') {
+    return {
+      state: 'upstream_unavailable',
+      label: 'Upstream down',
+      tone: 'risk',
+      summary: message || 'FP2 upstream unavailable',
+      detail: lastError
+        ? `last_error=${lastError}`
+        : (entityId ? `entity=${entityId}` : 'cached snapshot отсутствует')
+    };
+  }
+
+  if (fp2State === 'stale_cache') {
+    return {
+      state: 'stale_cache',
+      label: 'Cached snapshot',
+      tone: 'warn',
+      summary: message || 'FP2 current недоступен, показывается cached snapshot',
+      detail: lastError
+        ? `last_error=${lastError}`
+        : (entityId ? `entity=${entityId}` : 'источник: fp2/current cache')
+    };
+  }
+
+  if (poseApiSurface === 'fp2_fallback') {
+    return {
+      state: 'fp2_fallback',
+      label: 'FP2 fallback',
+      tone: 'info',
+      summary: 'legacy /pose surface заменён на /api/v1/fp2/current',
+      detail: entityId ? `entity=${entityId}` : 'используется live FP2 surface'
+    };
+  }
+
+  return {
+    state: 'pose_current',
+    label: 'Pose current',
+    tone: 'ok',
+    summary: 'используется primary /api/v1/pose/current',
+    detail: metadata?.source ? `source=${metadata.source}` : 'live pose surface'
   };
 }
 
@@ -938,6 +1143,18 @@ function buildShadowDisagreement(csiPayload, primaryRuntime = null, v27Binary7No
     binaryDisagreement,
     summary,
     tone
+  };
+}
+
+function applyDisplayGuideToPrimaryRuntime(primaryRuntime, displayCoordinateGuide) {
+  if (!primaryRuntime) return primaryRuntime;
+  if (!displayCoordinateGuide?.displayTargetZone) return primaryRuntime;
+  return {
+    ...primaryRuntime,
+    targetZone: displayCoordinateGuide.displayTargetZone || primaryRuntime.targetZone,
+    zoneSource: displayCoordinateGuide.displaySource || primaryRuntime.zoneSource,
+    targetX: displayCoordinateGuide.displayXMeters ?? primaryRuntime.targetX,
+    targetY: displayCoordinateGuide.displayYMeters ?? primaryRuntime.targetY
   };
 }
 
@@ -1131,6 +1348,48 @@ function buildGarageRatioV2ShadowRuntime(csiPayload) {
   };
 }
 
+function buildEmptySubregimeShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.empty_subregime_shadow || {};
+  const rescue = csiPayload?.empty_subregime_rescue || {};
+  const predictedClass = typeof shadow?.predicted_class === 'string'
+    ? shadow.predicted_class
+    : null;
+  const loaded = shadow?.loaded != null
+    ? Boolean(shadow.loaded)
+    : Boolean(predictedClass || shadow?.track);
+  const status = shadow?.status
+    || (predictedClass ? 'shadow_live' : (loaded ? 'awaiting_first_window' : 'not_loaded'));
+
+  return {
+    enabled: Boolean(csiPayload?.empty_subregime_shadow),
+    track: shadow?.track || 'empty_subregime_shadow1',
+    loaded,
+    status,
+    featureSurface: shadow?.feature_surface || 'unknown',
+    predictedClass,
+    knnPredictedClass: shadow?.knn_predicted_class || null,
+    centroidPredictedClass: shadow?.centroid_predicted_class || null,
+    knnConfidence: safeNumber(shadow?.knn_confidence),
+    centroidMargin: safeNumber(shadow?.centroid_margin),
+    emptyLikeRatio: safeNumber(shadow?.empty_like_ratio),
+    canonicalEmptyRatio: safeNumber(shadow?.canonical_empty_ratio),
+    diagEmptyRatio: safeNumber(shadow?.diag_empty_ratio),
+    occupiedAnchorRatio: safeNumber(shadow?.occupied_anchor_ratio),
+    recommendedAction: shadow?.recommended_action || 'observe',
+    runtimeBinary: shadow?.runtime_binary || null,
+    runtimeBinaryConfidence: safeNumber(shadow?.runtime_binary_conf),
+    neighborLabelCounts: shadow?.neighbor_label_counts || {},
+    neighborRecordingCounts: shadow?.neighbor_recording_counts || {},
+    analysisPath: shadow?.analysis_path || null,
+    verdict: shadow?.verdict || {},
+    rescueEnabled: Boolean(rescue?.enabled),
+    rescueEligible: Boolean(rescue?.eligible),
+    rescueApplied: Boolean(rescue?.applied),
+    rescueConsecutive: safeNumber(rescue?.consecutive, 0) || 0,
+    rescueRequired: safeNumber(rescue?.required_consecutive, 0) || 0
+  };
+}
+
 function buildZoneCalibrationShadow(csiPayload) {
   const zc = csiPayload?.zone_calibration_shadow || {};
   const lastPred = zc?.last_prediction || {};
@@ -1185,6 +1444,179 @@ function buildSignalQuality(csiPayload) {
   };
 }
 
+function buildPrototypeZoneShadowRuntime(csiPayload) {
+  const shadow = csiPayload?.prototype_zone_shadow || {};
+  const last = shadow?.last_prediction || shadow;
+  return {
+    enabled: Boolean(shadow?.enabled ?? csiPayload?.prototype_zone_shadow),
+    active: Boolean(shadow?.active),
+    loaded: Boolean(last?.loaded ?? shadow?.loaded),
+    status: last?.status || shadow?.status || 'not_loaded',
+    consumer: last?.consumer || shadow?.consumer || 'prototype_zscore_euclidean_shadow',
+    zone: last?.zone || shadow?.zone || null,
+    zoneRaw: last?.zone_raw || shadow?.zone_raw || null,
+    confidence: safeNumber(last?.confidence),
+    scoreMargin: safeNumber(last?.score_margin),
+    winnerScore: safeNumber(last?.winner_score),
+    runnerUpScore: safeNumber(last?.runner_up_score),
+    probabilities: last?.probabilities || {},
+    smoothing: last?.smoothing || {},
+    activeNodes: safeNumber(last?.active_nodes),
+    packetsInWindow: safeNumber(last?.pkt_count),
+    bundlePath: shadow?.bundle_path || last?.bundle_path || null,
+    method: shadow?.method || last?.method || null,
+    metric: shadow?.metric || last?.metric || null,
+    windowT: safeNumber(last?.t)
+  };
+}
+
+function buildTemporalZoneOverlayRuntime(csiPayload) {
+  const shadow = csiPayload?.temporal_zone_overlay_shadow || {};
+  return {
+    enabled: Boolean(shadow?.enabled ?? csiPayload?.temporal_zone_overlay_shadow),
+    loaded: Boolean(shadow?.loaded),
+    status: shadow?.status || 'not_loaded',
+    consumer: shadow?.consumer || 'temporal_directional_zone_overlay',
+    zone: shadow?.zone || null,
+    thresholdZone: shadow?.threshold_zone || null,
+    directionalScore: safeNumber(shadow?.directional_score),
+    scoreFamily: shadow?.score_family || null,
+    threshold: safeNumber(shadow?.threshold),
+    margin: safeNumber(shadow?.margin),
+    dwell: safeNumber(shadow?.dwell),
+    bootstrapN: safeNumber(shadow?.bootstrap_n),
+    pending: safeNumber(shadow?.pending),
+    switched: Boolean(shadow?.switched),
+    prototypeZone: shadow?.prototype_zone || null,
+    prototypeZoneRaw: shadow?.prototype_zone_raw || null,
+    prototypeConfidence: safeNumber(shadow?.prototype_confidence),
+    prototypeMargin: safeNumber(shadow?.prototype_margin),
+    agreementWithPrototype: Boolean(shadow?.agreement_with_prototype),
+    activeNodes: safeNumber(shadow?.active_nodes),
+    packetsInWindow: safeNumber(shadow?.pkt_count),
+    summaryPath: shadow?.summary_path || null,
+    windowT: safeNumber(shadow?.t)
+  };
+}
+
+function buildDoorCenterCandidateRuntime(csiPayload) {
+  const shadow = csiPayload?.door_center_candidate_shadow || {};
+  return {
+    enabled: Boolean(shadow?.enabled ?? csiPayload?.door_center_candidate_shadow),
+    available: Boolean(shadow?.available),
+    status: shadow?.status || 'not_loaded',
+    candidateZone: shadow?.candidate_zone || shadow?.zone || null,
+    stableZone: shadow?.stable_zone || null,
+    rawCandidateZone: shadow?.raw_candidate_zone || null,
+    agreement: shadow?.agreement || 'not_ready',
+    confidence: safeNumber(shadow?.confidence),
+    prototypeZone: shadow?.prototype_zone || null,
+    prototypeZoneRaw: shadow?.prototype_zone_raw || null,
+    temporalZone: shadow?.temporal_zone || null,
+    thresholdZone: shadow?.threshold_zone || null,
+    pendingZone: shadow?.pending_zone || null,
+    pendingCount: safeNumber(shadow?.pending_count),
+    holdApplied: Boolean(shadow?.hold_applied),
+    prototypeStatus: shadow?.prototype_status || null,
+    temporalStatus: shadow?.temporal_status || null,
+    activeNodes: safeNumber(shadow?.active_nodes),
+    packetsInWindow: safeNumber(shadow?.pkt_count)
+  };
+}
+
+function buildSignalHealthSummary(csiPayload) {
+  const nodes = csiPayload?.nodes || {};
+  const dropout = csiPayload?.dropout_summary || {};
+  const quality = csiPayload?.signal_quality || {};
+  const phaseJumpMax = safeNumber(quality?.phase_jump_max);
+  const deadScMax = safeNumber(quality?.dead_sc_max);
+  const ampDriftMax = safeNumber(quality?.amp_drift_max);
+  const phaseCoherenceMean = safeNumber(quality?.phase_coherence_mean);
+  const degradedNodes = asArray(dropout?.degraded_nodes);
+  const offlineNodes = asArray(dropout?.offline_nodes);
+  const onlineNodes = asArray(dropout?.online_nodes);
+  const staleAges = Object.values(nodes)
+    .map((node) => safeNumber(node?.last_seen_sec))
+    .filter((value) => value != null);
+
+  const flags = [];
+  if ((dropout?.has_dropout || degradedNodes.length || offlineNodes.length) && (degradedNodes.length + offlineNodes.length) >= 1) {
+    flags.push({
+      kind: 'node_dropout',
+      severity: offlineNodes.length ? 'risk' : 'warn',
+      label: offlineNodes.length ? 'dropout нод' : 'деградация нод',
+      detail: [...degradedNodes, ...offlineNodes].join(', ') || 'часть нод нестабильна'
+    });
+  }
+  if (ampDriftMax != null && ampDriftMax >= 0.2) {
+    flags.push({
+      kind: 'common_mode_drift',
+      severity: ampDriftMax >= 0.35 ? 'risk' : 'warn',
+      label: 'common-mode drift',
+      detail: `amp_drift_max=${ampDriftMax.toFixed(3)}`
+    });
+  }
+  if (phaseJumpMax != null && phaseJumpMax >= 0.25) {
+    flags.push({
+      kind: 'phase_instability',
+      severity: phaseJumpMax >= 0.45 ? 'risk' : 'warn',
+      label: 'скачки фазы',
+      detail: `phase_jump_max=${phaseJumpMax.toFixed(3)}`
+    });
+  }
+  if (deadScMax != null && deadScMax >= 0.15) {
+    flags.push({
+      kind: 'dead_subcarriers',
+      severity: deadScMax >= 0.3 ? 'risk' : 'warn',
+      label: 'dead/null субнесущие',
+      detail: `dead_sc_max=${deadScMax.toFixed(3)}`
+    });
+  }
+  if (phaseCoherenceMean != null && phaseCoherenceMean <= 0.55) {
+    flags.push({
+      kind: 'low_phase_coherence',
+      severity: phaseCoherenceMean <= 0.4 ? 'risk' : 'warn',
+      label: 'низкая coherence',
+      detail: `phase_coherence_mean=${phaseCoherenceMean.toFixed(3)}`
+    });
+  }
+  if ((degradedNodes.length + offlineNodes.length) === 1 && onlineNodes.length >= 3) {
+    flags.push({
+      kind: 'single_node_glitch',
+      severity: 'warn',
+      label: 'single-node glitch',
+      detail: [...degradedNodes, ...offlineNodes][0] || 'одна нода выбивается'
+    });
+  }
+
+  const highestSeverity = flags.some((item) => item.severity === 'risk')
+    ? 'risk'
+    : flags.some((item) => item.severity === 'warn')
+      ? 'warn'
+      : 'ok';
+  const staleNodeAgeSec = staleAges.length ? Math.max(...staleAges) : null;
+
+  return {
+    available: Boolean(csiPayload),
+    status: highestSeverity === 'ok' ? 'stable' : highestSeverity === 'warn' ? 'watch' : 'unstable',
+    tone: highestSeverity,
+    healthyCoreCount: safeNumber(dropout?.healthy_core_count, 0) || 0,
+    coreOnlineCount: safeNumber(dropout?.core_online_count, 0) || 0,
+    degradedNodes,
+    offlineNodes,
+    onlineNodes,
+    staleNodeAgeSec,
+    phaseJumpMax,
+    deadScMax,
+    ampDriftMax,
+    phaseCoherenceMean,
+    flags,
+    summary: flags.length
+      ? flags.map((item) => item.label).join(' · ')
+      : 'узлы и тракт выглядят стабильно'
+  };
+}
+
 function normalizeRuntimeModelItem(item, activeModelId, defaultModelId, modelLoaded) {
   const version = item?.version || item?.display_name || item?.filename || 'unknown';
   const fileName = item?.filename || item?.model_id || 'unknown';
@@ -1204,7 +1636,8 @@ function normalizeRuntimeModelItem(item, activeModelId, defaultModelId, modelLoa
     isDefault,
     loaded: Boolean(item?.loaded) || (isActive && Boolean(modelLoaded)),
     updatedAt: item?.updated_at || null,
-    path: item?.path || null
+    path: item?.path || null,
+    metrics: item?.metrics || null,
   };
 }
 
@@ -1229,7 +1662,7 @@ function buildRuntimeModelsState(state) {
   };
 }
 
-function buildShadowDiagnostics(metadata) {
+function buildShadowDiagnostics(metadata, doorCenterCandidateShadow = null, signalHealth = null) {
   const items = [];
 
   if (metadata?.staged_motion_shadow_enabled) {
@@ -1267,6 +1700,26 @@ function buildShadowDiagnostics(metadata) {
       ? `неоднозначность ${metadata.multi_person_ambiguity_score}`
       : 'оценка неоднозначности недоступна'
   });
+
+  if (doorCenterCandidateShadow?.enabled) {
+    items.push({
+      label: 'Door/center candidate',
+      status: doorCenterCandidateShadow.status || 'unknown',
+      prediction: doorCenterCandidateShadow.candidateZone || 'n/a',
+      detail: doorCenterCandidateShadow.agreement
+        ? `agreement=${doorCenterCandidateShadow.agreement}`
+        : 'candidate verdict not ready'
+    });
+  }
+
+  if (signalHealth?.available) {
+    items.push({
+      label: 'Здоровье сигнала',
+      status: signalHealth.status || 'unknown',
+      prediction: signalHealth.flags?.length ? `${signalHealth.flags.length} flags` : 'stable',
+      detail: signalHealth.summary || 'аналитика недоступна'
+    });
+  }
 
   return items;
 }
@@ -1513,6 +1966,70 @@ function deriveFailureSignal(posePayload, support) {
   };
 }
 
+function mapCsiBackendStatus(csiPayload) {
+  const backendStatus = typeof csiPayload?.status === 'string' ? csiPayload.status : '';
+  const backendReason = typeof csiPayload?.status_reason === 'string' ? csiPayload.status_reason : '';
+  const backendMessage = typeof csiPayload?.status_message === 'string' ? csiPayload.status_message : '';
+
+  switch (backendStatus) {
+    case 'inactive':
+      return {
+        label: 'offline',
+        tone: 'risk',
+        summary: backendMessage || 'CSI runtime не запущен.'
+      };
+    case 'model_not_loaded':
+      return {
+        label: 'degraded',
+        tone: 'risk',
+        summary: backendMessage || 'Runtime поднят, но модель не загружена.'
+      };
+    case 'warming_up':
+      return {
+        label: 'warming_up',
+        tone: 'warn',
+        summary: backendMessage || 'CSI runtime прогревается после переподключения нод.'
+      };
+    case 'degraded':
+      return {
+        label: 'degraded',
+        tone: ['prediction_loop_inactive', 'listener_not_running'].includes(backendReason) ? 'risk' : 'warn',
+        summary: backendMessage || 'CSI runtime деградирован.'
+      };
+    case 'healthy':
+      return null;
+    default:
+      return null;
+  }
+}
+
+function deriveRuntimePathStatus(csiPayload) {
+  const backendStatus = typeof csiPayload?.status === 'string' ? csiPayload.status : '';
+  switch (backendStatus) {
+    case 'healthy':
+      return 'healthy';
+    case 'warming_up':
+    case 'degraded':
+      return 'degraded';
+    case 'inactive':
+      return 'inactive';
+    case 'model_not_loaded':
+      return 'failed';
+    default:
+      return csiPayload?.running && csiPayload?.model_loaded ? 'healthy' : 'failed';
+  }
+}
+
+function isCsiRuntimeReadyForCalibration(csiPayload) {
+  if (!csiPayload) {
+    return false;
+  }
+  if (typeof csiPayload.status === 'string') {
+    return csiPayload.status === 'healthy';
+  }
+  return Boolean(csiPayload.running) && Boolean(csiPayload.model_loaded);
+}
+
 function deriveTrust(csiPayload, support) {
   if (!csiPayload) {
     return {
@@ -1520,6 +2037,11 @@ function deriveTrust(csiPayload, support) {
       tone: 'risk',
       summary: 'Статус CSI runtime недоступен.'
     };
+  }
+
+  const backendDerived = mapCsiBackendStatus(csiPayload);
+  if (backendDerived) {
+    return backendDerived;
   }
 
   if (!csiPayload.running) {
@@ -1583,7 +2105,7 @@ function deriveTrust(csiPayload, support) {
   };
 }
 
-function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow) {
+function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow, doorCenterCandidateShadow) {
   const experimentalAvailable = csiPayload && (
     (csiPayload.binary && csiPayload.binary !== 'unknown')
     || (csiPayload.coarse && csiPayload.coarse !== 'unknown')
@@ -1598,8 +2120,8 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shado
   return [
     {
       label: 'Runtime только по движению',
-      status: csiPayload?.running && csiPayload?.model_loaded ? 'healthy' : 'failed',
-      mode: csiPayload?.motion_state || 'unknown',
+      status: deriveRuntimePathStatus(csiPayload),
+      mode: csiPayload?.status_reason || csiPayload?.motion_state || 'unknown',
       role: 'active_primary'
     },
     {
@@ -1651,6 +2173,16 @@ function buildRuntimePaths(csiPayload, metadata, support, trackBShadow, v19Shado
       status: metadata?.collapse_risk_runtime_status || 'unknown',
       mode: metadata?.multi_person_collapse_risk_flag ? 'risk' : 'clear',
       role: 'active_diagnostic'
+    },
+    {
+      label: 'Door/center prototype+temporal',
+      status: doorCenterCandidateShadow?.available
+        ? 'healthy'
+        : (doorCenterCandidateShadow?.enabled ? 'inactive' : 'failed'),
+      mode: doorCenterCandidateShadow?.candidateZone
+        ? `${doorCenterCandidateShadow.candidateZone}:${doorCenterCandidateShadow.agreement || 'partial'}`
+        : (doorCenterCandidateShadow?.status || 'unknown'),
+      role: 'shadow_candidate'
     }
   ];
 }
@@ -1694,6 +2226,48 @@ async function requestUiJson(path, { method = 'GET', body = null } = {}) {
   return response.json();
 }
 
+function isForensicBridgeUnavailableError(error) {
+  if (error?.status === 404) {
+    return true;
+  }
+
+  const message = String(error?.message || '').trim();
+  return Boolean(
+    error?.name === 'TypeError'
+    || /Failed to fetch/i.test(message)
+    || /NetworkError/i.test(message)
+    || /Load failed/i.test(message)
+  );
+}
+
+function isTransientRuntimeNetworkError(error) {
+  const message = String(error?.message || '').trim();
+  return Boolean(
+    error?.name === 'TypeError'
+    || /Failed to fetch/i.test(message)
+    || /NetworkError/i.test(message)
+    || /Load failed/i.test(message)
+    || /ERR_CONNECTION_(?:REFUSED|RESET)/i.test(message)
+  );
+}
+
+function isUiDevServerOrigin() {
+  const location = typeof window !== 'undefined' ? window.location : null;
+  return Boolean(
+    location
+    && isLocalHostname(location.hostname)
+    && String(location.port || '') === '3000'
+  );
+}
+
+function buildForensicBridgeAutoloadHint() {
+  return 'Forensic manifest автозагрузка отключена для текущего origin. Запусти ui/dev_server.py на 127.0.0.1:3000 и нажми «Обновить», если нужен agent7 forensic manifest.';
+}
+
+function buildForensicBridgeUnavailableMessage() {
+  return 'Forensic manifest bridge недоступен на 127.0.0.1:3000. Запусти ui/dev_server.py и повтори обновление.';
+}
+
 function buildMultiPersonEstimate(csiPayload) {
   const mpe = csiPayload?.multi_person_estimate || {};
   const tracks = Array.isArray(mpe.diagnostic_tracks) ? mpe.diagnostic_tracks : [];
@@ -1725,7 +2299,10 @@ function normalizeSnapshot(state, service = null) {
   const pose = state.pose;
   const metadata = pose?.metadata || {};
   const support = pose?.support_observations?.four_node_entry_exit_shadow_core || {};
-  const primaryRuntime = buildMotionRuntime(csi, pose);
+  const displayCoordinateGuide = buildDisplayCoordinateGuide(csi);
+  const primaryRuntimeRaw = buildMotionRuntime(csi, pose);
+  const primaryRuntimeDisplay = applyDisplayGuideToPrimaryRuntime(primaryRuntimeRaw, displayCoordinateGuide);
+  const primaryRuntime = primaryRuntimeRaw;
   const garageLayout = primaryRuntime.garage || normalizeGarageLayout(csi);
   const secondaryRuntime = buildExperimentalRuntime(csi);
   const trackBShadow = buildTrackBShadowRuntime(csi);
@@ -1733,9 +2310,15 @@ function normalizeSnapshot(state, service = null) {
   const v19Shadow = buildV19ShadowRuntime(csi);
   const v27Binary7NodeShadow = buildV27Binary7NodeRuntime(csi);
   const garageRatioV2Shadow = buildGarageRatioV2ShadowRuntime(csi);
+  const emptySubregimeShadow = buildEmptySubregimeShadowRuntime(csi);
   const zoneCalibrationShadow = buildZoneCalibrationShadow(csi);
+  const prototypeZoneShadow = buildPrototypeZoneShadowRuntime(csi);
+  const temporalZoneOverlayShadow = buildTemporalZoneOverlayRuntime(csi);
+  const doorCenterCandidateShadow = buildDoorCenterCandidateRuntime(csi);
   const baselineStatus = buildBaselineStatus(csi);
   const signalQuality = buildSignalQuality(csi);
+  const signalHealth = buildSignalHealthSummary(csi);
+  const poseSurface = buildPoseSurfaceStatus(pose);
   const operatorPresence = evaluateOperatorPresenceGate(csi);
   const shadowDisagreement = buildShadowDisagreement(csi, primaryRuntime, v27Binary7NodeShadow);
   const ambiguity = deriveAmbiguityMode(csi, pose, support, operatorPresence);
@@ -1823,14 +2406,20 @@ function normalizeSnapshot(state, service = null) {
       failureSignal: deriveFailureSignal(pose, support),
       lastMeaningfulEvent,
       primaryRuntime,
+      primaryRuntimeDisplay,
       secondaryRuntime,
+      position: state.position || null,
       trackBShadow,
       v7Shadow: v15Shadow,
       v15Shadow,
       v8Shadow: v15Shadow,
       v27Binary7NodeShadow,
       garageRatioV2Shadow,
+      emptySubregimeShadow,
       zoneCalibrationShadow,
+      prototypeZoneShadow,
+      temporalZoneOverlayShadow,
+      doorCenterCandidateShadow,
       operatorPresence,
       ambiguity,
       supportPath: {
@@ -1879,23 +2468,34 @@ function normalizeSnapshot(state, service = null) {
         confidence: safeNumber(csi?.motion_confidence),
         activity: pose?.activity || 'unknown'
       },
+      poseSurface,
       fingerprint: {
         label: metadata?.room_fingerprint_label || 'unknown',
         margin: safeNumber(metadata?.room_fingerprint_margin),
         distances: metadata?.room_fingerprint_distances || {}
       },
       coordinate: {
-        xCm: safeNumber(metadata?.coordinate_plane_x_cm, safeNumber(csi?.target_x) != null ? safeNumber(csi?.target_x) * 100 : null),
-        yCm: safeNumber(metadata?.coordinate_plane_y_cm, safeNumber(csi?.target_y) != null ? safeNumber(csi?.target_y) * 100 : null),
-        xMeters: safeNumber(csi?.target_x, safeNumber(metadata?.coordinate_plane_x_cm) != null ? safeNumber(metadata.coordinate_plane_x_cm) / 100 : null),
-        yMeters: safeNumber(csi?.target_y, safeNumber(metadata?.coordinate_plane_y_cm) != null ? safeNumber(metadata.coordinate_plane_y_cm) / 100 : null),
-        targetZone: csi?.target_zone || 'unknown',
+        xCm: displayCoordinateGuide.displayXMeters != null ? displayCoordinateGuide.displayXMeters * 100 : null,
+        yCm: displayCoordinateGuide.displayYMeters != null ? displayCoordinateGuide.displayYMeters * 100 : null,
+        xMeters: displayCoordinateGuide.displayXMeters,
+        yMeters: displayCoordinateGuide.displayYMeters,
+        targetZone: displayCoordinateGuide.displayTargetZone || csi?.target_zone || 'unknown',
+        rawXcm: safeNumber(metadata?.coordinate_plane_x_cm, safeNumber(csi?.target_x) != null ? safeNumber(csi?.target_x) * 100 : null),
+        rawYcm: safeNumber(metadata?.coordinate_plane_y_cm, safeNumber(csi?.target_y) != null ? safeNumber(csi?.target_y) * 100 : null),
+        rawXMeters: displayCoordinateGuide.rawXMeters,
+        rawYMeters: displayCoordinateGuide.rawYMeters,
+        rawTargetZone: displayCoordinateGuide.rawTargetZone,
+        displayGuided: displayCoordinateGuide.guided,
+        displayMode: displayCoordinateGuide.displayMode,
+        displayReason: displayCoordinateGuide.displayReason,
+        displaySource: displayCoordinateGuide.displaySource || null,
+        shadowCandidateConfidence: displayCoordinateGuide.shadowCandidateConfidence ?? null,
         operatorXMeters: operatorPresence.lastConfirmedX,
         operatorYMeters: operatorPresence.lastConfirmedY,
         operatorTargetZone: operatorPresence.lastConfirmedZone || 'unknown',
         ambiguityActive: Boolean(ambiguity.active),
         ambiguityTargetZone: ambiguity.targetZone || 'unknown',
-        source: metadata?.coordinate_model_source || 'unknown',
+        source: displayCoordinateGuide.displaySource || metadata?.coordinate_model_source || 'unknown',
         history: buildCoordinateHistory(csi, garageLayout),
         motionHistory: buildCoordinateHistory(csi, garageLayout, { motionOnly: true }),
         activeForMap: Boolean(operatorPresence.confirmed && ambiguity.singleTargetAllowed),
@@ -1908,22 +2508,25 @@ function normalizeSnapshot(state, service = null) {
       v19Shadow,
       baselineStatus,
       signalQuality,
+      signalHealth,
       shadowDisagreement,
-      shadowDiagnostics: buildShadowDiagnostics(metadata),
+      shadowDiagnostics: buildShadowDiagnostics(metadata, doorCenterCandidateShadow, signalHealth),
       multiPersonEstimate: buildMultiPersonEstimate(csi),
-      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow)
+      runtimePaths: buildRuntimePaths(csi, metadata, support, trackBShadow, v19Shadow, v27Binary7NodeShadow, doorCenterCandidateShadow)
     }
   };
 }
 
 export class CsiOperatorService {
   constructor() {
+    const enableOptionalApiSurface = !isLocalRuntimeOrigin();
     this.state = {
       info: null,
       status: null,
       metrics: null,
       csi: null,
       pose: null,
+      position: null,
       runtimeModels: {
         items: [],
         activeModelId: null,
@@ -1940,6 +2543,7 @@ export class CsiOperatorService {
         manifest: [],
         manifestLoadedAt: null,
         manifestError: null,
+        bridgeAvailable: null,
         selectedRunId: null,
         selectedRun: null,
         selectedRunLoadedAt: null,
@@ -1956,6 +2560,10 @@ export class CsiOperatorService {
         selectedSegmentDetail: null
       }
     };
+    this.optionalApiSurface = {
+      infoEnabled: enableOptionalApiSurface,
+      statusEnabled: enableOptionalApiSurface
+    };
     this.subscribers = new Set();
     this.timers = new Map();
     this.running = false;
@@ -1970,6 +2578,9 @@ export class CsiOperatorService {
     this.guidedUtterance = null;
     this.operatorCueToken = 0;
     this.operatorCueUtterance = null;
+    this.runtimeBackoffUntil = 0;
+    this.poseUnavailableBackoffUntil = 0;
+    this.inflightRefreshes = new Map();
     this.visibilityListener = () => {
       if (!document.hidden) {
         void this.refreshAll(true);
@@ -2322,14 +2933,18 @@ export class CsiOperatorService {
     document.addEventListener('visibilitychange', this.visibilityListener);
     await this.refreshAll(true);
     this.schedule('csi', DEFAULT_POLLING.csi, () => this.refreshCsi());
-    this.schedule('pose', DEFAULT_POLLING.pose, () => this.refreshPose());
-    this.schedule('status', DEFAULT_POLLING.status, () => this.refreshStatus());
+    this.schedule('position', DEFAULT_POLLING.position, () => this.refreshPosition());
     this.schedule('metrics', DEFAULT_POLLING.metrics, () => this.refreshMetrics());
-    this.schedule('info', DEFAULT_POLLING.info, () => this.refreshInfo());
     this.schedule('runtimeModels', DEFAULT_POLLING.runtimeModels, () => this.refreshRuntimeModels());
     this.schedule('recording', DEFAULT_POLLING.recording, () => this.refreshRecordingStatus());
     this.schedule('forensicRuns', DEFAULT_POLLING.forensicRuns, () => this.refreshForensicRuns());
     this.schedule('validation', DEFAULT_POLLING.validation, () => this.refreshValidationStatus());
+    if (this.optionalApiSurface.statusEnabled) {
+      this.schedule('status', DEFAULT_POLLING.status, () => this.refreshStatus());
+    }
+    if (this.optionalApiSurface.infoEnabled) {
+      this.schedule('info', DEFAULT_POLLING.info, () => this.refreshInfo());
+    }
   }
 
   stop() {
@@ -2354,47 +2969,134 @@ export class CsiOperatorService {
     this.timers.set(key, timerId);
   }
 
+  shouldAutoRefreshForensics() {
+    return this.state.forensics.bridgeAvailable === true || isUiDevServerOrigin();
+  }
+
+  isRuntimeBackoffActive(force = false) {
+    return !force && this.runtimeBackoffUntil > Date.now();
+  }
+
+  markRuntimeBackoff() {
+    this.runtimeBackoffUntil = Date.now() + RUNTIME_NETWORK_BACKOFF_MS;
+  }
+
+  clearRuntimeBackoff() {
+    this.runtimeBackoffUntil = 0;
+  }
+
+  isPoseUnavailableBackoffActive(force = false) {
+    return !force && this.poseUnavailableBackoffUntil > Date.now();
+  }
+
+  markPoseUnavailableBackoff() {
+    this.poseUnavailableBackoffUntil = Date.now() + POSE_UNAVAILABLE_BACKOFF_MS;
+  }
+
+  clearPoseUnavailableBackoff() {
+    this.poseUnavailableBackoffUntil = 0;
+  }
+
+  runSingleFlightRefresh(key, task) {
+    if (this.inflightRefreshes.has(key)) {
+      return this.inflightRefreshes.get(key);
+    }
+
+    const request = Promise.resolve()
+      .then(() => task())
+      .finally(() => {
+        const current = this.inflightRefreshes.get(key);
+        if (current === request) {
+          this.inflightRefreshes.delete(key);
+        }
+      });
+
+    this.inflightRefreshes.set(key, request);
+    return request;
+  }
+
   async refreshAll(force = false) {
-    await Promise.allSettled([
-      this.refreshInfo(force),
-      this.refreshStatus(force),
+    const tasks = [
       this.refreshMetrics(force),
       this.refreshCsi(force),
-      this.refreshPose(force),
       this.refreshRuntimeModels(force),
       this.refreshRecordingStatus(force),
-      this.refreshForensicRuns(force),
+      this.refreshForensicRuns({ force }),
       this.refreshValidationStatus(force)
-    ]);
+    ];
+
+    if (this.optionalApiSurface.infoEnabled) {
+      tasks.unshift(this.refreshInfo(force));
+    }
+    if (this.optionalApiSurface.statusEnabled) {
+      tasks.unshift(this.refreshStatus(force));
+    }
+
+    await Promise.allSettled(tasks);
   }
 
   async refreshInfo(force = false) {
+    if (!this.optionalApiSurface.infoEnabled) {
+      this.state.info = null;
+      delete this.state.errors.info;
+      this.emit();
+      return;
+    }
+
     try {
-      this.state.info = await healthService.getApiInfo(force);
+      this.state.info = await healthService.getApiInfo({ suppressErrorLog: true });
+      this.optionalApiSurface.infoEnabled = true;
       delete this.state.errors.info;
     } catch (error) {
-      this.state.errors.info = error.message;
+      if (error?.status === 404) {
+        this.state.info = null;
+        this.optionalApiSurface.infoEnabled = false;
+        delete this.state.errors.info;
+      } else {
+        this.state.errors.info = error.message;
+      }
     } finally {
       this.emit();
     }
   }
 
   async refreshStatus(force = false) {
+    if (!this.optionalApiSurface.statusEnabled) {
+      this.state.status = null;
+      delete this.state.errors.status;
+      this.emit();
+      return;
+    }
+
     try {
-      this.state.status = await healthService.getApiStatus(force);
+      this.state.status = await healthService.getApiStatus({ suppressErrorLog: true });
+      this.optionalApiSurface.statusEnabled = true;
       delete this.state.errors.status;
     } catch (error) {
-      this.state.errors.status = error.message;
+      if (error?.status === 404) {
+        this.state.status = null;
+        this.optionalApiSurface.statusEnabled = false;
+        delete this.state.errors.status;
+      } else {
+        this.state.errors.status = error.message;
+      }
     } finally {
       this.emit();
     }
   }
 
-  async refreshMetrics() {
+  async refreshMetrics(force = false) {
+    if (this.isRuntimeBackoffActive(force)) {
+      return;
+    }
     try {
-      this.state.metrics = await healthService.getSystemMetrics();
+      this.state.metrics = await healthService.getSystemMetrics({ suppressErrorLog: true });
+      this.clearRuntimeBackoff();
       delete this.state.errors.metrics;
     } catch (error) {
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
       this.state.errors.metrics = error.message;
     } finally {
       this.emit();
@@ -2402,30 +3104,87 @@ export class CsiOperatorService {
   }
 
   async refreshCsi(force = false) {
+    if (this.isRuntimeBackoffActive(force)) {
+      return;
+    }
     try {
-      this.state.csi = await apiService.get(CSI_STATUS_ENDPOINT, force ? { _: Date.now() } : {});
+      this.state.csi = await apiService.get(
+        CSI_STATUS_ENDPOINT,
+        { _: Date.now() },
+        { suppressErrorLog: true }
+      );
+      this.clearRuntimeBackoff();
       delete this.state.errors.csi;
     } catch (error) {
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
       this.state.errors.csi = error.message;
     } finally {
       this.emit();
     }
   }
 
-  async refreshPose(force = false) {
+  async refreshPosition(force = false) {
+    if (this.isRuntimeBackoffActive(force)) {
+      return;
+    }
     try {
-      this.state.pose = await apiService.get(API_CONFIG.ENDPOINTS.POSE.CURRENT, force ? { _: Date.now() } : {});
-      delete this.state.errors.pose;
+      this.state.position = await apiService.get(
+        CSI_POSITION_ENDPOINT,
+        force ? { _: Date.now() } : {},
+        { suppressErrorLog: true }
+      );
+      this.clearRuntimeBackoff();
+      delete this.state.errors.position;
     } catch (error) {
-      this.state.errors.pose = error.message;
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
+      this.state.errors.position = error.message;
     } finally {
       this.emit();
     }
   }
 
+  async refreshPose(force = false) {
+    return this.runSingleFlightRefresh('pose', async () => {
+      if (this.state.csi?.running === false) {
+        this.state.pose = null;
+        this.clearPoseUnavailableBackoff();
+        delete this.state.errors.pose;
+        this.emit();
+        return;
+      }
+      if (this.isRuntimeBackoffActive(force) || this.isPoseUnavailableBackoffActive(force)) {
+        return;
+      }
+      try {
+        this.state.pose = await poseService.getCurrentPose(force ? { cacheBust: Date.now() } : {});
+        if (this.state.pose?.metadata?.fp2_state === 'upstream_unavailable') {
+          this.markPoseUnavailableBackoff();
+        } else {
+          this.clearPoseUnavailableBackoff();
+        }
+        this.clearRuntimeBackoff();
+        delete this.state.errors.pose;
+      } catch (error) {
+        if (isTransientRuntimeNetworkError(error)) {
+          this.markRuntimeBackoff();
+        }
+        this.state.errors.pose = error.message;
+      } finally {
+        this.emit();
+      }
+    });
+  }
+
   async refreshRuntimeModels(force = false) {
     const runtimeModels = this.state.runtimeModels;
     if (runtimeModels.loading && !force) {
+      return runtimeModels.items;
+    }
+    if (this.isRuntimeBackoffActive(force)) {
       return runtimeModels.items;
     }
 
@@ -2438,15 +3197,20 @@ export class CsiOperatorService {
     try {
       const payload = await apiService.get(
         CSI_MODELS_ENDPOINT,
-        force ? { _: Date.now() } : {}
+        force ? { _: Date.now() } : {},
+        { suppressErrorLog: true }
       );
       runtimeModels.items = Array.isArray(payload?.models) ? payload.models : [];
       runtimeModels.activeModelId = payload?.active_model_id || this.state.csi?.model_id || null;
       runtimeModels.defaultModelId = payload?.default_model_id || null;
       runtimeModels.loadedAt = new Date().toISOString();
+      this.clearRuntimeBackoff();
       runtimeModels.error = null;
       return runtimeModels.items;
     } catch (error) {
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
       runtimeModels.error = error.message;
       return runtimeModels.items;
     } finally {
@@ -2460,6 +3224,9 @@ export class CsiOperatorService {
     if (validation.loading && !force) {
       return validation.status;
     }
+    if (this.isRuntimeBackoffActive(force)) {
+      return validation.status;
+    }
     validation.loading = true;
     if (force) {
       validation.error = null;
@@ -2468,13 +3235,18 @@ export class CsiOperatorService {
     try {
       const payload = await apiService.get(
         CSI_VALIDATION_ENDPOINTS.STATUS,
-        force ? { _: Date.now() } : {}
+        force ? { _: Date.now() } : {},
+        { suppressErrorLog: true }
       );
       validation.status = payload || null;
       validation.loadedAt = new Date().toISOString();
+      this.clearRuntimeBackoff();
       validation.error = null;
       return validation.status;
     } catch (error) {
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
       validation.error = error.message;
       return validation.status;
     } finally {
@@ -2655,7 +3427,7 @@ export class CsiOperatorService {
       return { ok: false, error: recording.actionError };
     }
 
-    if (!this.state.csi?.running || !this.state.csi?.model_loaded) {
+    if (!isCsiRuntimeReadyForCalibration(this.state.csi)) {
       recording.actionError = 'CSI runtime не готов. Сначала подними живой runtime.';
       this.emit();
       return { ok: false, error: recording.actionError };
@@ -3095,11 +3867,16 @@ export class CsiOperatorService {
   }
 
   async refreshRecordingStatus(force = false) {
+    if (this.isRuntimeBackoffActive(force)) {
+      return;
+    }
     try {
       this.state.recording.status = await apiService.get(
         CSI_RECORD_ENDPOINTS.STATUS,
-        force ? { _: Date.now() } : {}
+        force ? { _: Date.now() } : {},
+        { suppressErrorLog: true }
       );
+      this.clearRuntimeBackoff();
       const lastStopResultPayload = getRecordingLastStopResult(this.state.recording);
       const lastSessionSummaryPayload = getRecordingLastSessionSummary(this.state.recording);
       const freeformSummaryPayload = isFreeformSessionSummary(lastSessionSummaryPayload)
@@ -3138,6 +3915,9 @@ export class CsiOperatorService {
       }
       delete this.state.errors.recording;
     } catch (error) {
+      if (isTransientRuntimeNetworkError(error)) {
+        this.markRuntimeBackoff();
+      }
       this.state.errors.recording = error.message;
     } finally {
       this.emit();
@@ -3532,12 +4312,14 @@ export class CsiOperatorService {
       }
 
       const startedAt = nowIso();
+      const stepPersonCount = step.personCountExpected ?? pack.personCount ?? 1;
+      const stepMotionType = step.motionType ?? pack.motionType ?? '';
       const request = {
         label: recordingLabel,
         chunk_sec: Number(step.durationSec || 30),
         with_video: guided.withVideo,
-        person_count: Number(step.personCountExpected || pack.personCount || 1),
-        motion_type: pack.motionType || '',
+        person_count: Number(stepPersonCount),
+        motion_type: stepMotionType,
         notes,
         voice_prompt: false,
         skip_preflight: true
@@ -3712,8 +4494,20 @@ export class CsiOperatorService {
     return { ok: true, result: stopResult };
   }
 
-  async refreshForensicRuns(force = false) {
+  async refreshForensicRuns(options = {}) {
+    const normalizedOptions = typeof options === 'boolean' ? { force: options } : (options || {});
+    const force = normalizedOptions.force === true;
+    const manual = normalizedOptions.manual === true;
     const forensics = this.state.forensics;
+
+    if (!manual && !this.shouldAutoRefreshForensics()) {
+      if (!forensics.manifest.length) {
+        forensics.manifestError = buildForensicBridgeAutoloadHint();
+      }
+      this.emit();
+      return;
+    }
+
     if (forensics.loadingManifest && !force) {
       return;
     }
@@ -3727,6 +4521,7 @@ export class CsiOperatorService {
     try {
       const query = force ? `?_=${Date.now()}` : '';
       const payload = await requestUiJson(`/api/agent7/forensics/runs${query}`);
+      forensics.bridgeAvailable = true;
       if (force) {
         this.resetForensicDetailCache();
       }
@@ -3751,7 +4546,12 @@ export class CsiOperatorService {
         await this.selectForensicRun(nextRunId, { force });
       }
     } catch (error) {
-      forensics.manifestError = error.message;
+      if (isForensicBridgeUnavailableError(error)) {
+        forensics.bridgeAvailable = false;
+        forensics.manifestError = buildForensicBridgeUnavailableMessage();
+      } else {
+        forensics.manifestError = error.message;
+      }
     } finally {
       forensics.loadingManifest = false;
       this.emit();

@@ -1,6 +1,22 @@
 # WiFi-DensePose User Guide
 
-## Table of Contents
+> Historical note (2026-03-29):
+> this guide predates the current CSI operator/runtime semantics and still
+> contains stale `/api/v1/system/*`, `/api/v1/pose/latest`, and `/ws/pose/*`
+> examples. For the current operational surface use repo-root
+> `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`, `docs/CURRENT_PROJECT_STATE_20260329.md`,
+> and `v1/docs/README.md`.
+
+## Historical Guide Starts Below
+
+Everything below this point is preserved as a broad product/user-guide snapshot.
+
+- Do not treat package installation, CLI, or SDK examples below as the
+  canonical current runtime bootstrap.
+- Re-check any operational claim against the current docs entrypoint and the
+  `v1/docs` map before using it for real runtime work.
+
+## Historical Guide Contents
 
 1. [Overview](#overview)
 2. [Installation](#installation)
@@ -34,6 +50,9 @@ WiFi Routers → CSI Data → Signal Processing → Neural Network → Pose Esti
 ```
 
 ## Installation
+
+> Historical packaging/install guidance. Current runtime/operator bring-up lives
+> in the repo-root current docs surface and the current `v1` runtime docs.
 
 ### Prerequisites
 
@@ -97,10 +116,13 @@ python -c "import wifi_densepose; wifi_densepose.print_system_info()"
 wifi-densepose start --test-mode
 
 # Check health endpoint
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/health/health
 ```
 
 ## Quick Start
+
+> Historical bootstrap examples. The package/CLI flow below is not the canonical
+> operator path for the current CSI runtime.
 
 ### 1. Basic Setup
 
@@ -140,11 +162,11 @@ system.stop()
 # Start the API server
 wifi-densepose start --api
 
-# Get latest poses
-curl http://localhost:8000/api/v1/pose/latest
+# Get live runtime status
+curl http://localhost:8000/api/v1/csi/status
 
-# Get system status
-curl http://localhost:8000/api/v1/system/status
+# Get live pose-like fallback snapshot
+curl http://localhost:8000/api/v1/fp2/current
 ```
 
 ### 4. WebSocket Streaming
@@ -155,12 +177,12 @@ import websockets
 import json
 
 async def stream_poses():
-    uri = "ws://localhost:8000/ws/pose/stream"
+    uri = "ws://localhost:8000/api/v1/fp2/ws"
     async with websockets.connect(uri) as websocket:
         while True:
             data = await websocket.recv()
-            poses = json.loads(data)
-            print(f"Received: {len(poses['persons'])} persons")
+            pose_like_state = json.loads(data)
+            print(f"Received live fallback payload: {pose_like_state}")
 
 asyncio.run(stream_poses())
 ```

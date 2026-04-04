@@ -1,5 +1,10 @@
 # WiFi-DensePose API Reference
 
+> Scope note (2026-03-29):
+> this is the primary technical API reference inside `v1/docs` for the current
+> `v1` runtime surface. If this file conflicts with `v1/docs/user-guide/api-reference.md`,
+> the current source of truth is this file plus repo-root current-state docs.
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -79,7 +84,7 @@ curl -X POST http://localhost:8000/api/v1/auth/refresh \
 ### Public Endpoints
 
 Some endpoints are publicly accessible without authentication:
-- `GET /api/v1/health/*` - Health check endpoints
+- `GET /health/*` - Health check endpoints
 - `GET /api/v1/version` - Version information
 - `GET /docs` - API documentation
 
@@ -184,9 +189,18 @@ X-RateLimit-Reset: 1641556800
 
 ## Pose Estimation API
 
+All routes in the `/api/v1/pose/*` family are currently compatibility routes,
+not the canonical live runtime surface. In the current code path every public
+handler in this family is guarded by `_ensure_live_pose_surface()`, so the
+expected runtime behavior today is `503 pose_api_mock_only` until a future
+rewire to live CSI. For live pose-like operator snapshots use `/api/v1/fp2/current`
+and `/api/v1/fp2/ws`; for runtime health/status use `/health/*` and `/api/v1/csi/*`.
+
 ### Get Current Pose Estimation
 
-Get real-time pose estimation from WiFi signals.
+Legacy pose surface. At the moment this endpoint is not wired to the live CSI
+runtime and is expected to return `503 pose_api_mock_only` instead of synthetic
+person detections.
 
 ```http
 GET /api/v1/pose/current
@@ -205,7 +219,24 @@ curl "http://localhost:8000/api/v1/pose/current?confidence_threshold=0.7&max_per
   -H "Authorization: Bearer <token>"
 ```
 
-**Response:**
+**Mock-only response today (`503`):**
+```json
+{
+  "error": {
+    "code": 503,
+    "message": {
+      "error": "pose_api_mock_only",
+      "message": "Legacy /pose surface is not wired to live CSI runtime; REST/WebSocket pose responses would be synthetic.",
+      "mock_only_api_surface": true,
+      "live_signal_available": false
+    },
+    "type": "http_error",
+    "path": "/api/v1/pose/current"
+  }
+}
+```
+
+**Live response shape after future rewire:**
 ```json
 {
   "timestamp": "2025-01-07T10:00:00Z",
@@ -243,7 +274,9 @@ curl "http://localhost:8000/api/v1/pose/current?confidence_threshold=0.7&max_per
 
 ### Analyze Pose Data
 
-Trigger pose analysis with custom parameters.
+Legacy pose surface. This route is auth-protected, but while the public pose
+runtime remains mock-only it is expected to fail with `503 pose_api_mock_only`
+after authentication succeeds.
 
 ```http
 POST /api/v1/pose/analyze
@@ -469,12 +502,17 @@ GET /api/v1/pose/stats
 
 ## System Management API
 
-### System Status
+The historical `/api/v1/system/*` endpoints documented in older revisions are
+not the canonical runtime management surface today. Use `/api/v1/csi/*` for the
+current CSI runtime and recording stack, and the canonical recording workflow
+document for operator flows.
 
-Get current system status.
+### CSI Runtime Status
+
+Get current CSI runtime status.
 
 ```http
-GET /api/v1/system/status
+GET /api/v1/csi/status
 ```
 
 **Response:**
@@ -496,39 +534,21 @@ GET /api/v1/system/status
 }
 ```
 
-### Start System
+### Operator Recording Status
 
-Start the pose estimation system.
-
-```http
-POST /api/v1/system/start
-```
-
-**Request Body:**
-```json
-{
-  "configuration": {
-    "domain": "healthcare",
-    "environment_id": "room_001",
-    "calibration_required": true
-  }
-}
-```
-
-### Stop System
-
-Stop the pose estimation system.
+Check current operator recording/session state.
 
 ```http
-POST /api/v1/system/stop
+GET /api/v1/csi/record/status
 ```
 
-### Restart System
+### Operator Recording Control
 
-Restart the system with new configuration.
+The canonical operator control endpoints are:
 
 ```http
-POST /api/v1/system/restart
+POST /api/v1/csi/record/start
+POST /api/v1/csi/record/stop
 ```
 
 ### Get Configuration
@@ -567,7 +587,7 @@ PUT /api/v1/config
 Get detailed system health information.
 
 ```http
-GET /api/v1/health
+GET /health/health
 ```
 
 **Response:**
@@ -623,7 +643,7 @@ GET /api/v1/health
 Check if system is ready to serve requests.
 
 ```http
-GET /api/v1/ready
+GET /health/ready
 ```
 
 **Response:**
@@ -692,7 +712,7 @@ GET /api/v1/version
 Connect to WebSocket endpoint:
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/pose/stream');
+const ws = new WebSocket('ws://localhost:8000/api/v1/fp2/ws');
 ```
 
 ### Authentication
@@ -839,6 +859,13 @@ Supported activity classifications:
 
 ## SDK Examples
 
+These SDK examples are retained as compatibility/reference material.
+
+- They are not the primary source of truth for the current live runtime
+  contract.
+- Re-verify exported package classes and JS client availability before using
+  these snippets as implementation guidance.
+
 ### Python SDK
 
 ```python
@@ -906,16 +933,10 @@ curl -X GET "http://localhost:8000/api/v1/pose/current?confidence_threshold=0.7"
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json"
 
-# Start system
-curl -X POST "http://localhost:8000/api/v1/system/start" \
+# Check CSI runtime status
+curl -X GET "http://localhost:8000/api/v1/csi/status" \
   -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "configuration": {
-      "domain": "healthcare",
-      "environment_id": "room_001"
-    }
-  }'
+  -H "Accept: application/json"
 
 # Get zone occupancy
 curl -X GET "http://localhost:8000/api/v1/pose/zones/zone_001/occupancy" \

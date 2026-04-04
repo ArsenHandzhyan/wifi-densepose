@@ -1,5 +1,10 @@
 # WiFi-DensePose Implementation Review
 
+> Historical note (2026-03-29):
+> this review captures an older implementation snapshot and should not be read
+> as the current repo/runtime verdict. Use it as forensic context only, after
+> reading repo-root current-state docs and `v1/docs/README.md`.
+
 ## Executive Summary
 
 The WiFi-DensePose codebase presents a **sophisticated architecture** with **extensive infrastructure** but contains **significant gaps in core functionality**. While the system demonstrates excellent software engineering practices with comprehensive API design, database models, and service orchestration, the actual WiFi-based pose detection implementation is largely incomplete or mocked.

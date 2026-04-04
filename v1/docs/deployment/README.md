@@ -1,5 +1,11 @@
 # WiFi-DensePose DevOps & Deployment Guide
 
+> Scope note (2026-03-29):
+> this is a secondary DevOps/infrastructure-heavy deployment deep dive.
+> For the current primary deployment overview inside `v1/docs`, start with
+> `v1/docs/deployment.md`. Treat this file as deeper infra guidance, not as the
+> first current operational pointer.
+
 This guide provides comprehensive instructions for deploying and managing the WiFi-DensePose application infrastructure using modern DevOps practices.
 
 ## 🏗️ Architecture Overview

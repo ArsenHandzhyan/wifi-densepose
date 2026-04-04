@@ -1,5 +1,10 @@
 # Architecture Overview
 
+> Scope note (2026-03-29):
+> this document describes a broader historical architecture narrative and is not
+> the canonical current runtime contract. For current operational truth start
+> with repo-root current-state docs and `v1/docs/README.md`.
+
 ## Overview
 
 The WiFi-DensePose system is a distributed, microservices-based architecture that transforms WiFi Channel State Information (CSI) into real-time human pose estimation. This document provides a comprehensive overview of the system architecture, component interactions, and design principles.

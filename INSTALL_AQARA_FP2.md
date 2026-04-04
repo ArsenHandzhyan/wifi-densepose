@@ -2,7 +2,18 @@
 
 ## ✅ Интеграция уже установлена!
 
-Файлы скопированы в: `/Users/arsen/Desktop/wifi-densepose/.ha-core/config/custom_components/aqara_fp2/`
+Канонический исходник:
+- `/Users/arsen/Desktop/wifi-densepose/custom_components/aqara_fp2/`
+
+Home Assistant shadow copy:
+- `/Users/arsen/Desktop/wifi-densepose/.ha-core/config/custom_components/aqara_fp2/`
+
+Для пересинхронизации shadow copy:
+
+```bash
+cd /Users/arsen/Desktop/wifi-densepose
+./scripts/sync_aqara_fp2_shadow_copy.sh
+```
 
 ---
 
@@ -54,8 +65,8 @@ docker-compose restart homeassistant
 | Поле | Значение |
 |------|----------|
 | **Region** | `europe` |
-| **Access Token** | `928a72b8088cac5c79473fca295d5523` |
-| **Refresh Token** | `13ed4606510581b47ca3485365e54748` |
+| **Access Token** | подставьте актуальный токен из безопасного источника |
+| **Refresh Token** | подставьте актуальный refresh token из безопасного источника |
 
 Нажмите **"Отправить"**
 
@@ -132,9 +143,7 @@ python3 scripts/fp2_aqara_api.py
 1. Проверьте логи Home Assistant:
    - Настройки → Система → Журналы
 
-2. Проверьте, что токены действительны:
-   - Access Token истекает: 2026-03-11
-   - Refresh Token истекает: 2026-04-10
+2. Проверьте, что токены действительны и не истекли
 
 ### Объекты не обновляются
 

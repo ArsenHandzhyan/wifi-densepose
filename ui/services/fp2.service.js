@@ -9,6 +9,7 @@ export class FP2Service {
     this.subscribers = [];
     this.connectionState = 'disconnected';
     this.lastData = null;
+    this.lastError = null;
     const origin =
       typeof window !== 'undefined' &&
       window.location &&
@@ -20,7 +21,118 @@ export class FP2Service {
     this.baseUrls = [
       API_CONFIG.BASE_URL
     ].filter(Boolean);
-    this.selectedEntityId = localStorage.getItem('fp2_selected_entity_id') || null;
+    this.selectedEntityId = this.readSelectedEntityId();
+  }
+
+  getStorage() {
+    if (typeof localStorage !== 'undefined' && typeof localStorage?.getItem === 'function') {
+      return localStorage;
+    }
+    return null;
+  }
+
+  readSelectedEntityId() {
+    const storage = this.getStorage();
+    return storage ? (storage.getItem('fp2_selected_entity_id') || null) : null;
+  }
+
+  extractErrorMessage(payload) {
+    if (!payload) {
+      return null;
+    }
+
+    if (typeof payload === 'string') {
+      return payload;
+    }
+
+    if (Array.isArray(payload)) {
+      for (const item of payload) {
+        const message = this.extractErrorMessage(item);
+        if (message) {
+          return message;
+        }
+      }
+      return null;
+    }
+
+    if (typeof payload !== 'object') {
+      return null;
+    }
+
+    for (const key of ['message', 'detail', 'error', 'title']) {
+      const message = this.extractErrorMessage(payload[key]);
+      if (message) {
+        return message;
+      }
+    }
+
+    return null;
+  }
+
+  buildHttpError(response, payload) {
+    const fallbackMessage = `HTTP ${response.status}: ${response.statusText}`;
+    const error = new Error(this.extractErrorMessage(payload) || fallbackMessage);
+    error.name = 'Fp2ApiError';
+    error.status = response.status;
+    error.statusText = response.statusText;
+    error.payload = payload;
+    return error;
+  }
+
+  buildStreamError(payload) {
+    const error = new Error(payload?.message || 'FP2 stream error');
+    error.name = 'Fp2StreamError';
+    error.payload = payload;
+    if (payload?.error === 'fp2_upstream_unavailable') {
+      error.status = 503;
+    }
+    return error;
+  }
+
+  extractErrorDetail(error) {
+    if (error?.payload && typeof error.payload === 'object' && typeof error.payload.error === 'string') {
+      return error.payload;
+    }
+    return error?.payload?.error?.message
+      || error?.payload?.detail
+      || error?.payload?.error
+      || error?.payload
+      || null;
+  }
+
+  isUpstreamUnavailableError(error) {
+    const detail = this.extractErrorDetail(error);
+    return Boolean(
+      detail
+      && (
+        detail === 'fp2_upstream_unavailable'
+        || detail.error === 'fp2_upstream_unavailable'
+      )
+    );
+  }
+
+  buildUnavailablePoseData(detail = {}, context = 'current') {
+    const entityId = detail?.entity_id || this.selectedEntityId || null;
+    return {
+      timestamp: new Date().toISOString(),
+      frame_id: 'fp2_upstream_unavailable',
+      persons: [],
+      zone_summary: {},
+      processing_time_ms: 0,
+      metadata: {
+        source: 'fp2',
+        presence: null,
+        fp2_state: 'upstream_unavailable',
+        upstream_available: false,
+        stale: false,
+        unavailable: true,
+        fallback_context: context,
+        entity_id: entityId,
+        last_error: detail?.last_error || null,
+        message: detail?.message || 'FP2 upstream unavailable',
+        cached_snapshot_available: Boolean(detail?.cached_snapshot_available),
+      }
+    };
   }
 
   async requestWithFallback(path) {
@@ -34,7 +146,10 @@ export class FP2Service {
           }
         });
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
+          const payload = await response.json().catch(() => ({
+            message: `HTTP ${response.status}: ${response.statusText}`
+          }));
+          throw this.buildHttpError(response, payload);
         }
         return await response.json();
       } catch (error) {
@@ -52,9 +167,23 @@ export class FP2Service {
     const query = this.selectedEntityId
       ? `?entity_id=${encodeURIComponent(this.selectedEntityId)}`
       : '';
-    const data = await this.requestWithFallback(`${API_CONFIG.ENDPOINTS.FP2.CURRENT}${query}`);
-    this.lastData = data;
-    return data;
+    try {
+      const data = await this.requestWithFallback(`${API_CONFIG.ENDPOINTS.FP2.CURRENT}${query}`);
+      this.lastData = data;
+      this.lastError = null;
+      return data;
+    } catch (error) {
+      this.lastError = error;
+      if (this.isUpstreamUnavailableError(error)) {
+        const unavailableData = this.buildUnavailablePoseData(
+          this.extractErrorDetail(error),
+          'current'
+        );
+        this.lastData = unavailableData;
+        return unavailableData;
+      }
+      throw error;
+    }
   }
 
   async getEntities() {
@@ -67,10 +196,14 @@ export class FP2Service {
 
   setSelectedEntity(entityId) {
     this.selectedEntityId = entityId || null;
+    const storage = this.getStorage();
+    if (!storage) {
+      return;
+    }
     if (this.selectedEntityId) {
-      localStorage.setItem('fp2_selected_entity_id', this.selectedEntityId);
+      storage.setItem('fp2_selected_entity_id', this.selectedEntityId);
     } else {
-      localStorage.removeItem('fp2_selected_entity_id');
+      storage.removeItem('fp2_selected_entity_id');
     }
   }
 
@@ -96,13 +229,30 @@ export class FP2Service {
       {
         onOpen: () => {
           this.connectionState = 'connected';
+          this.lastError = null;
           this.notify({ type: 'connection_state', state: this.connectionState });
         },
         onMessage: (data) => {
+          if (data?.type === 'error') {
+            const error = this.buildStreamError(data);
+            this.lastError = error;
+            this.connectionState = 'error';
+            this.notify({ type: 'connection_state', state: this.connectionState, error });
+            if (this.isUpstreamUnavailableError(error)) {
+              const unavailableData = this.buildUnavailablePoseData(data, 'stream');
+              this.lastData = unavailableData;
+              this.notify({ type: 'data', payload: unavailableData });
+              return;
+            }
+            this.notify({ type: 'error', error, payload: data });
+            return;
+          }
           this.lastData = data;
+          this.lastError = null;
           this.notify({ type: 'data', payload: data });
         },
         onError: (error) => {
+          this.lastError = error;
           this.connectionState = 'error';
           this.notify({ type: 'connection_state', state: this.connectionState, error });
         },

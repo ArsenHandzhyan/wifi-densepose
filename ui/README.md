@@ -2,6 +2,14 @@
 
 A modular, modern web interface for the WiFi DensePose human tracking system. This UI provides real-time monitoring, configuration, and visualization of WiFi-based pose estimation.
 
+> Current runtime note (2026-03-29):
+> the public `/api/v1/pose/*` and `/api/v1/stream/pose` surfaces are legacy compatibility layers, not the canonical live runtime source.
+> `poseService` now falls back to `/api/v1/fp2/current` and `/api/v1/fp2/ws` when backend returns `503 pose_api_mock_only`.
+> When FP2 upstream is unavailable and no cached snapshot exists, UI surfaces now render an explicit `upstream unavailable` state instead of collapsing it into generic `HTTP 503` or synthetic empty-room pose data.
+> Dashboard live stats and the CSI Operator overview now surface that state explicitly instead of showing `0`/`undefined` as if the room were simply empty.
+> CSI Operator now also honors backend `/api/v1/csi/status` lifecycle fields (`status`, `status_reason`, `status_message`) instead of inferring runtime health only from `running && model_loaded`.
+> Read `../docs/CURRENT_PROJECT_STATE_20260329.md` for the current operational semantics.
+
 ## 🏗️ Architecture
 
 The UI follows a modular architecture with clear separation of concerns:
@@ -87,17 +95,17 @@ The UI integrates with all WiFi DensePose API endpoints:
 - `GET /health/version` - Version information
 
 ### Pose Estimation
-- `GET /api/v1/pose/current` - Current pose data
+- `GET /api/v1/pose/current` - Legacy/current compatibility route; may return `503 pose_api_mock_only`
 - `POST /api/v1/pose/analyze` - Trigger analysis
 - `GET /api/v1/pose/zones/{zone_id}/occupancy` - Zone occupancy
-- `GET /api/v1/pose/zones/summary` - All zones summary
+- `GET /api/v1/pose/zones/summary` - Legacy/current compatibility route; UI derives fallback summary from FP2 when needed
 - `POST /api/v1/pose/historical` - Historical data
 - `GET /api/v1/pose/activities` - Recent activities
 - `POST /api/v1/pose/calibrate` - System calibration
 - `GET /api/v1/pose/stats` - Statistics
 
 ### Streaming
-- `WS /api/v1/stream/pose` - Real-time pose stream
+- `WS /api/v1/stream/pose` - Legacy/current compatibility stream; UI falls back to `WS /api/v1/fp2/ws` when pose API is mock-only
 - `WS /api/v1/stream/events` - Event stream
 - `GET /api/v1/stream/status` - Stream status
 - `POST /api/v1/stream/start` - Start streaming
@@ -107,7 +115,7 @@ The UI integrates with all WiFi DensePose API endpoints:
 
 ### FP2 Integration
 - `GET /api/v1/fp2/status` - FP2 integration status
-- `GET /api/v1/fp2/current` - Current FP2 snapshot (pose-like format)
+- `GET /api/v1/fp2/current` - Current FP2 snapshot (pose-like format). UI distinguishes `fresh`, `stale_cache`, and `upstream_unavailable`.
 - `GET /api/v1/fp2/entities` - FP2-like entities discovered in HA
 - `GET /api/v1/fp2/recommended-entity` - Best-effort FP2 entity recommendation
 - `WS /api/v1/fp2/ws` - Real-time FP2 stream

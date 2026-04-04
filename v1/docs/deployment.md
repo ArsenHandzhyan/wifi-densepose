@@ -1,5 +1,15 @@
 # WiFi-DensePose Deployment Guide
 
+> Scope note (2026-03-29):
+> inside `v1/docs`, this is the primary deployment/ops overview. Use
+> `v1/docs/developer/deployment-guide.md` and `v1/docs/deployment/README.md`
+> only as deeper secondary infra references.
+>
+> Historical note (2026-03-29):
+> infrastructure patterns in this guide are still useful, but current runtime
+> health and metrics probes live under `/health/*`, not the older
+> `/api/v1/health` or root `/metrics` paths.
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -151,7 +161,7 @@ docker-compose up -d --scale wifi-densepose=3
 
 ```bash
 # Health check
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/health/health
 
 # API documentation
 open http://localhost:8000/docs
@@ -783,7 +793,7 @@ server {
 
     location /health {
         access_log off;
-        proxy_pass http://wifi_densepose_backend;
+        proxy_pass http://wifi_densepose_backend/health/health;
     }
 }
 ```
@@ -804,8 +814,8 @@ rule_files:
 scrape_configs:
   - job_name: 'wifi-densepose'
     static_configs:
-      - targets: ['wifi-densepose:8080']
-    metrics_path: /metrics
+      - targets: ['wifi-densepose:8000']
+    metrics_path: /health/metrics
     scrape_interval: 10s
 
   - job_name: 'postgres'
@@ -1076,7 +1086,7 @@ kubectl top nodes
 kubectl get hpa -n wifi-densepose
 
 # Check metrics
-curl http://localhost:8080/metrics
+curl http://localhost:8000/health/metrics
 ```
 
 ### Debug Commands

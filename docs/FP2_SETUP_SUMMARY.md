@@ -1,5 +1,14 @@
 # 📋 Aqara FP2 Integration Setup Summary
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## ✅ Что настроено:
 
 ### 1. Интеграция установлена
@@ -26,13 +35,13 @@
 
 ```bash
 # Aqara Account
-Email: arsenhandzan442@gmail.com
-Password: Arsen2576525005@
+Email: <your_aqara_email>
+Password: <your_aqara_password>
 Region: Germany/Europe
 
-# API Tokens (действительны до марта 2026)
-Access Token: 928a72b8088cac5c79473fca295d5523
-Refresh Token: 13ed4606510581b47ca3485365e54748
+# API Tokens
+Access Token: <redacted_access_token>
+Refresh Token: <redacted_refresh_token>
 ```
 
 ---

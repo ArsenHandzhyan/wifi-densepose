@@ -1,13 +1,17 @@
 // Health Service for WiFi-DensePose UI
 
 import { API_CONFIG } from '../config/api.config.js';
-import { apiService } from './api.service.js';
+import { apiService } from './api.service.js?v=20260404-ui-runtime-20';
 
 export class HealthService {
   constructor() {
     this.healthCheckInterval = null;
     this.healthSubscribers = [];
     this.lastHealthStatus = null;
+  }
+
+  normalizeRequestOptions(options) {
+    return options && typeof options === 'object' ? options : {};
   }
 
   // Get system health
@@ -29,8 +33,12 @@ export class HealthService {
   }
 
   // Get system metrics
-  async getSystemMetrics() {
-    return apiService.get(API_CONFIG.ENDPOINTS.HEALTH.METRICS);
+  async getSystemMetrics(options = {}) {
+    return apiService.get(
+      API_CONFIG.ENDPOINTS.HEALTH.METRICS,
+      {},
+      this.normalizeRequestOptions(options)
+    );
   }
 
   // Get version info
@@ -39,13 +47,21 @@ export class HealthService {
   }
 
   // Get API info
-  async getApiInfo() {
-    return apiService.get(API_CONFIG.ENDPOINTS.INFO);
+  async getApiInfo(options = {}) {
+    return apiService.get(
+      API_CONFIG.ENDPOINTS.INFO,
+      {},
+      this.normalizeRequestOptions(options)
+    );
   }
 
   // Get API status
-  async getApiStatus() {
-    return apiService.get(API_CONFIG.ENDPOINTS.STATUS);
+  async getApiStatus(options = {}) {
+    return apiService.get(
+      API_CONFIG.ENDPOINTS.STATUS,
+      {},
+      this.normalizeRequestOptions(options)
+    );
   }
 
   // Start periodic health checks

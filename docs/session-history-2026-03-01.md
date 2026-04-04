@@ -1,5 +1,14 @@
 # Session History - 2026-03-01 (FP2 + Home Assistant + WiFi-DensePose)
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Scope
 
 This file captures what was done during the local integration session with:
@@ -367,4 +376,3 @@ FP2 привязан к Aqara Cloud. HAP (HomeKit) на нём выключен 
 
 1. **Aqara Hub M2/M3** (~$50) — LAN API, стабильно, без сброса FP2
 2. **Оставить как есть** — UI работает с `input_boolean.fp2_presence` (ручное/автоматическое переключение)
-

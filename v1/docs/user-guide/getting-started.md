@@ -1,5 +1,11 @@
 # Getting Started with WiFi-DensePose
 
+> Historical note (2026-03-29):
+> this guide still contains some old `/api/v1/system/*`, `/pose/latest`, and
+> root `/health` language from the pre-canonical runtime era. For the current operational
+> surface use repo-root `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md` and
+> `docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Overview
 
 WiFi-DensePose is a revolutionary privacy-preserving human pose estimation system that transforms commodity WiFi infrastructure into a powerful human sensing platform. This guide will help you install, configure, and start using the system.
@@ -178,10 +184,10 @@ docker-compose logs -f
 source venv/bin/activate
 
 # Start the API server
-python -m src.api.main
+python -m uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
 
 # Or use uvicorn directly
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 3. Verify Installation
@@ -190,7 +196,7 @@ Check that the system is running:
 
 ```bash
 # Check API health
-curl http://localhost:8000/health
+curl http://localhost:8000/health/health
 
 # Expected response:
 # {"status": "healthy", "timestamp": "2025-01-07T10:00:00Z"}
@@ -199,7 +205,7 @@ curl http://localhost:8000/health
 Access the web interface:
 - **API Documentation**: http://localhost:8000/docs
 - **Alternative Docs**: http://localhost:8000/redoc
-- **Health Check**: http://localhost:8000/health
+- **Health Check**: http://localhost:8000/health/health
 
 ## Basic Configuration
 
@@ -308,52 +314,41 @@ REDIS_PASSWORD=""  # Set password for production
 docker-compose up -d
 
 # Using native installation
-python -m src.api.main
+python -m uvicorn src.app:app --host 0.0.0.0 --port 8000
 ```
 
 ### 2. Initialize Hardware
 
 ```bash
-# Check system status
-curl http://localhost:8000/api/v1/system/status
+# Check CSI runtime status
+curl http://localhost:8000/api/v1/csi/status
 
-# Start pose estimation system
-curl -X POST http://localhost:8000/api/v1/system/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "configuration": {
-      "domain": "general",
-      "environment_id": "room_001",
-      "calibration_required": true
-    }
-  }'
+# Check operator recording status
+curl http://localhost:8000/api/v1/csi/record/status
 ```
 
 ### 3. Get Pose Data
 
 #### REST API
 ```bash
-# Get latest pose data
-curl http://localhost:8000/api/v1/pose/latest
+# Get live pose-like fallback snapshot
+curl http://localhost:8000/api/v1/fp2/current
 
-# Get historical data
-curl "http://localhost:8000/api/v1/pose/history?limit=10"
+# Check live CSI runtime status
+curl http://localhost:8000/api/v1/csi/status
+
+# Legacy compatibility route (`503 pose_api_mock_only` expected today)
+curl http://localhost:8000/api/v1/pose/current
 ```
 
 #### WebSocket Streaming
 ```javascript
 // Connect to WebSocket
-const ws = new WebSocket('ws://localhost:8000/ws/pose');
+const ws = new WebSocket('ws://localhost:8000/api/v1/fp2/ws');
 
-// Subscribe to pose updates
+// Consume live pose-like fallback updates
 ws.onopen = function() {
-  ws.send(JSON.stringify({
-    type: 'subscribe',
-    channel: 'pose_updates',
-    filters: {
-      min_confidence: 0.7
-    }
-  }));
+  console.log('Connected to FP2 fallback stream');
 };
 
 // Handle pose data
@@ -388,7 +383,7 @@ docker-compose logs
 #### 2. No Pose Data
 ```bash
 # Check hardware status
-curl http://localhost:8000/api/v1/system/status
+curl http://localhost:8000/api/v1/csi/status
 
 # Verify router connectivity
 ping 192.168.1.1
@@ -399,13 +394,12 @@ netstat -an | grep 5500
 
 #### 3. Poor Detection Accuracy
 ```bash
-# Adjust confidence threshold
-curl -X PUT http://localhost:8000/api/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{"detection": {"confidence_threshold": 0.6}}'
+# Inspect current model inventory and runtime status
+curl http://localhost:8000/api/v1/csi/models
+curl http://localhost:8000/api/v1/csi/status
 
-# Recalibrate environment
-curl -X POST http://localhost:8000/api/v1/system/calibrate
+# Inspect current live inputs instead of the removed system-wide calibrate route
+curl http://localhost:8000/api/v1/fp2/status
 ```
 
 #### 4. High CPU/Memory Usage
@@ -435,11 +429,11 @@ export LOG_LEVEL="DEBUG"
 #### Health Checks
 ```bash
 # Comprehensive system check
-curl http://localhost:8000/api/v1/system/status
+curl http://localhost:8000/api/v1/csi/status
 
 # Component-specific checks
-curl http://localhost:8000/api/v1/hardware/status
-curl http://localhost:8000/api/v1/processing/status
+curl http://localhost:8000/api/v1/fp2/status
+curl http://localhost:8000/api/v1/stream/status
 ```
 
 #### Support Resources

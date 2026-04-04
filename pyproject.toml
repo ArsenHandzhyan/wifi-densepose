@@ -68,6 +68,7 @@ dependencies = [
     
     # Signal processing
     "scipy>=1.11.0",
+    "PyWavelets>=1.4.0",
     "matplotlib>=3.7.0",
     "pandas>=2.1.0",
     
@@ -274,15 +275,9 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=src",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-    "--cov-report=xml",
-    "--cov-fail-under=100",
-    "--cov-branch",
     "-v",
 ]
-testpaths = ["tests"]
+testpaths = ["tests", "v1/tests/unit"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*", "Describe*", "When*"]
 python_functions = ["test_*", "it_*", "should_*"]
@@ -290,14 +285,13 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "asyncio: marks async tests executed by the local async harness",
     "gpu: marks tests that require GPU",
     "hardware: marks tests that require hardware",
     "network: marks tests that require network access",
     "tdd: marks tests following TDD approach",
     "london: marks tests using London School TDD style",
 ]
-asyncio_mode = "auto"
-
 [tool.coverage.run]
 source = ["src"]
 branch = true

@@ -1,5 +1,14 @@
 # 🔧 Aqara FP2 API Troubleshooting Report
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 **Date**: 2026-03-06  
 **Status**: ONGOING - API Error 302  
 
@@ -31,7 +40,7 @@ Successfully installed and configured Aqara FP2 Cloud integration for Home Assis
 
 4. **Credentials Saved** ✅
    - All credentials in `.env` file
-   - Email: arsenhandzan442@gmail.com
+   - Email: `<your_aqara_email>`
    - Access Token valid until: 2026-03-11
 
 ---

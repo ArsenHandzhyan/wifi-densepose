@@ -1,5 +1,14 @@
 # Настройка Homebridge и интеграция с Home Assistant
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Дата добавления: 2026-03-05
 
 ## Обзор
@@ -14,10 +23,10 @@
 - **Имя**: Homebridge B96B
 - **Полное имя**: Homebridge B96B 542A (Bridge)
 - **Расположение**: Гостиная
-- **Username**: `0E:81:11:12:B9:6B`
+- **Username**: `<redacted-homebridge-username>`
 - **Port**: `51972`
-- **PIN код**: `978-32-139`
-- **Serial Number**: `0E:81:11:12:B9:6B`
+- **PIN код**: `<redacted-homebridge-pin>`
+- **Serial Number**: `<redacted-homebridge-serial>`
 - **Software Version**: 1.11.2
 - **Website**: homebridge.io
 
@@ -28,9 +37,9 @@
 {
     "bridge": {
         "name": "Homebridge B96B",
-        "username": "0E:81:11:12:B9:6B",
+        "username": "<redacted-homebridge-username>",
         "port": 51972,
-        "pin": "978-32-139",
+        "pin": "<redacted-homebridge-pin>",
         "advertiser": "bonjour-hap"
     },
     "accessories": [],
@@ -75,7 +84,7 @@ Home Assistant запущен в Docker на macOS, что создает огр
 ### Шаг 1: Подготовка
 1. Убедитесь, что Homebridge запущен и доступен в сети
 2. Проверьте, что порт 51972 открыт для подключений
-3. Подготовьте PIN код: `978-32-139`
+3. Подготовьте PIN код: `<redacted-homebridge-pin>`
 
 ### Шаг 2: Добавление интеграции HomeKit Controller
 

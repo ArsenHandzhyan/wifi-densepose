@@ -8,7 +8,7 @@ import { t, tp } from '../services/i18n.js?v=20260313-v46';
 const LOCAL_HISTORY_KEY = 'fp2_local_history_v1';
 const LOCAL_ENTRY_KEY = 'fp2_local_presence_entries_v1';
 const LOCAL_SCENARIO_KEY = 'fp2_ui_scenario_v1';
-import { fp2Service } from '../services/fp2.service.js?v=20260313-v17';
+import { fp2Service } from '../services/fp2.service.js?v=20260330-fp2unavail1';
 import {
   BUILTIN_ROOM_ITEM_LIBRARY,
   DEFAULT_ROOM_PROFILE_ID,

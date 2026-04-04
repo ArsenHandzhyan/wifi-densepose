@@ -1,17 +1,24 @@
 // Pose Service for WiFi-DensePose UI
 
 import { API_CONFIG } from '../config/api.config.js';
-import { apiService } from './api.service.js';
-import { wsService } from './websocket.service.js';
+import { apiService } from './api.service.js?v=20260404-ui-runtime-20';
+import { wsService } from './websocket.service.js?v=20260404-ui-runtime-20';
+
+const FP2_UNAVAILABLE_RETRY_MS = 15000;
 
 export class PoseService {
   constructor() {
     this.streamConnection = null;
     this.eventConnection = null;
+    this.streamMode = 'pose';
     this.poseSubscribers = [];
     this.eventSubscribers = [];
     this.connectionState = 'disconnected';
     this.lastPoseData = null;
+    this.mockOnlyApiSurface = this.shouldDefaultToFp2Surface();
+    this.mockOnlyReason = this.mockOnlyApiSurface ? 'local_runtime_prefers_fp2_surface' : null;
+    this.fp2UnavailablePayload = null;
+    this.fp2UnavailableRetryAt = 0;
     this.performanceMetrics = {
       messageCount: 0,
       errorCount: 0,
@@ -33,6 +40,15 @@ export class PoseService {
     };
   }
 
+  shouldDefaultToFp2Surface() {
+    const location = typeof window !== 'undefined' ? window.location : null;
+    return Boolean(
+      location
+      && ['127.0.0.1', 'localhost', '0.0.0.0'].includes(location.hostname)
+      && String(location.port || '') === '8000'
+    );
+  }
+
   createLogger() {
     return {
       debug: (...args) => console.debug('[POSE-DEBUG]', new Date().toISOString(), ...args),
@@ -42,22 +58,340 @@ export class PoseService {
     };
   }
 
-  // Get current pose estimation
-  async getCurrentPose(options = {}) {
+  buildPoseRequestParams(options = {}) {
     const params = {
       zone_ids: options.zoneIds?.join(','),
       confidence_threshold: options.confidenceThreshold,
       max_persons: options.maxPersons,
       include_keypoints: options.includeKeypoints,
-      include_segmentation: options.includeSegmentation
+      include_segmentation: options.includeSegmentation,
+      _: options.cacheBust
     };
 
-    // Remove undefined values
-    Object.keys(params).forEach(key => 
-      params[key] === undefined && delete params[key]
-    );
+    Object.keys(params).forEach((key) => {
+      if (params[key] === undefined || params[key] === null) {
+        delete params[key];
+      }
+    });
 
-    return apiService.get(API_CONFIG.ENDPOINTS.POSE.CURRENT, params);
+    return params;
+  }
+
+  buildFp2FallbackParams(options = {}) {
+    const params = {
+      entity_id: options.entityId,
+      _: options.cacheBust
+    };
+
+    Object.keys(params).forEach((key) => {
+      if (params[key] === undefined || params[key] === null) {
+        delete params[key];
+      }
+    });
+
+    return params;
+  }
+
+  extractMockOnlyDetail(error) {
+    return error?.payload?.error?.message
+      || error?.payload?.detail
+      || error?.payload?.error
+      || null;
+  }
+
+  isMockOnlyPoseError(error) {
+    const detail = this.extractMockOnlyDetail(error);
+    return Boolean(
+      error?.status === 503
+      && detail
+      && (
+        detail.error === 'pose_api_mock_only'
+        || detail.mock_only_api_surface === true
+      )
+    );
+  }
+
+  normalizeFp2UnavailableDetailCandidate(candidate, fallbackMessage = null) {
+    if (!candidate) {
+      return null;
+    }
+
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      if (!trimmed) {
+        return null;
+      }
+
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          return this.normalizeFp2UnavailableDetailCandidate(JSON.parse(trimmed), fallbackMessage);
+        } catch (error) {
+          // Ignore malformed string payloads and continue with plain-string heuristics.
+        }
+      }
+
+      if (
+        trimmed === 'fp2_upstream_unavailable'
+        || /fp2_upstream_unavailable/i.test(trimmed)
+        || /FP2 upstream unavailable/i.test(trimmed)
+      ) {
+        return {
+          error: 'fp2_upstream_unavailable',
+          message: trimmed === 'fp2_upstream_unavailable'
+            ? (fallbackMessage || 'FP2 upstream unavailable')
+            : trimmed
+        };
+      }
+
+      return null;
+    }
+
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const normalized = this.normalizeFp2UnavailableDetailCandidate(item, fallbackMessage);
+        if (normalized) {
+          return normalized;
+        }
+      }
+      return null;
+    }
+
+    if (typeof candidate !== 'object') {
+      return null;
+    }
+
+    const directError = typeof candidate.error === 'string' ? candidate.error : null;
+    const directMessage = typeof candidate.message === 'string' ? candidate.message : fallbackMessage;
+    if (directError === 'fp2_upstream_unavailable') {
+      return {
+        ...candidate,
+        message: directMessage || 'FP2 upstream unavailable'
+      };
+    }
+
+    if (candidate.fp2_state === 'upstream_unavailable') {
+      return {
+        error: 'fp2_upstream_unavailable',
+        ...candidate,
+        message: directMessage || 'FP2 upstream unavailable'
+      };
+    }
+
+    if (
+      candidate.upstream_available === false
+      && typeof directMessage === 'string'
+      && /FP2 upstream unavailable/i.test(directMessage)
+    ) {
+      return {
+        error: directError || 'fp2_upstream_unavailable',
+        ...candidate,
+        message: directMessage
+      };
+    }
+
+    for (const nestedKey of ['message', 'detail', 'error', 'payload']) {
+      const normalized = this.normalizeFp2UnavailableDetailCandidate(candidate[nestedKey], fallbackMessage);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return null;
+  }
+
+  extractFp2UnavailableDetail(error) {
+    const fallbackMessage = String(error?.message || '').trim() || null;
+    const candidates = [
+      error?.payload?.error?.message,
+      error?.payload?.detail,
+      error?.payload?.error,
+      error?.payload
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeFp2UnavailableDetailCandidate(candidate, fallbackMessage);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    if (
+      error?.status === 503
+      && (
+        /fp2_upstream_unavailable/i.test(fallbackMessage || '')
+        || /FP2 upstream unavailable/i.test(fallbackMessage || '')
+      )
+    ) {
+      return {
+        error: 'fp2_upstream_unavailable',
+        message: fallbackMessage || 'FP2 upstream unavailable'
+      };
+    }
+
+    return null;
+  }
+
+  isFp2UnavailableError(error) {
+    return Boolean(this.extractFp2UnavailableDetail(error));
+  }
+
+  markMockOnlyApiSurface(error) {
+    const detail = this.extractMockOnlyDetail(error);
+    this.mockOnlyApiSurface = true;
+    this.mockOnlyReason = detail?.message || error?.message || 'pose_api_mock_only';
+  }
+
+  clearMockOnlyApiSurface() {
+    this.mockOnlyApiSurface = false;
+    this.mockOnlyReason = null;
+  }
+
+  shouldReuseUnavailableFp2Payload(options = {}) {
+    const cacheBypass = Number.isFinite(Number(options?.cacheBust));
+    return Boolean(
+      !cacheBypass
+      && this.fp2UnavailablePayload
+      && Date.now() < this.fp2UnavailableRetryAt
+    );
+  }
+
+  rememberUnavailableFp2Payload(payload) {
+    this.fp2UnavailablePayload = payload;
+    this.fp2UnavailableRetryAt = Date.now() + FP2_UNAVAILABLE_RETRY_MS;
+  }
+
+  clearUnavailableFp2Payload() {
+    this.fp2UnavailablePayload = null;
+    this.fp2UnavailableRetryAt = 0;
+  }
+
+  decorateFp2FallbackPoseData(payload, context = 'current') {
+    const metadata = {
+      ...(payload?.metadata || {}),
+      pose_api_surface: 'fp2_fallback',
+      fallback_reason: 'pose_api_mock_only',
+      fallback_context: context,
+      mock_only_api_surface: true,
+      live_signal_available: false
+    };
+
+    return {
+      ...(payload || {}),
+      metadata
+    };
+  }
+
+  buildUnavailableFp2FallbackPoseData(error, context = 'current') {
+    const detail = this.extractFp2UnavailableDetail(error) || {};
+    return this.decorateFp2FallbackPoseData(
+      {
+        timestamp: new Date().toISOString(),
+        frame_id: 'fp2_upstream_unavailable',
+        persons: [],
+        zone_summary: {},
+        processing_time_ms: 0,
+        metadata: {
+          source: 'fp2',
+          presence: null,
+          fp2_state: 'upstream_unavailable',
+          upstream_available: false,
+          stale: false,
+          unavailable: true,
+          entity_id: detail.entity_id || null,
+          last_error: detail.last_error || null,
+          message: detail.message || error?.message || 'FP2 upstream unavailable',
+          cached_snapshot_available: Boolean(detail.cached_snapshot_available),
+        }
+      },
+      context
+    );
+  }
+
+  isFp2FallbackPoseData(payload) {
+    return payload?.metadata?.pose_api_surface === 'fp2_fallback';
+  }
+
+  async getCurrentPoseFromFp2(options = {}) {
+    if (this.shouldReuseUnavailableFp2Payload(options)) {
+      this.lastPoseData = this.fp2UnavailablePayload;
+      return this.fp2UnavailablePayload;
+    }
+
+    try {
+      const payload = await apiService.get(
+        API_CONFIG.ENDPOINTS.FP2.CURRENT,
+        this.buildFp2FallbackParams(options),
+        { suppressErrorLog: true }
+      );
+      this.clearUnavailableFp2Payload();
+      const decorated = this.decorateFp2FallbackPoseData(payload, options.fallbackContext || 'current');
+      this.lastPoseData = decorated;
+      return decorated;
+    } catch (error) {
+      if (!this.isFp2UnavailableError(error)) {
+        throw error;
+      }
+
+      const unavailablePayload = this.buildUnavailableFp2FallbackPoseData(
+        error,
+        options.fallbackContext || 'current'
+      );
+      this.rememberUnavailableFp2Payload(unavailablePayload);
+      this.lastPoseData = unavailablePayload;
+      this.logger.warn('FP2 fallback upstream unavailable; returning explicit unavailable pose payload', {
+        reason: unavailablePayload.metadata?.last_error || unavailablePayload.metadata?.message
+      });
+      return unavailablePayload;
+    }
+  }
+
+  async getZonesSummaryFromFp2(options = {}) {
+    const poseData = await this.getCurrentPoseFromFp2({
+      ...options,
+      fallbackContext: 'zones_summary'
+    });
+    const zones = poseData?.zone_summary && typeof poseData.zone_summary === 'object'
+      ? poseData.zone_summary
+      : {};
+
+    return {
+      timestamp: poseData?.timestamp || new Date().toISOString(),
+      zones,
+      active_zones: Object.keys(zones).length,
+      total_persons: Array.isArray(poseData?.persons) ? poseData.persons.length : 0,
+      metadata: {
+        ...(poseData?.metadata || {}),
+        zones_summary_source: 'fp2/current'
+      }
+    };
+  }
+
+  // Get current pose estimation
+  async getCurrentPose(options = {}) {
+    if (this.mockOnlyApiSurface) {
+      return this.getCurrentPoseFromFp2(options);
+    }
+
+    try {
+      const payload = await apiService.get(
+        API_CONFIG.ENDPOINTS.POSE.CURRENT,
+        this.buildPoseRequestParams(options),
+        { suppressErrorLog: true }
+      );
+      this.clearMockOnlyApiSurface();
+      this.lastPoseData = payload;
+      return payload;
+    } catch (error) {
+      if (!this.isMockOnlyPoseError(error)) {
+        throw error;
+      }
+
+      this.markMockOnlyApiSurface(error);
+      this.logger.warn('Pose REST surface is mock-only; using FP2 fallback', {
+        reason: this.mockOnlyReason
+      });
+      return this.getCurrentPoseFromFp2(options);
+    }
   }
 
   // Analyze pose (requires auth)
@@ -72,8 +406,30 @@ export class PoseService {
   }
 
   // Get zones summary
-  async getZonesSummary() {
-    return apiService.get(API_CONFIG.ENDPOINTS.POSE.ZONES_SUMMARY);
+  async getZonesSummary(options = {}) {
+    if (this.mockOnlyApiSurface) {
+      return this.getZonesSummaryFromFp2(options);
+    }
+
+    try {
+      const payload = await apiService.get(
+        API_CONFIG.ENDPOINTS.POSE.ZONES_SUMMARY,
+        this.buildFp2FallbackParams(options),
+        { suppressErrorLog: true }
+      );
+      this.clearMockOnlyApiSurface();
+      return payload;
+    } catch (error) {
+      if (!this.isMockOnlyPoseError(error)) {
+        throw error;
+      }
+
+      this.markMockOnlyApiSurface(error);
+      this.logger.warn('Pose zones summary is mock-only; deriving summary from FP2 fallback', {
+        reason: this.mockOnlyReason
+      });
+      return this.getZonesSummaryFromFp2(options);
+    }
   }
 
   // Get historical data (requires auth)
@@ -140,20 +496,42 @@ export class PoseService {
     );
 
     try {
+      const probePayload = await this.getCurrentPose({
+        zoneIds: options.zoneIds,
+        confidenceThreshold: options.minConfidence,
+        maxPersons: options.maxPersons,
+        includeKeypoints: false,
+        includeSegmentation: false,
+        entityId: options.entityId,
+        cacheBust: Date.now()
+      });
+      const useFp2FallbackStream = this.isFp2FallbackPoseData(probePayload);
+      const streamEndpoint = useFp2FallbackStream
+        ? API_CONFIG.ENDPOINTS.FP2.WS
+        : API_CONFIG.ENDPOINTS.STREAM.WS_POSE;
+      const streamParams = useFp2FallbackStream
+        ? this.buildFp2FallbackParams(options)
+        : params;
+
       this.connectionState = 'connecting';
       this.notifyConnectionState('connecting');
+      this.streamMode = useFp2FallbackStream ? 'fp2_fallback' : 'pose';
 
       this.streamConnection = await wsService.connect(
-        API_CONFIG.ENDPOINTS.STREAM.WS_POSE,
-        params,
+        streamEndpoint,
+        streamParams,
         {
           onOpen: (event) => {
-            this.logger.info('Pose stream connected successfully');
+            this.logger.info('Pose stream connected successfully', { streamMode: this.streamMode });
             this.connectionState = 'connected';
             this.notifyConnectionState('connected');
-            this.notifyPoseSubscribers({ type: 'connected', event });
+            this.notifyPoseSubscribers({ type: 'connected', event, streamMode: this.streamMode });
           },
           onMessage: (data) => {
+            if (this.streamMode === 'fp2_fallback') {
+              this.handleFp2FallbackStreamMessage(data);
+              return;
+            }
             this.handlePoseMessage(data);
           },
           onError: (error) => {
@@ -167,6 +545,7 @@ export class PoseService {
             this.logger.info('Pose stream disconnected', { event });
             this.connectionState = 'disconnected';
             this.streamConnection = null;
+            this.streamMode = 'pose';
             this.notifyConnectionState('disconnected', event);
             this.notifyPoseSubscribers({ type: 'disconnected', event });
           }
@@ -368,6 +747,34 @@ export class PoseService {
         data: { originalMessage: data }
       });
     }
+  }
+
+  handleFp2FallbackStreamMessage(data) {
+    const startTime = performance.now();
+    this.performanceMetrics.messageCount++;
+
+    if (data?.type === 'error') {
+      const error = new Error(data.message || 'FP2 fallback stream error');
+      this.performanceMetrics.errorCount++;
+      this.notifyPoseSubscribers({
+        type: 'error',
+        error,
+        data
+      });
+      return;
+    }
+
+    const convertedData = this.decorateFp2FallbackPoseData(data, 'stream');
+    this.lastPoseData = convertedData;
+
+    if (this.config.enablePerformanceTracking) {
+      this.updatePerformanceMetrics(startTime, convertedData?.timestamp || data?.timestamp);
+    }
+
+    this.notifyPoseSubscribers({
+      type: 'pose_update',
+      data: convertedData
+    });
   }
 
   validatePoseMessage(message) {
@@ -714,7 +1121,14 @@ export class PoseService {
     this.poseSubscribers = [];
     this.eventSubscribers = [];
     this.connectionState = 'disconnected';
+    this.streamMode = 'pose';
     this.lastPoseData = null;
+    this.clearMockOnlyApiSurface();
+    if (this.shouldDefaultToFp2Surface()) {
+      this.mockOnlyApiSurface = true;
+      this.mockOnlyReason = 'local_runtime_prefers_fp2_surface';
+    }
+    this.clearUnavailableFp2Payload();
     this.resetPerformanceMetrics();
   }
 }

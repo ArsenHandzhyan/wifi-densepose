@@ -1,5 +1,14 @@
 # 🎯 Aqara FP2 API Integration - Final Status
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 **Date**: 2026-03-06  
 **Status**: ✅ SIGN FIXED, ⏳ WAITING FOR TOKEN REFRESH  
 
@@ -77,7 +86,7 @@ Lang: en
 
 **Access Token Expired** (Error 403: Request forbidden)
 
-- Token: `928a72b8088cac5c79473fca295d5523`
+- Token: `<redacted_expired_token>`
 - Obtained via: DEMO APPLICATION
 - Status: Invalid/Expired
 - Need: Fresh token via authentication

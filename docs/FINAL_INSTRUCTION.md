@@ -1,5 +1,14 @@
 # 🎯 ФИНАЛЬНАЯ ИНСТРУКЦИЯ - Получение токена Aqara
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## 📊 Текущая ситуация
 
 ✅ **SIGN generation** - ИСПРАВЛЕН (алгоритм работает правильно)  
@@ -22,8 +31,8 @@ API Aqara блокирует попытки логина через `account.log
 
 1. **Откройте приложение Aqara Home на телефоне**
 2. **Войдите с credentials**:
-   - Email: `arsenhandzan442@gmail.com`
-   - Password: `Arsen2576525005@`
+   - Email: `<your_aqara_email>`
+   - Password: `<your_aqara_password>`
 3. **Убедитесь что устройство FP2 видно в приложении**
 4. **Подождите 2-3 минуты**
 5. **Запустите скрипт**:
@@ -51,7 +60,7 @@ API Aqara блокирует попытки логина через `account.log
 
 У нас есть рабочий токен виртуального аккаунта:
 ```
-Access Token: 5265202030367e84eb5dd318d3c63604
+Access Token: <redacted_access_token>
 Valid: 30 дней
 ```
 

@@ -1,5 +1,12 @@
 # Testing Guide
 
+> Historical note (2026-03-29):
+> some examples below still reflect the older `/api/v1/system/*`,
+> `/api/v1/pose/latest`, and `/ws/pose` API surface. The canonical current
+> runtime test surface is `tests`, `v1/tests/unit`, `/health/*`,
+> `/api/v1/csi/*`, `/api/v1/fp2/*`, and the legacy `/api/v1/pose/current`
+> mock-only contract.
+
 ## Overview
 
 This guide provides comprehensive information about testing the WiFi-DensePose system, including test types, frameworks, best practices, and continuous integration setup. Our testing strategy ensures reliability, performance, and maintainability of the codebase.
@@ -191,7 +198,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.api.main import app
+from src.app import app
 from src.config.settings import get_settings, get_test_settings
 from src.database.models import Base
 from tests.utils.factories import CSIDataFactory, PoseEstimationFactory
@@ -606,17 +613,8 @@ class TestPoseAPI:
     
     def test_pose_estimation_workflow(self, test_client, auth_headers):
         """Test complete pose estimation workflow."""
-        # Step 1: Start system
-        start_response = test_client.post(
-            "/api/v1/system/start",
-            json={
-                "configuration": {
-                    "domain": "healthcare",
-                    "environment_id": "test_room"
-                }
-            },
-            headers=auth_headers
-        )
+        # Step 1: Check runtime status
+        start_response = test_client.get("/api/v1/csi/status", headers=auth_headers)
         assert start_response.status_code == 200
         
         # Step 2: Wait for system to be ready
@@ -625,20 +623,20 @@ class TestPoseAPI:
         
         # Step 3: Get pose data
         pose_response = test_client.get(
-            "/api/v1/pose/latest",
+            "/api/v1/pose/current",
             headers=auth_headers
         )
-        assert pose_response.status_code == 200
+        assert pose_response.status_code in (200, 503)
         
         pose_data = pose_response.json()
-        assert "timestamp" in pose_data
-        assert "persons" in pose_data
+        if pose_response.status_code == 503:
+            assert pose_data["error"]["message"]["error"] == "pose_api_mock_only"
+        else:
+            assert "timestamp" in pose_data
+            assert "persons" in pose_data
         
-        # Step 4: Stop system
-        stop_response = test_client.post(
-            "/api/v1/system/stop",
-            headers=auth_headers
-        )
+        # Step 4: Re-check runtime status
+        stop_response = test_client.get("/api/v1/csi/status", headers=auth_headers)
         assert stop_response.status_code == 200
     
     def test_configuration_update_workflow(self, test_client, auth_headers):
@@ -674,13 +672,8 @@ class TestPoseAPI:
     @pytest.mark.asyncio
     async def test_websocket_connection(self, test_client):
         """Test WebSocket connection and data streaming."""
-        with test_client.websocket_connect("/ws/pose") as websocket:
-            # Send subscription message
-            websocket.send_json({
-                "type": "subscribe",
-                "channel": "pose_updates",
-                "filters": {"min_confidence": 0.7}
-            })
+        with test_client.websocket_connect("/api/v1/fp2/ws") as websocket:
+            # Current live fallback stream path
             
             # Receive confirmation
             confirmation = websocket.receive_json()
@@ -1127,7 +1120,7 @@ class TestPerformance:
     def test_concurrent_requests(self, test_client, auth_headers):
         """Test API performance under concurrent load."""
         def make_request():
-            response = test_client.get("/api/v1/pose/latest", headers=auth_headers)
+            response = test_client.get("/api/v1/csi/status", headers=auth_headers)
             return response.status_code, response.elapsed.total_seconds()
         
         # Concurrent requests

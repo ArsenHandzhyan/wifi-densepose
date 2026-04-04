@@ -952,8 +952,8 @@ A **negative result does not guarantee absence of survivors**. Always:
 
 ## Support
 
-- **Documentation**: [ADR-001](/docs/adr/ADR-001-wifi-mat-disaster-detection.md)
-- **Domain Model**: [DDD Specification](/docs/ddd/wifi-mat-domain-model.md)
+- **Documentation**: [ADR-001](adr/ADR-001-wifi-mat-disaster-detection.md)
+- **Domain Model**: [DDD Specification](ddd/wifi-mat-domain-model.md)
 - **Issues**: [GitHub Issues](https://github.com/ruvnet/wifi-densepose/issues)
 - **API Docs**: Run `cargo doc --package wifi-densepose-mat --open`
 

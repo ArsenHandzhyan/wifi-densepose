@@ -1,5 +1,11 @@
 # Contributing Guide
 
+> Historical note (2026-03-29):
+> some examples below still come from the older `/api/v1/system/*` and
+> `/api/v1/pose/latest` era. For current runtime semantics, treat
+> `/api/v1/pose/current` as a legacy mock-only contract and prefer the current
+> CSI/FP2 surfaces documented in repo-root `docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Overview
 
 Welcome to the WiFi-DensePose project! This guide provides comprehensive information for developers who want to contribute to the project, including setup instructions, coding standards, development workflow, and submission guidelines.
@@ -681,7 +687,7 @@ class TestPoseEstimationService:
 import pytest
 import httpx
 from fastapi.testclient import TestClient
-from src.api.main import app
+from src.app import app
 from src.config.settings import get_test_settings
 
 @pytest.fixture
@@ -701,49 +707,40 @@ def auth_headers(test_client):
     return {"Authorization": f"Bearer {token}"}
 
 class TestPoseAPI:
-    """Integration tests for pose API endpoints."""
+    """Contract tests for the legacy pose API surface."""
     
-    def test_get_latest_pose_success(self, test_client, auth_headers):
-        """Test successful retrieval of latest pose data."""
+    def test_get_pose_surface_contract(self, test_client, auth_headers):
+        """Test current `/pose/current` contract under modern runtime semantics."""
         # Act
-        response = test_client.get("/api/v1/pose/latest", headers=auth_headers)
+        response = test_client.get("/api/v1/pose/current", headers=auth_headers)
+        
+        # Assert
+        assert response.status_code in (200, 503)
+        data = response.json()
+        if response.status_code == 503:
+            assert data["error"]["message"]["error"] == "pose_api_mock_only"
+        else:
+            assert "timestamp" in data
+            assert "persons" in data
+            assert isinstance(data["persons"], list)
+    
+    def test_analyze_pose_unauthorized(self, test_client):
+        """Test unauthorized access to auth-protected pose analysis."""
+        # Act
+        response = test_client.post("/api/v1/pose/analyze", json={})
+        
+        # Assert
+        assert response.status_code in (401, 403)
+    
+    def test_csi_status_success(self, test_client, auth_headers):
+        """Test successful retrieval of CSI runtime status."""
+        # Act
+        response = test_client.get("/api/v1/csi/status", headers=auth_headers)
         
         # Assert
         assert response.status_code == 200
         data = response.json()
-        assert "timestamp" in data
-        assert "persons" in data
-        assert isinstance(data["persons"], list)
-    
-    def test_get_latest_pose_unauthorized(self, test_client):
-        """Test unauthorized access to pose data."""
-        # Act
-        response = test_client.get("/api/v1/pose/latest")
-        
-        # Assert
-        assert response.status_code == 401
-    
-    def test_start_system_success(self, test_client, auth_headers):
-        """Test successful system startup."""
-        # Arrange
-        config = {
-            "configuration": {
-                "domain": "healthcare",
-                "environment_id": "test_room"
-            }
-        }
-        
-        # Act
-        response = test_client.post(
-            "/api/v1/system/start",
-            json=config,
-            headers=auth_headers
-        )
-        
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "starting"
+        assert isinstance(data, dict)
 ```
 
 #### Performance Tests
@@ -800,7 +797,7 @@ pytest
 
 # Run specific test categories
 pytest tests/unit/
-pytest tests/integration/
+pytest tests/legacy/integration/  # historical, not canonical
 pytest -m performance
 
 # Run with coverage
@@ -858,13 +855,13 @@ class PoseEstimationResponse(BaseModel):
         }
 
 @app.get(
-    "/api/v1/pose/latest",
+    "/api/v1/pose/current",
     response_model=PoseEstimationResponse,
-    summary="Get latest pose data",
-    description="Retrieve the most recent pose estimation results",
+    summary="Get current pose data",
+    description="Legacy compatibility route; may return `503 pose_api_mock_only` until rewired",
     responses={
-        200: {"description": "Latest pose data retrieved successfully"},
-        404: {"description": "No pose data available"},
+        200: {"description": "Current pose data retrieved successfully"},
+        503: {"description": "Legacy mock-only pose surface"},
         401: {"description": "Authentication required"}
     }
 )

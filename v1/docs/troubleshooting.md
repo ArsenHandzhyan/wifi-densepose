@@ -1,5 +1,17 @@
 # WiFi-DensePose Troubleshooting Guide
 
+> Scope note (2026-03-29):
+> inside `v1/docs`, this is the primary technical troubleshooting reference.
+> `v1/docs/user-guide/troubleshooting.md` is broader and more user-facing, but
+> should not override the current runtime semantics documented here.
+>
+> Historical note (2026-03-29):
+> this guide still mixes current diagnostics with older `/api/v1/system/*`,
+> `/api/v1/health`, and `/ws/pose/*` examples. The current live runtime health
+> and status surface is `/health/*`, `/api/v1/csi/*`, and `/api/v1/fp2/*`.
+> `/api/v1/pose/current` remains a legacy compatibility route and should return
+> `503 pose_api_mock_only` today.
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -31,7 +43,7 @@ This guide helps diagnose and resolve common issues with WiFi-DensePose. Issues 
 
 ```bash
 # System health check
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/health/health
 
 # Check system information
 python -c "import wifi_densepose; wifi_densepose.print_system_info()"
@@ -52,31 +64,34 @@ kubectl logs -f deployment/wifi-densepose -n wifi-densepose
 echo "=== WiFi-DensePose Health Check ==="
 
 # Check if service is running
-if curl -s http://localhost:8000/api/v1/health > /dev/null; then
+if curl -s http://localhost:8000/health/health > /dev/null; then
     echo "✅ API service is responding"
 else
     echo "❌ API service is not responding"
 fi
 
 # Check database connection
-if curl -s http://localhost:8000/api/v1/health | grep -q "postgres.*healthy"; then
+if curl -s http://localhost:8000/health/health | grep -q "postgres.*healthy"; then
     echo "✅ Database connection is healthy"
 else
     echo "❌ Database connection issues detected"
 fi
 
 # Check hardware status
-if curl -s http://localhost:8000/api/v1/health | grep -q "hardware.*healthy"; then
+if curl -s http://localhost:8000/health/health | grep -q "hardware.*healthy"; then
     echo "✅ Hardware service is healthy"
 else
     echo "❌ Hardware service issues detected"
 fi
 
-# Check pose detection
-if curl -s http://localhost:8000/api/v1/pose/current > /dev/null; then
-    echo "✅ Pose detection is working"
+# Check legacy pose route reachability
+pose_code="$(curl -s -o /tmp/wifi_densepose_pose_check.json -w '%{http_code}' http://localhost:8000/api/v1/pose/current)"
+if [ "$pose_code" = "503" ]; then
+    echo "✅ Legacy /pose route is reachable and correctly reports mock-only"
+elif [ "$pose_code" = "200" ]; then
+    echo "⚠️ /pose returned 200; verify that it is not serving synthetic data"
 else
-    echo "❌ Pose detection issues detected"
+    echo "❌ /pose route contract drift detected (HTTP $pose_code)"
 fi
 
 echo "=== End Health Check ==="
@@ -322,7 +337,7 @@ sudo systemctl stop firewalld  # CentOS
 
 1. **Check CSI data reception:**
 ```bash
-curl http://localhost:8000/api/v1/system/status | jq '.hardware'
+curl http://localhost:8000/api/v1/csi/status | jq '.'
 ```
 
 2. **Verify confidence threshold:**
@@ -562,7 +577,7 @@ export DATABASE_MAX_OVERFLOW=30
 
 1. **Check service status:**
 ```bash
-curl -I http://localhost:8000/api/v1/health
+curl -I http://localhost:8000/health/health
 systemctl status wifi-densepose
 ```
 
@@ -610,7 +625,7 @@ tail -f /var/log/wifi-densepose.log
 
 1. **Test WebSocket connectivity:**
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/pose/stream');
+const ws = new WebSocket('ws://localhost:8000/api/v1/fp2/ws');
 ws.onopen = () => console.log('Connected');
 ws.onerror = (error) => console.error('Error:', error);
 ```
@@ -794,7 +809,7 @@ kubectl create secret tls tls-secret \
 
 1. **Check rate limit status:**
 ```bash
-curl -I http://localhost:8000/api/v1/pose/current
+curl -I http://localhost:8000/api/v1/csi/status
 # Look for X-RateLimit-* headers
 ```
 
@@ -807,7 +822,7 @@ export RATE_LIMIT_WINDOW=3600
 3. **Implement authentication for higher limits:**
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  http://localhost:8000/api/v1/pose/current
+  http://localhost:8000/api/v1/csi/status
 ```
 
 ## Deployment Issues
@@ -1020,7 +1035,7 @@ grep -E "ERROR|CRITICAL" /var/log/wifi-densepose.log | tail -20
 
 4. **Health Status:**
 ```bash
-curl http://localhost:8000/api/v1/health | jq '.'
+curl http://localhost:8000/health/health | jq '.'
 ```
 
 ### Emergency Procedures

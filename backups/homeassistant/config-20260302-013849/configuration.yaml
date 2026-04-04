@@ -1,4 +1,6 @@
-
+# Historical Home Assistant backup snapshot kept for reference.
+# Runtime-generated `.storage`, `.db`, `.log`, and lock files under backup trees
+# are archival runtime artifacts, not canonical project configuration.
 # Loads default set of integrations. Do not remove.
 default_config:
 

@@ -1,5 +1,13 @@
 # WiFi-DensePose Security Features Documentation
 
+> Historical note (2026-03-29):
+> this guide documents middleware and security concepts, but some route names
+> below come from an older API surface. For current runtime route truth use the
+> repo-root `README.md` and `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`.
+> Current live health and metrics routes are under `/health/*`; live pose-like
+> UI fallback uses `/api/v1/fp2/current` and `/api/v1/fp2/ws`, while
+> `/api/v1/pose/*` remains a legacy mock-only compatibility layer.
+
 ## Overview
 
 This document details the authentication and rate limiting features implemented in the WiFi-DensePose API, including configuration options, usage examples, and security best practices.
@@ -38,13 +46,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 **Public Endpoints** (No authentication required):
 - `/` - Root endpoint
-- `/health`, `/ready`, `/live` - Health check endpoints
+- `/health/health`, `/health/ready`, `/health/live` - Health check endpoints
+- `/health/metrics` - Metrics endpoint
+- `/api/v1/health`, `/api/v1/ready` - Health/readiness aliases
+- `/api/v1/info`, `/api/v1/status`, `/api/v1/metrics` - App-level read-only aliases
 - `/docs`, `/redoc`, `/openapi.json` - API documentation
-- `/api/v1/pose/current` - Current pose data
-- `/api/v1/pose/zones/*` - Zone information
-- `/api/v1/pose/activities` - Activity data
-- `/api/v1/pose/stats` - Statistics
+- `/api/v1/fp2/current` - Current live pose-like snapshot
+- `/api/v1/fp2/status` - FP2 status snapshot
+- `/api/v1/fp2/entities` - FP2 entity discovery
+- `/api/v1/fp2/recommended-entity` - Recommended FP2 entity
+- `/api/v1/fp2/ws` - Canonical live FP2 fallback stream
+- `/api/v1/pose/current` - Legacy pose route, currently returns `503 pose_api_mock_only`
+- `/api/v1/pose/zones/*` - Legacy pose route family, currently mock-only
+- `/api/v1/pose/activities` - Legacy pose route family, currently mock-only
+- `/api/v1/pose/stats` - Legacy pose route family, currently mock-only
 - `/api/v1/stream/status` - Stream status
+- `/api/v1/stream/metrics` - Stream metrics
+- Public endpoints stay public even when auth is enabled; authenticated calls may still expose richer detail on selected routes such as `/health/metrics`.
 
 **Protected Endpoints** (Authentication required):
 - `/api/v1/pose/analyze` - Pose analysis
@@ -54,6 +72,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 - `/api/v1/stream/stop` - Stop streaming
 - `/api/v1/stream/clients` - Client management
 - `/api/v1/stream/broadcast` - Broadcasting
+- `/api/v1/fp2/push` - Direct HAP ingest
+- `/api/v1/fp2/hap-status` - Direct HAP diagnostics
+- `/api/v1/fp2/ws/hap` - Direct HAP diagnostic stream
 
 #### Usage Examples
 
@@ -77,7 +98,7 @@ curl -X POST http://localhost:8000/api/v1/pose/analyze \
 **3. WebSocket Authentication:**
 ```javascript
 // Query parameter for WebSocket
-const ws = new WebSocket('ws://localhost:8000/ws/pose?token=<your-jwt-token>');
+const ws = new WebSocket('ws://localhost:8000/api/v1/fp2/ws?token=<your-jwt-token>');
 ```
 
 ### API Key Authentication
@@ -97,7 +118,8 @@ class APIKeyAuth:
 
 **Usage:**
 ```bash
-# API Key in header
+# API Key in header. Reachability does not imply live pose data; `/api/v1/pose/current`
+# currently returns `503 pose_api_mock_only`.
 curl -X GET http://localhost:8000/api/v1/pose/current \
   -H "X-API-Key: your-api-key-here"
 ```

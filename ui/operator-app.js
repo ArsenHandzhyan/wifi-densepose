@@ -1,4 +1,4 @@
-import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260403-signal-dashboard-01';
+import { CsiOperatorApp } from './components/CsiOperatorApp.js?v=20260404-ui-runtime-20';
 
 let appInstance = null;
 let hashListener = null;

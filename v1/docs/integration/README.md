@@ -1,5 +1,12 @@
 # WiFi-DensePose System Integration Guide
 
+> Historical note (2026-03-29):
+> this document still preserves parts of an older architecture narrative
+> (`src/core/*`, sessions/devices API, old websocket names). Treat those parts
+> as historical context. The current live runtime route truth starts with
+> `/health/*`, `/api/v1/csi/*`, `/api/v1/fp2/*`, and the repo-root
+> `README.md`.
+
 This document provides a comprehensive guide to the WiFi-DensePose system integration, covering all components and their interactions.
 
 ## Overview
@@ -286,33 +293,31 @@ processing:
 ### REST Endpoints
 
 ```python
-# Device management
-GET    /api/v1/devices
-POST   /api/v1/devices
-GET    /api/v1/devices/{device_id}
-PUT    /api/v1/devices/{device_id}
-DELETE /api/v1/devices/{device_id}
+# Current CSI/operator runtime
+GET    /api/v1/csi/status
+GET    /api/v1/csi/nodes
+GET    /api/v1/csi/record/preflight
+POST   /api/v1/csi/record/start
+GET    /api/v1/csi/record/status
+POST   /api/v1/csi/record/stop
 
-# Session management
-GET    /api/v1/sessions
-POST   /api/v1/sessions
-GET    /api/v1/sessions/{session_id}
-PATCH  /api/v1/sessions/{session_id}
-DELETE /api/v1/sessions/{session_id}
+# Current FP2/live pose-like snapshot
+GET    /api/v1/fp2/status
+GET    /api/v1/fp2/current
 
-# Data endpoints
-POST   /api/v1/csi-data
-GET    /api/v1/sessions/{session_id}/pose-detections
-GET    /api/v1/sessions/{session_id}/csi-data
+# Legacy compatibility surface
+GET    /api/v1/pose/current          # may return 503 pose_api_mock_only
+GET    /api/v1/stream/status
 ```
 
 ### WebSocket Integration
 
 ```python
-# Real-time data streaming
-WS /ws/csi-data/{session_id}
-WS /ws/pose-detections/{session_id}
-WS /ws/system-status
+# Current live stream
+WS /api/v1/fp2/ws
+
+# Legacy compatibility stream
+WS /api/v1/stream/pose              # may remain mock-only / compatibility-only
 ```
 
 ## Monitoring Integration
@@ -320,10 +325,11 @@ WS /ws/system-status
 ### Health Checks
 
 ```python
-# Health check endpoints
-GET /health              # Basic health check
-GET /health?detailed=true # Detailed health information
-GET /metrics             # Prometheus metrics
+# Health and observability endpoints
+GET /health/health       # Comprehensive health payload
+GET /health/ready        # Readiness probe
+GET /health/live         # Liveness probe
+GET /health/metrics      # Prometheus metrics
 ```
 
 ### Metrics Collection
@@ -351,14 +357,14 @@ pytest tests/unit/ -v
 pytest tests/unit/ --cov=src --cov-report=html
 ```
 
-### Integration Tests
+### Legacy Integration Tests
 
 ```bash
-# Run integration tests
-pytest tests/integration/ -v
+# Run historical integration tests
+pytest tests/legacy/integration/ -v
 
-# Run specific integration test
-pytest tests/integration/test_full_system_integration.py -v
+# Run a specific historical integration test
+pytest tests/legacy/integration/test_full_system_integration.py -v
 ```
 
 ### End-to-End Tests
@@ -496,10 +502,10 @@ await task_manager.submit_task("process_csi_data", data)
 3. **Performance Issues**
    ```bash
    # Check system metrics
-   curl http://localhost:8000/metrics
+   curl http://localhost:8000/health/metrics
    
    # Check health status
-   curl http://localhost:8000/health?detailed=true
+   curl http://localhost:8000/health/health
    ```
 
 ### Debug Mode
@@ -518,12 +524,20 @@ wifi-densepose start --debug
 ### Automated Validation
 
 ```bash
-# Run integration validation
+# Run the current canonical validation smoke
 ./scripts/validate-integration.sh
-
-# Run specific validation
-./scripts/validate-integration.sh --component=database
 ```
+
+Notes:
+
+- `validate-integration.sh` now validates the current live `v1` contract:
+  - canonical imports
+  - FastAPI route smoke through `TestClient`
+  - CLI help/version
+  - canonical pytest smoke from repo root
+- the script prefers the repo-level `venv` when it exists
+- the historical suite in `v1/tests/legacy/integration/` is intentionally excluded
+- `--component=...` is now treated as deprecated compatibility input; the script still runs the same canonical smoke
 
 ### Manual Validation
 
@@ -538,7 +552,7 @@ python -c "import src; print(src.__version__)"
 wifi-densepose --help
 
 # Test API
-curl http://localhost:8000/health
+curl http://localhost:8000/health/health
 ```
 
 ## Best Practices
@@ -593,12 +607,15 @@ curl http://localhost:8000/health
 3. **Monitor System Health**
    ```bash
    wifi-densepose status
-   curl http://localhost:8000/health
+   curl http://localhost:8000/health/health
    ```
 
 4. **Run Tests**
    ```bash
-   pytest tests/ -v
+   ../venv/bin/python -m pytest -q -o addopts='' \
+     tests/test_esp32_csi_tool_dataset_adapter.py \
+     v1/tests/unit/test_app_entrypoint_alias.py \
+     v1/tests/unit/test_recording_contract_smoke.py
    ```
 
 5. **Deploy to Production**

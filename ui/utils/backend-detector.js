@@ -7,12 +7,39 @@ export class BackendDetector {
     this.isBackendAvailable = null;
     this.lastCheck = 0;
     this.checkInterval = 30000; // Check every 30 seconds
-    this.resolvedBaseUrl = API_CONFIG.BASE_URL;
+    this.resolvedBaseUrl = this.getDefaultBaseUrl();
+  }
+
+  getLocation() {
+    return typeof window !== 'undefined' ? window.location : null;
+  }
+
+  getBackendOverride(location = this.getLocation()) {
+    if (!location) {
+      return null;
+    }
+    const params = new URLSearchParams(location.search || '');
+    return params.get('backend');
+  }
+
+  isLocalOrigin(location = this.getLocation()) {
+    const hostname = location?.hostname || '';
+    return ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
+  }
+
+  shouldLockToLocalRuntime(location = this.getLocation()) {
+    return this.isLocalOrigin(location) && !this.getBackendOverride(location);
+  }
+
+  getDefaultBaseUrl(location = this.getLocation()) {
+    return this.shouldLockToLocalRuntime(location)
+      ? API_CONFIG.LOCAL_RUNTIME_URL
+      : API_CONFIG.BASE_URL;
   }
 
   getBackendCandidates() {
     const candidates = [];
-    const location = typeof window !== 'undefined' ? window.location : null;
+    const location = this.getLocation();
 
     const addCandidate = (value) => {
       if (!value || candidates.includes(value)) {
@@ -21,14 +48,10 @@ export class BackendDetector {
       candidates.push(value);
     };
 
-    if (location) {
-      const params = new URLSearchParams(location.search);
-      addCandidate(params.get('backend'));
-    }
+    addCandidate(this.getBackendOverride(location));
 
     const hostname = location?.hostname || '';
-    const isLocalOrigin = ['127.0.0.1', 'localhost', '0.0.0.0'].includes(hostname);
-
+    const isLocalOrigin = this.isLocalOrigin(location);
     if (isLocalOrigin) {
       addCandidate(API_CONFIG.LOCAL_RUNTIME_URL);
       if (hostname !== '127.0.0.1' && hostname !== 'localhost') {
@@ -36,6 +59,9 @@ export class BackendDetector {
       }
       if (hostname !== 'localhost') {
         addCandidate('http://localhost:8000');
+      }
+      if (this.shouldLockToLocalRuntime(location)) {
+        return candidates;
       }
     }
 
@@ -101,7 +127,7 @@ export class BackendDetector {
         console.log(`❌ Backend unavailable: ${error.message}`);
       }
 
-      this.resolvedBaseUrl = API_CONFIG.BASE_URL;
+      this.resolvedBaseUrl = this.getDefaultBaseUrl();
       throw error;
     }
   }
@@ -167,7 +193,7 @@ export class BackendDetector {
   forceCheck() {
     this.isBackendAvailable = null;
     this.lastCheck = 0;
-    this.resolvedBaseUrl = API_CONFIG.BASE_URL;
+    this.resolvedBaseUrl = this.getDefaultBaseUrl();
   }
 }
 

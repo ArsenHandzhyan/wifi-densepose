@@ -1,5 +1,20 @@
 # API Reference
 
+> Historical note (2026-03-29):
+> this guide predates the current CSI/FP2 runtime semantics and still contains
+> stale `/ws/pose`, `/api/v1/pose/latest`, `/api/v1/pose/history`, and
+> `/api/v1/system/*` examples. For current runtime truth start with repo-root
+> `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`, `docs/CURRENT_PROJECT_STATE_20260329.md`,
+> and `v1/docs/api_reference.md`.
+
+## Historical API Snapshot Starts Below
+
+This document is retained as an older user-facing API walkthrough.
+
+- Do not treat the endpoint taxonomy below as the canonical live runtime map.
+- Do not assume embedded client examples still match the current package or JS
+  SDK surface without re-verification.
+
 ## Overview
 
 The WiFi-DensePose API provides comprehensive access to pose estimation data, system control, and configuration management through RESTful endpoints and real-time WebSocket connections.
@@ -568,11 +583,11 @@ Get security-specific analytics and threat assessments.
 
 Connect to the WebSocket endpoint for real-time data streaming.
 
-**Endpoint:** `ws://localhost:8000/ws/pose`
+**Endpoint:** `ws://localhost:8000/api/v1/fp2/ws`
 
 **Authentication:** Include token as query parameter or in headers:
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/pose?token=<your-jwt-token>');
+const ws = new WebSocket('ws://localhost:8000/api/v1/fp2/ws?token=<your-jwt-token>');
 ```
 
 ### Connection Establishment
@@ -793,6 +808,9 @@ X-RateLimit-Window: 3600
 
 ## Code Examples
 
+Historical client examples follow. They illustrate an older API shape and
+should be revalidated against the current router surface before reuse.
+
 ### Python Example
 
 ```python
@@ -903,7 +921,7 @@ class WiFiDensePoseClient {
     }
 
     connectWebSocket() {
-        const ws = new WebSocket(`ws://localhost:8000/ws/pose?token=${this.token}`);
+        const ws = new WebSocket(`ws://localhost:8000/api/v1/fp2/ws?token=${this.token}`);
         
         ws.onopen = () => {
             console.log('WebSocket connected');
@@ -950,20 +968,14 @@ curl -X POST http://localhost:8000/api/v1/auth/token \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "password"}'
 
-# Get latest pose data
-curl http://localhost:8000/api/v1/pose/latest \
+# Get live pose-like fallback snapshot
+curl http://localhost:8000/api/v1/fp2/current \
   -H "Authorization: Bearer <token>"
 
-# Start system
-curl -X POST http://localhost:8000/api/v1/system/start \
+# Check live runtime status
+curl http://localhost:8000/api/v1/csi/status \
   -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "configuration": {
-      "domain": "healthcare",
-      "environment_id": "room_001"
-    }
-  }'
+  -H "Accept: application/json"
 
 # Update configuration
 curl -X PUT http://localhost:8000/api/v1/config \

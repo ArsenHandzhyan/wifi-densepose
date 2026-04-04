@@ -10,7 +10,46 @@
 
 A cutting-edge WiFi-based human pose estimation system that leverages Channel State Information (CSI) data and advanced machine learning to provide real-time, privacy-preserving pose detection without cameras.
 
+> Repository status note (2026-03-29):
+> the active operational core of this repo is the CSI runtime/recording/operator stack under `v1/` and `ui/`.
+> The public `/api/v1/pose/*` surface is currently a legacy/mock-only compatibility layer, not the canonical live runtime API.
+> For live pose-like UI fallback, the current path is `/api/v1/fp2/current` and `/api/v1/fp2/ws`.
+> Current tracked env templates treat authentication as opt-in: `ENABLE_AUTHENTICATION=false` unless you explicitly enable JWT-protected endpoints.
+> Repo-root `src/` is a symlink to `v1/src`: treat `v1/src/...` as the physical code location and `src.app:app` / `src.*` as the canonical launch/import path.
+> Read [docs/CURRENT_DOCS_ENTRYPOINT_20260329.md](docs/CURRENT_DOCS_ENTRYPOINT_20260329.md) first for the current docs surface.
+> Then read [docs/CURRENT_PROJECT_STATE_20260329.md](docs/CURRENT_PROJECT_STATE_20260329.md) for the current layered state of the project.
+> Read [docs/AGENTCLOUD_REPO_ARCHAEOLOGY_AUDIT1_REPORT.md](docs/AGENTCLOUD_REPO_ARCHAEOLOGY_AUDIT1_REPORT.md) for drift, duplicates, unfinished lines, and repo hygiene findings.
+> The README content below includes historical/product narrative and may reference stale or missing docs.
+
+## Current Docs Surface
+
+If you need the project as it actually operates today, start here instead of reading the whole historical README in order:
+
+- [Current Docs Entrypoint](docs/CURRENT_DOCS_ENTRYPOINT_20260329.md)
+- [v1 Docs Map](v1/docs/README.md)
+- [Canonical State Latest](docs/CANONICAL_STATE_LATEST.md)
+- [Current Project State](docs/CURRENT_PROJECT_STATE_20260329.md)
+- [Canonical Recording Process](docs/RUNBOT_CSI_CANONICAL_RECORDING_PROCESS_2026-03-20.md)
+- [Canonical Session Pack Manifest](docs/v4_canonical_pack_manifest_20260329_v1.md)
+- [Repo Archaeology Audit](docs/AGENTCLOUD_REPO_ARCHAEOLOGY_AUDIT1_REPORT.md)
+- [Recovery Phase 2](docs/AGENTCLOUD_REPO_RECOVERY_PHASE2_REPORT.md)
+- [Recovery Phase 3](docs/AGENTCLOUD_REPO_RECOVERY_PHASE3_REPORT.md)
+
+## Historical/Product Narrative Starts Below
+
+Everything below this point is retained as repository history, product narrative,
+or exploratory package/SDK material.
+
+- Do not treat the sections below as the canonical live runtime contract.
+- Do not assume Python package classes, CLI commands, or hardware workflows below
+  are still the current operational bootstrap.
+- Re-check any operational claim against `docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`,
+  `docs/CURRENT_PROJECT_STATE_20260329.md`, and `v1/docs/README.md`.
+
 ## 🚀 Key Features
+
+> Historical product-layer capability summary, not a validated current runtime SLA
+> or live operator contract.
 
 - **Privacy-First**: No cameras required - uses WiFi signals for pose detection
 - **Real-Time Processing**: Sub-50ms latency with 30 FPS pose estimation
@@ -128,7 +167,7 @@ cargo build --release --package wifi-densepose-mat
 cargo test --package wifi-densepose-mat
 ```
 
-## 📋 Table of Contents
+## 📋 Historical README Contents
 
 <table>
 <tr>
@@ -254,6 +293,10 @@ WiFi DensePose consists of several key components working together:
 
 ## 📦 Installation
 
+> Historical packaging/install surface. For the current runtime/operator path,
+> prefer the `v1/` docs stack, the live FastAPI code under `v1/src/app.py`,
+> and the canonical launch target `src.app:app`.
+
 ### Using pip (Recommended)
 
 WiFi-DensePose is now available on PyPI for easy installation:
@@ -298,6 +341,9 @@ docker run -p 8000:8000 ruvnet/wifi-densepose:latest
 
 ## 🚀 Quick Start
 
+> Historical SDK and package bootstrap examples. They are kept for repo history
+> and should not be treated as the canonical live operator flow.
+
 ### 1. Basic Setup
 
 ```bash
@@ -305,7 +351,7 @@ docker run -p 8000:8000 ruvnet/wifi-densepose:latest
 pip install wifi-densepose
 
 # Copy example configuration
-cp example.env .env
+cp .env.example .env
 
 # Edit configuration (set your WiFi interface)
 nano .env
@@ -349,8 +395,10 @@ wifi-densepose status
 The API will be available at `http://localhost:8000`
 
 - **API Documentation**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/api/v1/health
-- **Latest Poses**: http://localhost:8000/api/v1/pose/latest
+- **Health Check**: http://localhost:8000/health/health
+- **CSI Runtime Status**: http://localhost:8000/api/v1/csi/status
+- **FP2 Live Snapshot**: http://localhost:8000/api/v1/fp2/current
+- **Legacy Pose Compatibility Route**: http://localhost:8000/api/v1/pose/current (may return `503 pose_api_mock_only`)
 
 ### 4. Real-time Streaming
 
@@ -360,18 +408,23 @@ import websockets
 import json
 
 async def stream_poses():
-    uri = "ws://localhost:8000/ws/pose/stream"
+    # Canonical live UI fallback path; the public /api/v1/stream/pose route is
+    # retained only as a legacy compatibility surface.
+    uri = "ws://localhost:8000/api/v1/fp2/ws"
     async with websockets.connect(uri) as websocket:
         while True:
             data = await websocket.recv()
-            poses = json.loads(data)
-            print(f"Received poses: {len(poses['persons'])} persons detected")
+            pose_like_state = json.loads(data)
+            print(f"Received live fallback payload: {pose_like_state}")
 
 # Run the streaming client
 asyncio.run(stream_poses())
 ```
 
 ## 🖥️ CLI Usage
+
+> Historical package CLI surface. Verify command availability and behavior before
+> using it as current operational guidance.
 
 WiFi DensePose provides a comprehensive command-line interface for easy system management, configuration, and monitoring.
 
@@ -615,17 +668,20 @@ Comprehensive documentation is available to help you get started and make the mo
 
 ### 📖 Core Documentation
 
-- **[User Guide](docs/user_guide.md)** - Complete guide covering installation, setup, basic usage, and examples
-- **[API Reference](docs/api_reference.md)** - Detailed documentation of all public classes, methods, and endpoints
-- **[Deployment Guide](docs/deployment.md)** - Production deployment, Docker setup, Kubernetes, and scaling strategies
-- **[Troubleshooting Guide](docs/troubleshooting.md)** - Common issues, solutions, and diagnostic procedures
+- **[Current Docs Entrypoint](docs/CURRENT_DOCS_ENTRYPOINT_20260329.md)** - One-page map of the current documentation surface
+- **[Current Project State](docs/CURRENT_PROJECT_STATE_20260329.md)** - Layered explanation of live runtime, recording, dataset, and historical model state
+- **[Canonical Recording Process](docs/RUNBOT_CSI_CANONICAL_RECORDING_PROCESS_2026-03-20.md)** - Authoritative recording/operator flow and safeguards
+- **[Repo Archaeology Audit](docs/AGENTCLOUD_REPO_ARCHAEOLOGY_AUDIT1_REPORT.md)** - Drift, duplicates, unfinished lines, and repo hygiene findings
 
 ### 🚀 Quick Links
 
 - **Interactive API Docs**: http://localhost:8000/docs (when running)
-- **Health Check**: http://localhost:8000/api/v1/health
-- **Latest Poses**: http://localhost:8000/api/v1/pose/latest
-- **System Status**: http://localhost:8000/api/v1/system/status
+- **Health Check**: http://localhost:8000/health/health
+- **CSI Runtime Status**: http://localhost:8000/api/v1/csi/status
+- **FP2 Current Snapshot**: http://localhost:8000/api/v1/fp2/current
+- **Legacy Pose Compatibility Route**: http://localhost:8000/api/v1/pose/current (may return `503 pose_api_mock_only`)
+- **Recording Status**: http://localhost:8000/api/v1/csi/record/status
+- **FP2 Status**: http://localhost:8000/api/v1/fp2/status
 
 ### 📋 API Overview
 
@@ -633,30 +689,42 @@ The system provides a comprehensive REST API and WebSocket streaming:
 
 #### Key REST Endpoints
 ```bash
-# Pose estimation
-GET /api/v1/pose/latest          # Get latest pose data
-GET /api/v1/pose/history         # Get historical data
-GET /api/v1/pose/zones/{zone_id} # Get zone-specific data
+# Health and runtime
+GET /health/health                     # Health probe
+GET /api/v1/csi/status                # CSI runtime status
+GET /api/v1/csi/record/status         # Active recording status
 
-# System management
-GET /api/v1/system/status        # System health and status
-POST /api/v1/system/calibrate    # Calibrate environment
-GET /api/v1/analytics/summary    # Analytics dashboard data
+# Legacy pose compatibility surface
+GET /api/v1/pose/current              # Legacy compatibility route; may return 503 pose_api_mock_only
+POST /api/v1/pose/historical          # Historical query on legacy pose surface
+GET /api/v1/pose/zones/{zone_id}/occupancy
+
+# Canonical live fallback surface
+GET /api/v1/fp2/current               # Live pose-like occupancy snapshot
+
+# Recording and FP2
+POST /api/v1/csi/record/start         # Start operator recording session
+POST /api/v1/csi/record/stop          # Stop operator recording session
+GET /api/v1/fp2/status                # FP2 bridge status
 ```
 
 #### WebSocket Streaming
 ```javascript
-// Real-time pose data
-ws://localhost:8000/ws/pose/stream
+// Legacy compatibility stream (may be mock-only)
+ws://localhost:8000/api/v1/stream/pose
 
-// Analytics events (falls, alerts)
-ws://localhost:8000/ws/analytics/events
+// Stream events
+ws://localhost:8000/api/v1/stream/events
 
-// System status updates
-ws://localhost:8000/ws/system/status
+// Canonical live fallback
+ws://localhost:8000/api/v1/fp2/ws
 ```
 
 #### Python SDK Quick Example
+
+Historical/documentation-era SDK example; verify exported client classes against
+the current package surface before reuse.
+
 ```python
 from wifi_densepose import WiFiDensePoseClient
 
@@ -672,9 +740,12 @@ occupancy = client.get_zone_occupancy("living_room")
 print(f"Living room occupancy: {occupancy.person_count}")
 ```
 
-For complete API documentation with examples, see the [API Reference Guide](docs/api_reference.md).
+For the actual live API surface, use the FastAPI docs at `http://localhost:8000/docs` and the router definitions under `v1/src/api/routers/`.
 
 ## 🔧 Hardware Setup
+
+> Historical/reference hardware guidance. For current recording topology,
+> safeguards, and operator flow, use the canonical recording docs listed above.
 
 ### Supported Hardware
 
@@ -730,7 +801,7 @@ calibrator.apply_calibration()
 
 ### Environment Variables
 
-Copy `example.env` to `.env` and configure:
+Copy `.env.example` to `.env` and configure:
 
 ```bash
 # Application Settings
@@ -760,7 +831,7 @@ POSE_PROCESSING_BATCH_SIZE=32
 POSE_MAX_PERSONS=10
 
 # Feature Flags
-ENABLE_AUTHENTICATION=true
+ENABLE_AUTHENTICATION=false
 ENABLE_RATE_LIMITING=true
 ENABLE_WEBSOCKETS=true
 ENABLE_REAL_TIME_PROCESSING=true
@@ -839,17 +910,14 @@ WiFi DensePose maintains 100% test coverage with comprehensive testing:
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest
+# Canonical default suite
+./venv/bin/python -m pytest -q
 
-# Run with coverage report
-pytest --cov=wifi_densepose --cov-report=html
+# Explicit canonical unit surface
+./venv/bin/python -m pytest -q v1/tests/unit
 
-# Run specific test categories
-pytest tests/unit/          # Unit tests
-pytest tests/integration/   # Integration tests
-pytest tests/e2e/          # End-to-end tests
-pytest tests/performance/  # Performance tests
+# Historical integration suite (legacy, not part of default surface)
+./venv/bin/python -m pytest -q v1/tests/legacy/integration
 ```
 
 ### Test Categories
@@ -861,11 +929,9 @@ pytest tests/performance/  # Performance tests
 - API endpoints
 - Configuration validation
 
-#### Integration Tests
-- Hardware interface integration
-- Database operations
-- WebSocket connections
-- Authentication flows
+#### Legacy Integration Tests
+- historical API and hardware scenarios retained under `v1/tests/legacy/integration`
+- not part of the current canonical default verification surface
 
 #### End-to-End Tests
 - Complete pose estimation pipeline
@@ -1176,8 +1242,8 @@ config = {
 ### Load Testing
 
 ```bash
-# API load testing with Apache Bench
-ab -n 10000 -c 100 http://localhost:8000/api/v1/pose/latest
+# API load testing against the live runtime surface
+ab -n 10000 -c 100 http://localhost:8000/api/v1/csi/status
 
 # WebSocket load testing
 python scripts/websocket_load_test.py --connections 1000 --duration 300
@@ -1300,10 +1366,10 @@ SOFTWARE.
 ## 📞 Support
 
 - **Documentation**:
-  - [User Guide](docs/user_guide.md) - Complete setup and usage guide
-  - [API Reference](docs/api_reference.md) - Detailed API documentation
-  - [Deployment Guide](docs/deployment.md) - Production deployment instructions
-  - [Troubleshooting Guide](docs/troubleshooting.md) - Common issues and solutions
+  - [Current Docs Entrypoint](docs/CURRENT_DOCS_ENTRYPOINT_20260329.md) - Current navigation map
+  - [Current Project State](docs/CURRENT_PROJECT_STATE_20260329.md) - Current layered state
+  - [Canonical Recording Process](docs/RUNBOT_CSI_CANONICAL_RECORDING_PROCESS_2026-03-20.md) - Recording/operator source of truth
+  - [Repo Archaeology Audit](docs/AGENTCLOUD_REPO_ARCHAEOLOGY_AUDIT1_REPORT.md) - Drift and repo hygiene findings
 - **Issues**: [GitHub Issues](https://github.com/ruvnet/wifi-densepose/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/ruvnet/wifi-densepose/discussions)
 - **PyPI Package**: [https://pypi.org/project/wifi-densepose/](https://pypi.org/project/wifi-densepose/)

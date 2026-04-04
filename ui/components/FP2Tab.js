@@ -1,6 +1,6 @@
 // FP2 Monitor Tab Component
 
-import { fp2Service } from '../services/fp2.service.js?v=20260301-fix5';
+import { fp2Service } from '../services/fp2.service.js?v=20260330-fp2unavail1';
 
 export class FP2Tab {
   constructor(containerElement) {
@@ -19,7 +19,10 @@ export class FP2Tab {
       presenceStartedAt: null,
       entities: [],
       selectedEntity: fp2Service.getSelectedEntity(),
-      trajectories: []
+      trajectories: [],
+      lastCurrentData: null,
+      currentError: null,
+      lastStatus: null
     };
   }
 
@@ -116,18 +119,22 @@ export class FP2Tab {
   async loadStatus() {
     try {
       const status = await fp2Service.getStatus();
+      this.state.lastStatus = status;
       this.state.apiEnabled = Boolean(status.enabled);
-      this.elements.apiStatus.textContent = this.state.apiEnabled ? 'Enabled' : 'Disabled';
-      this.elements.apiStatus.className = `chip ${this.state.apiEnabled ? 'ok' : 'warn'}`;
+      const indicator = this.describeApiStatus(status);
+      this.elements.apiStatus.textContent = indicator.text;
+      this.elements.apiStatus.className = `chip ${indicator.chip}`;
+      this.elements.apiStatus.title = status?.message || '';
 
       // Show currently selected entity in UI; if none selected then backend default.
       const selectedEntity = this.state.selectedEntity || status.entity_id || '-';
       this.elements.entityId.textContent = selectedEntity;
-    } catch (_error) {
+    } catch (error) {
       // Don't show Error if we already had successful data before
       if (!this.state.apiEnabled) {
         this.elements.apiStatus.textContent = 'Error';
         this.elements.apiStatus.className = 'chip err';
+        this.elements.apiStatus.title = error?.message || '';
       }
     }
   }
@@ -137,7 +144,31 @@ export class FP2Tab {
       const data = await fp2Service.getCurrent();
       this.renderCurrent(data);
     } catch (error) {
+      this.renderCurrentUnavailable(error);
       console.error('Failed to load FP2 current data:', error);
+    }
+  }
+
+  describeApiStatus(status) {
+    if (!status?.enabled) {
+      return { text: 'Disabled', chip: 'warn' };
+    }
+
+    switch (status?.status) {
+      case 'healthy':
+        return { text: 'Healthy', chip: 'ok' };
+      case 'degraded':
+        return { text: 'Cached', chip: 'warn' };
+      case 'upstream_unavailable':
+        return { text: 'Upstream Down', chip: 'err' };
+      case 'initializing':
+        return { text: 'Initializing', chip: 'warn' };
+      case 'inactive':
+        return { text: 'Inactive', chip: 'warn' };
+      case 'disabled':
+        return { text: 'Disabled', chip: 'warn' };
+      default:
+        return { text: this.state.apiEnabled ? 'Enabled' : 'Disabled', chip: this.state.apiEnabled ? 'ok' : 'warn' };
     }
   }
 
@@ -255,6 +286,11 @@ export class FP2Tab {
       return;
     }
 
+    if (message.type === 'error') {
+      this.renderCurrentUnavailable(message.error || message.payload || message);
+      return;
+    }
+
     if (message.type === 'data' && message.payload) {
       this.renderCurrent(message.payload);
     }
@@ -274,9 +310,34 @@ export class FP2Tab {
   }
 
   renderCurrent(data) {
-    const presence = Boolean(data?.metadata?.presence);
-    this.elements.presenceValue.textContent = presence ? 'PRESENT' : 'ABSENT';
-    this.elements.presenceValue.className = `presence-pill ${presence ? 'present' : 'absent'}`;
+    this.state.lastCurrentData = data;
+    this.state.currentError = null;
+
+    const metadata = data?.metadata || {};
+    const fp2State = metadata.fp2_state || 'fresh';
+    const unavailable = fp2State === 'upstream_unavailable';
+    const presence = unavailable ? null : Boolean(metadata.presence);
+
+    this.elements.presenceValue.textContent = unavailable
+      ? 'UNAVAILABLE'
+      : (presence ? 'PRESENT' : 'ABSENT');
+    this.elements.presenceValue.className = `presence-pill ${unavailable ? 'unavailable' : (presence ? 'present' : 'absent')}`;
+
+    if (unavailable) {
+      this.elements.personsCount.textContent = '-';
+      this.elements.zonesCount.textContent = '-';
+      this.elements.currentZone.textContent = metadata.last_error || '-';
+      this.elements.updatedAt.textContent = new Date().toLocaleTimeString();
+      this.elements.rawOutput.textContent = JSON.stringify(data, null, 2);
+      this.state.presenceStartedAt = null;
+      this.state.lastPresence = null;
+      this.state.currentZone = null;
+      this.elements.presenceDuration.textContent = 'n/a';
+      this.state.lastUpdate = this.elements.updatedAt.textContent;
+      this.state.trajectories = [];
+      this.drawMovementMap(null);
+      return;
+    }
     
     // Update real-time graph
     this.updateGraphData(presence);
@@ -317,6 +378,13 @@ export class FP2Tab {
 
     this.updateTrajectory(data);
     this.drawMovementMap(data);
+  }
+
+  renderCurrentUnavailable(error) {
+    const detail = fp2Service.extractErrorDetail(error) || {};
+    const payload = fp2Service.buildUnavailablePoseData(detail, 'current');
+    this.state.currentError = error;
+    this.renderCurrent(payload);
   }
 
   detectCurrentZone(data) {

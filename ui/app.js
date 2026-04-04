@@ -1,7 +1,7 @@
 // WiFi DensePose Application - Main Entry Point
 
 import { TabManager } from './components/TabManager.js';
-import { DashboardTab } from './components/DashboardTab.js';
+import { DashboardTab } from './components/DashboardTab.js?v=20260330-fp2dash-01';
 import { FP2Tab } from './components/FP2Tab.js?v=20260301-fix5';
 import { HardwareTab } from './components/HardwareTab.js';
 import { LiveDemoTab } from './components/LiveDemoTab.js';

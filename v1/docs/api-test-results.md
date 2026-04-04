@@ -1,5 +1,11 @@
 # WiFi-DensePose API Test Results
 
+> Historical note (2026-03-29):
+> this is a June 2025 development snapshot from the old mock-pose era.
+> It is not the current API truth for the live runtime. In particular,
+> `/api/v1/pose/*` and `/api/v1/stream/pose` no longer represent the canonical
+> live surface today.
+
 ## Test Summary
 
 **Date**: June 9, 2025  

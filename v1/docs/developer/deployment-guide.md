@@ -1,5 +1,10 @@
 # Deployment Guide
 
+> Historical note (2026-03-29):
+> deployment patterns below are still broadly useful, but current health and
+> metrics endpoints live under `/health/*`. Replace older `/api/v1/health` and
+> root `/metrics` probes with `/health/health` and `/health/metrics`.
+
 ## Overview
 
 This guide provides comprehensive instructions for deploying the WiFi-DensePose system across different environments, from development to production. It covers containerized deployments, cloud platforms, edge computing, and monitoring setup.
@@ -512,13 +517,13 @@ USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+    CMD curl -f http://localhost:8000/health/health || exit 1
 
 # Expose port
 EXPOSE 8000
 
 # Start application
-CMD ["python", "-m", "src.api.main"]
+CMD ["python", "-m", "uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ### Nginx Configuration
@@ -600,7 +605,7 @@ http {
         # Health check
         location /health {
             access_log off;
-            proxy_pass http://wifi_densepose_api/api/v1/health;
+            proxy_pass http://wifi_densepose_api/health/health;
         }
     }
 }
@@ -692,13 +697,13 @@ spec:
             cpu: "2000m"
         livenessProbe:
           httpGet:
-            path: /api/v1/health
+            path: /health/health
             port: 8000
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /api/v1/health
+            path: /health/ready
             port: 8000
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -919,7 +924,7 @@ spec:
       "healthCheck": {
         "command": [
           "CMD-SHELL",
-          "curl -f http://localhost:8000/api/v1/health || exit 1"
+          "curl -f http://localhost:8000/health/health || exit 1"
         ],
         "interval": 30,
         "timeout": 5,
@@ -1180,10 +1185,10 @@ EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=60s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+    CMD curl -f http://localhost:8000/health/health || exit 1
 
 # Start application
-CMD ["python", "-m", "src.api.main"]
+CMD ["python", "-m", "uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ### ARM64 Support
@@ -1306,7 +1311,7 @@ scrape_configs:
   - job_name: 'wifi-densepose-api'
     static_configs:
       - targets: ['wifi-densepose-api:8000']
-    metrics_path: '/metrics'
+    metrics_path: '/health/metrics'
     scrape_interval: 5s
 
   - job_name: 'neural-network'

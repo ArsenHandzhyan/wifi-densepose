@@ -22,10 +22,15 @@ services:
       - ENABLE_TEST_ENDPOINTS=true
       - ENABLE_AUTHENTICATION=false
       - ENABLE_RATE_LIMITING=false
-      - DATABASE_URL=postgresql://wifi_user:wifi_pass@postgres:5432/wifi_densepose
-      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-change-me-dev-secret}
+      - POSTGRES_DB=${POSTGRES_DB:-wifi_densepose}
+      - POSTGRES_USER=${POSTGRES_USER:-wifi_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me-postgres-password}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-wifi_user}:${POSTGRES_PASSWORD:-change-me-postgres-password}@postgres:5432/${POSTGRES_DB:-wifi_densepose}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me-redis-password}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-change-me-redis-password}@redis:6379/0
       - HA_URL=http://homeassistant:8123
-      - HA_TOKEN=${HA_TOKEN}
+      - HA_TOKEN=${HA_TOKEN:-}
       - FP2_ENTITY_ID=${FP2_ENTITY_ID:-input_boolean.fp2_presence}
     command: uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
@@ -46,9 +51,9 @@ services:
     image: postgres:15-alpine
     container_name: wifi-densepose-postgres
     environment:
-      - POSTGRES_DB=wifi_densepose
-      - POSTGRES_USER=wifi_user
-      - POSTGRES_PASSWORD=wifi_pass
+      - POSTGRES_DB=${POSTGRES_DB:-wifi_densepose}
+      - POSTGRES_USER=${POSTGRES_USER:-wifi_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me-postgres-password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
@@ -58,7 +63,7 @@ services:
       - wifi-densepose-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wifi_user -d wifi_densepose"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -66,7 +71,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: wifi-densepose-redis
-    command: redis-server --appendonly yes --requirepass redis_pass
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me-redis-password}
+    command: /bin/sh -c 'exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"'
     volumes:
       - redis_data:/data
     ports:
@@ -75,7 +82,7 @@ services:
       - wifi-densepose-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --raw incr ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -103,7 +110,7 @@ services:
     image: grafana/grafana:latest
     container_name: wifi-densepose-grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-change-me-grafana-password}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana

@@ -1,7 +1,7 @@
 // API Service for WiFi-DensePose UI
 
 import { API_CONFIG, buildApiUrl } from '../config/api.config.js';
-import { backendDetector } from '../utils/backend-detector.js';
+import { backendDetector } from '../utils/backend-detector.js?v=20260404-ui-runtime-20';
 
 export class ApiService {
   constructor() {
@@ -64,11 +64,56 @@ export class ApiService {
     return processedResponse;
   }
 
+  extractErrorMessage(payload) {
+    if (!payload) {
+      return null;
+    }
+
+    if (typeof payload === 'string') {
+      return payload;
+    }
+
+    if (Array.isArray(payload)) {
+      for (const item of payload) {
+        const message = this.extractErrorMessage(item);
+        if (message) {
+          return message;
+        }
+      }
+      return null;
+    }
+
+    if (typeof payload !== 'object') {
+      return null;
+    }
+
+    for (const key of ['message', 'detail', 'error', 'title']) {
+      const message = this.extractErrorMessage(payload[key]);
+      if (message) {
+        return message;
+      }
+    }
+
+    return null;
+  }
+
+  buildHttpError(response, payload) {
+    const fallbackMessage = `HTTP ${response.status}: ${response.statusText}`;
+    const message = this.extractErrorMessage(payload) || fallbackMessage;
+    const error = new Error(message);
+    error.name = 'ApiError';
+    error.status = response.status;
+    error.statusText = response.statusText;
+    error.payload = payload;
+    return error;
+  }
+
   // Generic request method
   async request(url, options = {}) {
+    const { suppressErrorLog = false, ...requestOptions } = options;
     try {
       // Process request through interceptors
-      const processed = await this.processRequest(url, options);
+      const processed = await this.processRequest(url, requestOptions);
       
       // Determine the correct base URL (real backend vs mock)
       let finalUrl = processed.url;
@@ -80,6 +125,7 @@ export class ApiService {
       // Make the request
       const response = await fetch(finalUrl, {
         ...processed.options,
+        cache: processed.options.cache || 'no-store',
         headers: this.getHeaders(processed.options.headers)
       });
 
@@ -88,10 +134,10 @@ export class ApiService {
 
       // Handle errors
       if (!processedResponse.ok) {
-        const error = await processedResponse.json().catch(() => ({
+        const payload = await processedResponse.json().catch(() => ({
           message: `HTTP ${processedResponse.status}: ${processedResponse.statusText}`
         }));
-        throw new Error(error.message || error.detail || 'Request failed');
+        throw this.buildHttpError(processedResponse, payload);
       }
 
       // Parse JSON response
@@ -99,7 +145,9 @@ export class ApiService {
       return data;
 
     } catch (error) {
-      console.error('API Request Error:', error);
+      if (!suppressErrorLog) {
+        console.error('API Request Error:', error);
+      }
       throw error;
     }
   }

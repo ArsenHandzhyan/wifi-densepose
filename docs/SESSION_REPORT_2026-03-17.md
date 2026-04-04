@@ -1,5 +1,14 @@
 # Session Report — 2026-03-17
 
+> Archival infrastructure/runtime note (2026-03-29):
+> this document belongs to an earlier hardware/setup/runtime phase and is
+> preserved only as historical reference.
+> Any setup flow, rollout status, host-specific values, or inventory details
+> below should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Summary
 
 Full-day session: data collection, annotation, model training, and pipeline evaluation for WiFi CSI-based human sensing. Main outcome: **binary presence detection at 80% balanced accuracy** using manual ground truth — first honest, cross-session evaluation result.
@@ -12,10 +21,10 @@ Full-day session: data collection, annotation, model training, and pipeline eval
 | ESP32 node02 | OK | 192.168.1.117, HTTP :8080, ~23 pps |
 | ESP32 node03 | OK | 192.168.1.101, HTTP :8080, ~23 pps |
 | ESP32 node04 | OK | 192.168.1.125, HTTP :8080, ~23 pps |
-| Pixel 8 Pro | OK | RTSP rtsp://admin:admin@192.168.1.148:8554/live, 640x480 H264 |
-| Mac host | OK | 192.168.1.132, UDP:5005 receiver |
+| Pixel 8 Pro | OK | RTSP `rtsp://<camera-user>:<camera-pass>@<camera-ip>:8554/live`, 640x480 H264 |
+| Mac host | OK | `<historical-host-ip>`, UDP:5005 receiver |
 
-All nodes send CSI to 192.168.1.132:5005, WiFi channel 6. Firmware: RunBot CSI Node v0.2.0. Nodes required reboot via `POST /api/v1/reboot` to recover from stale state at session start.
+All nodes send CSI to `<historical-host-ip>:5005`, WiFi channel 6. Firmware: RunBot CSI Node v0.2.0. Nodes required reboot via `POST /api/v1/reboot` to recover from stale state at session start.
 
 ## Data Collected
 

@@ -1,5 +1,14 @@
 # Интеграция Aqara Cloud для FP2
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 ## Настройка через HACS (Рекомендуется)
 
 ### Шаг 1: Установка кастомной интеграции
@@ -79,12 +88,13 @@ python3 scripts/fp2_aqara_api.py
 
 - **Region**: Europe (Germany)
 - **API Endpoint**: https://open-ger.aqara.com
-- **Access Token**: `928a72b8088cac5c79473fca295d5523`
+- **Access Token**: `<redacted_access_token>`
 - **Expires**: 2026-03-11 15:50:02
-- **Refresh Token**: `13ed4606510581b47ca3485365e54748`
+- **Refresh Token**: `<redacted_refresh_token>`
 - **Expires**: 2026-04-10 15:50:02
 
-Эти токены можно использовать для кастомной интеграции.
+Реальные токены не должны храниться в документации; используйте собственные
+секреты из локального защищённого окружения.
 
 ---
 

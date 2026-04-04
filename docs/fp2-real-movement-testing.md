@@ -2,6 +2,15 @@
 
 This guide explains how to validate real movement tracking with Aqara FP2 + Home Assistant + WiFi-DensePose UI.
 
+> Archival FP2/Aqara note (2026-03-29):
+> this document belongs to an earlier FP2/Home Assistant integration line and
+> is preserved only as historical reference for that thread.
+> Any setup flow, status wording, endpoint examples, or device metadata below
+> should be read as archival context rather than current repo truth.
+> For the current canonical repo state and active entrypoints, use
+> `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_DOCS_ENTRYPOINT_20260329.md`
+> and `/Users/arsen/Desktop/wifi-densepose/docs/CURRENT_PROJECT_STATE_20260329.md`.
+
 > **Note:** Aqara Cloud API is not available for Russia region (`open-ru.aqara.com` is unreachable). This guide uses Home Assistant API as the working alternative.
 
 Session log with detailed chronology is stored in:
@@ -210,7 +219,7 @@ Run one-command migration script from project root:
 Example:
 
 ```bash
-./scripts/migrate_ha_to_linux.sh ubuntu@192.168.1.80
+./scripts/migrate_ha_to_linux.sh user@<linux-host-ip>
 ```
 
 After migration:

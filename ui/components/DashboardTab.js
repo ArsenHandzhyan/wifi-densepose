@@ -2,6 +2,7 @@
 
 import { healthService } from '../services/health.service.js';
 import { poseService } from '../services/pose.service.js';
+import { sensingService } from '../services/sensing.service.js';
 
 export class DashboardTab {
   constructor(containerElement) {
@@ -51,8 +52,8 @@ export class DashboardTab {
       this.updateStats(stats);
 
     } catch (error) {
-      console.error('Failed to load dashboard data:', error);
-      this.showError('Failed to load dashboard data');
+      // DensePose API may not be running (sensing-only mode) — fail silently
+      console.log('Dashboard: DensePose API not available (sensing-only mode)');
     }
   }
 
@@ -63,6 +64,17 @@ export class DashboardTab {
       this.updateHealthStatus(health);
     });
 
+    // Subscribe to sensing service state changes for data source indicator
+    this._sensingUnsub = sensingService.onStateChange(() => {
+      this.updateDataSourceIndicator();
+    });
+    // Also update on data — catches source changes mid-stream
+    this._sensingDataUnsub = sensingService.onData(() => {
+      this.updateDataSourceIndicator();
+    });
+    // Initial update
+    this.updateDataSourceIndicator();
+
     // Start periodic stats updates
     this.statsInterval = setInterval(() => {
       this.updateLiveStats();
@@ -70,6 +82,25 @@ export class DashboardTab {
 
     // Start health monitoring
     healthService.startHealthMonitoring(30000);
+  }
+
+  // Update the data source indicator on the dashboard
+  updateDataSourceIndicator() {
+    const el = this.container.querySelector('#dashboard-datasource');
+    if (!el) return;
+    const ds = sensingService.dataSource;
+    const statusText = el.querySelector('.status-text');
+    const statusMsg  = el.querySelector('.status-message');
+    const config = {
+      'live':              { text: 'ESP32',     status: 'healthy', msg: 'Real hardware connected' },
+      'server-simulated':  { text: 'SIMULATED', status: 'warning', msg: 'Server running without hardware' },
+      'reconnecting':      { text: 'RECONNECTING', status: 'degraded', msg: 'Attempting to connect...' },
+      'simulated':         { text: 'OFFLINE',   status: 'unhealthy', msg: 'Server unreachable, local fallback' },
+    };
+    const cfg = config[ds] || config['reconnecting'];
+    el.className = `component-status status-${cfg.status}`;
+    if (statusText) statusText.textContent = cfg.text;
+    if (statusMsg)  statusMsg.textContent = cfg.msg;
   }
 
   // Update API info display
@@ -103,10 +134,18 @@ export class DashboardTab {
     Object.entries(features).forEach(([feature, enabled]) => {
       const featureElement = document.createElement('div');
       featureElement.className = `feature-item ${enabled ? 'enabled' : 'disabled'}`;
-      featureElement.innerHTML = `
-        <span class="feature-name">${this.formatFeatureName(feature)}</span>
-        <span class="feature-status">${enabled ? '✓' : '✗'}</span>
-      `;
+      
+      // Use textContent instead of innerHTML to prevent XSS
+      const featureNameSpan = document.createElement('span');
+      featureNameSpan.className = 'feature-name';
+      featureNameSpan.textContent = this.formatFeatureName(feature);
+      
+      const featureStatusSpan = document.createElement('span');
+      featureStatusSpan.className = 'feature-status';
+      featureStatusSpan.textContent = enabled ? '✓' : '✗';
+      
+      featureElement.appendChild(featureNameSpan);
+      featureElement.appendChild(featureStatusSpan);
       featuresContainer.appendChild(featureElement);
     });
   }
@@ -330,10 +369,18 @@ export class DashboardTab {
       ['zone_1', 'zone_2', 'zone_3', 'zone_4'].forEach(zoneId => {
         const zoneElement = document.createElement('div');
         zoneElement.className = 'zone-item';
-        zoneElement.innerHTML = `
-          <span class="zone-name">${zoneId}</span>
-          <span class="zone-count">undefined</span>
-        `;
+        
+        // Use textContent instead of innerHTML to prevent XSS
+        const zoneNameSpan = document.createElement('span');
+        zoneNameSpan.className = 'zone-name';
+        zoneNameSpan.textContent = zoneId;
+        
+        const zoneCountSpan = document.createElement('span');
+        zoneCountSpan.className = 'zone-count';
+        zoneCountSpan.textContent = 'undefined';
+        
+        zoneElement.appendChild(zoneNameSpan);
+        zoneElement.appendChild(zoneCountSpan);
         zonesContainer.appendChild(zoneElement);
       });
       return;
@@ -343,10 +390,18 @@ export class DashboardTab {
       const zoneElement = document.createElement('div');
       zoneElement.className = 'zone-item';
       const count = typeof data === 'object' ? (data.person_count || data.count || 0) : data;
-      zoneElement.innerHTML = `
-        <span class="zone-name">${zoneId}</span>
-        <span class="zone-count">${count}</span>
-      `;
+      
+      // Use textContent instead of innerHTML to prevent XSS
+      const zoneNameSpan = document.createElement('span');
+      zoneNameSpan.className = 'zone-name';
+      zoneNameSpan.textContent = zoneId;
+      
+      const zoneCountSpan = document.createElement('span');
+      zoneCountSpan.className = 'zone-count';
+      zoneCountSpan.textContent = String(count);
+      
+      zoneElement.appendChild(zoneNameSpan);
+      zoneElement.appendChild(zoneCountSpan);
       zonesContainer.appendChild(zoneElement);
     });
   }
@@ -404,11 +459,13 @@ export class DashboardTab {
     if (this.healthSubscription) {
       this.healthSubscription();
     }
-    
+    if (this._sensingUnsub) this._sensingUnsub();
+    if (this._sensingDataUnsub) this._sensingDataUnsub();
+
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
     }
-    
+
     healthService.stopHealthMonitoring();
   }
 }

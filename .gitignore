@@ -1,3 +1,42 @@
+# Local Claude config (contains WiFi credentials and machine-specific paths)
+CLAUDE.local.md
+
+# ESP32 firmware build artifacts and local config (contains WiFi credentials)
+firmware/esp32-csi-node/build/
+firmware/esp32-csi-node/sdkconfig
+firmware/esp32-csi-node/sdkconfig.defaults
+firmware/esp32-csi-node/sdkconfig.old
+# Downloaded WASM3 source (fetched at configure time)
+firmware/esp32-csi-node/components/wasm3/wasm3-src/
+# ESP-IDF managed components (downloaded at build time)
+firmware/esp32-csi-node/managed_components/
+firmware/esp32-csi-node/dependencies.lock
+firmware/esp32-csi-node/sdkconfig.defaults.bak
+
+# Claude Flow swarm runtime state
+.swarm/
+
+# CSI recordings (local training data, machine-specific)
+rust-port/wifi-densepose-rs/data/recordings/
+
+# NVS partition images and CSVs (contain WiFi credentials)
+nvs.bin
+nvs_config.csv
+nvs_provision.bin
+firmware/esp32-csi-node/nvs_seed.csv
+firmware/esp32-csi-node/nvs_seed.bin
+firmware/esp32-csi-node/nvs_config.bin
+firmware/esp32-csi-node/nvs_wifi.bin
+firmware/esp32-csi-node/nvs.bin
+# Catch any other NVS binaries/CSVs with credentials
+**/nvs_*.bin
+**/nvs_*.csv
+
+# Working artifacts that should not land in root
+/*.wasm
+/esp32_*.txt
+/serial_error.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -187,6 +226,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Compiled Swift helper binaries (macOS WiFi sensing)
+v1/src/sensing/mac_wifi
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
@@ -378,3 +420,19 @@ nvs_config.csv
 project_csi_pipeline_state.md
 photo_*.jpeg
 yolov8n.pt
+
+# Claude Flow runtime artifacts (auto-generated, machine-specific)
+**/daemon.pid
+**/pending-insights.jsonl
+**/vectors.db
+**/memory.db
+**/.claude-flow/sessions/session-*.json
+**/.claude-flow/sessions/current.json
+
+# Node modules (should use npm ci, not committed)
+**/node_modules/
+
+# Local build scripts
+firmware/esp32-csi-node/build_firmware.bat
+data/
+models/

@@ -16,16 +16,13 @@ from src.api.dependencies import (
     require_auth,
     require_websocket_auth_if_enabled,
 )
-from src.api.websocket.connection_manager import ConnectionManager
+from src.api.websocket.connection_manager import connection_manager
 from src.services.stream_service import StreamService
 from src.services.pose_service import PoseService
 from src.services.runtime_uptime import utc_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Initialize connection manager
-connection_manager = ConnectionManager()
 
 
 # Request/Response models

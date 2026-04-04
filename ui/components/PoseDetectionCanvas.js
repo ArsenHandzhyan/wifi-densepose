@@ -45,7 +45,12 @@ export class PoseDetectionCanvas {
     
     // Initialize settings panel
     this.settingsPanel = null;
-    
+
+    // Pose trail state
+    this.poseTrail = [];
+    this.showTrail = false;
+    this.maxTrailLength = 10;
+
     // Initialize component
     this.initializeComponent();
   }
@@ -88,22 +93,19 @@ export class PoseDetectionCanvas {
               <span class="status-text" id="status-text-${this.containerId}">Disconnected</span>
             </div>
           </div>
-          <div class="pose-canvas-controls" id="controls-${this.containerId}">
-            <div class="control-group primary-controls">
-              <button class="btn btn-start" id="start-btn-${this.containerId}">Start</button>
-              <button class="btn btn-stop" id="stop-btn-${this.containerId}" disabled>Stop</button>
-              <button class="btn btn-reconnect" id="reconnect-btn-${this.containerId}" disabled>Reconnect</button>
-              <button class="btn btn-demo" id="demo-btn-${this.containerId}">Demo</button>
-            </div>
-            <div class="control-group secondary-controls">
-              <select class="mode-select" id="mode-select-${this.containerId}">
-                <option value="skeleton">Skeleton</option>
-                <option value="keypoints">Keypoints</option>
-                <option value="heatmap">Heatmap</option>
-                <option value="dense">Dense</option>
-              </select>
-              <button class="btn btn-settings" id="settings-btn-${this.containerId}">⚙️ Settings</button>
-            </div>
+          <div class="pose-canvas-controls" id="controls-${this.containerId}" ${!this.config.enableControls ? 'style="display:none"' : ''}>
+            <button class="btn btn-start" id="start-btn-${this.containerId}">&#9654; Start</button>
+            <button class="btn btn-stop" id="stop-btn-${this.containerId}" disabled>&#9632; Stop</button>
+            <button class="btn btn-reconnect" id="reconnect-btn-${this.containerId}" disabled>&#8635; Reconnect</button>
+            <button class="btn btn-demo" id="demo-btn-${this.containerId}">&#9881; Demo</button>
+            <select class="mode-select" id="mode-select-${this.containerId}">
+              <option value="skeleton">Skeleton</option>
+              <option value="keypoints">Keypoints</option>
+              <option value="heatmap">Heatmap</option>
+              <option value="dense">Dense</option>
+            </select>
+            <button class="btn btn-trail" id="trail-btn-${this.containerId}">&#9676; Trail</button>
+            <button class="btn btn-settings" id="settings-btn-${this.containerId}">&#9881; Settings</button>
           </div>
         </div>
         <div class="pose-canvas-container">
@@ -124,20 +126,20 @@ export class PoseDetectionCanvas {
     const style = document.createElement('style');
     style.textContent = `
       .pose-detection-canvas-wrapper {
-        border: 1px solid #ddd;
+        border: 1px solid rgba(255, 255, 255, 0.06);
         border-radius: 8px;
         overflow: hidden;
-        background: #f9f9f9;
-        font-family: Arial, sans-serif;
+        background: #0d1117;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       }
 
       .pose-canvas-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 10px 15px;
-        background: #f0f0f0;
-        border-bottom: 1px solid #ddd;
+        padding: 12px 16px;
+        background: rgba(15, 20, 35, 0.95);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
       }
 
       .pose-canvas-title {
@@ -148,156 +150,185 @@ export class PoseDetectionCanvas {
 
       .pose-canvas-title h3 {
         margin: 0;
-        color: #333;
+        color: #e0e0e0;
         font-size: 16px;
+        font-weight: 600;
       }
 
       .connection-status {
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 6px;
+        padding: 4px 10px;
+        background: rgba(30, 40, 60, 0.6);
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
       }
 
       .status-indicator {
-        width: 10px;
-        height: 10px;
+        width: 8px;
+        height: 8px;
         border-radius: 50%;
-        background: #ccc;
+        background: #4a5568;
         transition: background-color 0.3s;
       }
 
-      .status-indicator.connected { background: #28a745; }
-      .status-indicator.connecting { background: #ffc107; }
-      .status-indicator.error { background: #dc3545; }
-      .status-indicator.disconnected { background: #6c757d; }
+      .status-indicator.connected { background: #00cc88; box-shadow: 0 0 6px rgba(0, 204, 136, 0.5); }
+      .status-indicator.connecting { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); animation: pulse 1.5s ease-in-out infinite; }
+      .status-indicator.error { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+      .status-indicator.disconnected { background: #4a5568; }
 
       .status-text {
-        font-size: 12px;
-        color: #666;
-        min-width: 80px;
+        font-size: 11px;
+        color: #8899aa;
+        min-width: 70px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 500;
       }
 
       .pose-canvas-controls {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 15px;
-        flex-wrap: wrap;
-      }
-
-      .control-group {
-        display: flex;
-        align-items: center;
         gap: 8px;
-      }
-
-      .primary-controls {
-        flex: 1;
-      }
-
-      .secondary-controls {
-        flex-shrink: 0;
+        flex-wrap: nowrap;
       }
 
       .btn {
         padding: 8px 16px;
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        background: #ffffff;
-        color: #333333;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background: rgba(30, 40, 60, 0.8);
+        color: #c8d0dc;
         cursor: pointer;
         font-size: 13px;
         font-weight: 500;
         transition: all 0.2s ease;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
         text-decoration: none;
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         min-width: 80px;
-        text-align: center;
+        justify-content: center;
       }
 
       .btn:hover:not(:disabled) {
-        background: #f8f9fa;
-        border-color: #adb5bd;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
         transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
       }
 
       .btn:active:not(:disabled) {
         transform: translateY(0);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
       }
 
       .btn:disabled {
-        opacity: 0.6;
+        opacity: 0.35;
         cursor: not-allowed;
-        background: #e9ecef;
-        color: #6c757d;
+        background: rgba(20, 30, 50, 0.6);
+        color: #4a5568;
         transform: none !important;
         box-shadow: none !important;
       }
 
-      .btn-start { 
-        background: #28a745; 
-        color: white; 
-        border-color: #28a745; 
+      .btn-start {
+        background: rgba(0, 204, 136, 0.15);
+        color: #00cc88;
+        border-color: rgba(0, 204, 136, 0.3);
       }
 
-      .btn-start:hover:not(:disabled) { 
-        background: #218838; 
-        border-color: #1e7e34; 
+      .btn-start:hover:not(:disabled) {
+        background: rgba(0, 204, 136, 0.25);
+        border-color: rgba(0, 204, 136, 0.5);
+        box-shadow: 0 4px 12px rgba(0, 204, 136, 0.2);
       }
 
-      .btn-stop { 
-        background: #dc3545; 
-        color: white; 
-        border-color: #dc3545; 
+      .btn-stop {
+        background: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        border-color: rgba(239, 68, 68, 0.3);
       }
 
-      .btn-stop:hover:not(:disabled) { 
-        background: #c82333; 
-        border-color: #bd2130; 
+      .btn-stop:hover:not(:disabled) {
+        background: rgba(239, 68, 68, 0.25);
+        border-color: rgba(239, 68, 68, 0.5);
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
       }
 
-      .btn-reconnect { 
-        background: #17a2b8; 
-        color: white; 
-        border-color: #17a2b8; 
+      .btn-reconnect {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+        border-color: rgba(59, 130, 246, 0.3);
       }
 
-      .btn-reconnect:hover:not(:disabled) { 
-        background: #138496; 
-        border-color: #117a8b; 
+      .btn-reconnect:hover:not(:disabled) {
+        background: rgba(59, 130, 246, 0.25);
+        border-color: rgba(59, 130, 246, 0.5);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
       }
 
-      .btn-demo { 
-        background: #6f42c1; 
-        color: white; 
-        border-color: #6f42c1; 
+      .btn-demo {
+        background: rgba(139, 92, 246, 0.15);
+        color: #a78bfa;
+        border-color: rgba(139, 92, 246, 0.3);
       }
 
-      .btn-demo:hover:not(:disabled) { 
-        background: #5a32a3; 
-        border-color: #512a97; 
+      .btn-demo:hover:not(:disabled) {
+        background: rgba(139, 92, 246, 0.25);
+        border-color: rgba(139, 92, 246, 0.5);
+        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.2);
       }
 
-      .btn-settings { 
-        background: #6c757d; 
-        color: white; 
-        border-color: #6c757d; 
+      .btn-settings {
+        background: rgba(100, 116, 139, 0.15);
+        color: #94a3b8;
+        border-color: rgba(100, 116, 139, 0.3);
       }
 
-      .btn-settings:hover:not(:disabled) { 
-        background: #5a6268; 
-        border-color: #545b62; 
+      .btn-settings:hover:not(:disabled) {
+        background: rgba(100, 116, 139, 0.25);
+        border-color: rgba(100, 116, 139, 0.5);
+      }
+
+      .btn-trail {
+        background: rgba(0, 212, 255, 0.1);
+        color: #5ec4d4;
+        border-color: rgba(0, 212, 255, 0.25);
+      }
+
+      .btn-trail:hover:not(:disabled) {
+        background: rgba(0, 212, 255, 0.2);
+        border-color: rgba(0, 212, 255, 0.45);
+        box-shadow: 0 4px 12px rgba(0, 212, 255, 0.15);
+      }
+
+      .btn-trail.active {
+        background: rgba(0, 212, 255, 0.2);
+        color: #00d4ff;
+        border-color: rgba(0, 212, 255, 0.5);
+        box-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
       }
 
       .mode-select {
-        padding: 5px 8px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        background: #fff;
-        font-size: 12px;
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background: rgba(30, 40, 60, 0.8);
+        color: #b0b8c8;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      .mode-select:focus {
+        outline: none;
+        border-color: rgba(139, 92, 246, 0.5);
+        box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
+      }
+
+      .mode-select option {
+        background: #1a2234;
+        color: #c8d0dc;
       }
 
       .pose-canvas-container {
@@ -410,6 +441,10 @@ export class PoseDetectionCanvas {
     const demoBtn = document.getElementById(`demo-btn-${this.containerId}`);
     demoBtn.addEventListener('click', () => this.toggleDemo());
 
+    // Trail toggle button
+    const trailBtn = document.getElementById(`trail-btn-${this.containerId}`);
+    trailBtn.addEventListener('click', () => this.toggleTrail());
+
     // Settings button
     const settingsBtn = document.getElementById(`settings-btn-${this.containerId}`);
     settingsBtn.addEventListener('click', () => this.showSettings());
@@ -439,6 +474,7 @@ export class PoseDetectionCanvas {
         case 'pose_update':
           this.state.lastPoseData = update.data;
           this.state.frameCount++;
+          this.updateTrail(update.data);
           this.renderPoseData(update.data);
           this.updateStats();
           this.notifyCallback('onPoseUpdate', update.data);
@@ -482,13 +518,39 @@ export class PoseDetectionCanvas {
     }
 
     try {
+      // Render trail before the current frame if enabled
+      if (this.showTrail && this.poseTrail.length > 1) {
+        // The renderer.render() clears the canvas, so we render trail
+        // by hooking into the renderer's canvas context after clear.
+        // We override the render flow: clear, trail, then current.
+        this.renderer.clearCanvas();
+        this.renderTrail(this.renderer.ctx);
+        // Now render current frame without clearing again
+        this.renderCurrentFrameNoClean(poseData);
+      } else {
+        this.renderer.render(poseData, {
+          frameCount: this.state.frameCount,
+          connectionState: this.state.connectionState
+        });
+      }
+    } catch (error) {
+      this.logger.error('Render error', { error: error.message });
+      this.showError(`Render error: ${error.message}`);
+    }
+  }
+
+  renderCurrentFrameNoClean(poseData) {
+    // Call the renderer's render logic without clearing the canvas.
+    // We temporarily stub clearCanvas, render, then restore.
+    const origClear = this.renderer.clearCanvas.bind(this.renderer);
+    this.renderer.clearCanvas = () => {}; // no-op
+    try {
       this.renderer.render(poseData, {
         frameCount: this.state.frameCount,
         connectionState: this.state.connectionState
       });
-    } catch (error) {
-      this.logger.error('Render error', { error: error.message });
-      this.showError(`Render error: ${error.message}`);
+    } finally {
+      this.renderer.clearCanvas = origClear;
     }
   }
 
@@ -539,14 +601,23 @@ export class PoseDetectionCanvas {
     const persons = this.state.lastPoseData?.persons?.length || 0;
     const zones = Object.keys(this.state.lastPoseData?.zone_summary || {}).length;
 
-    statsEl.innerHTML = `
-      Connection: ${this.state.connectionState}<br>
-      Frames: ${this.state.frameCount}<br>
-      FPS: ${fps.toFixed(1)}<br>
-      Persons: ${persons}<br>
-      Zones: ${zones}<br>
-      Uptime: ${uptime}s
-    `;
+    // Use textContent instead of innerHTML to prevent XSS
+    statsEl.textContent = '';
+    const lines = [
+      `Connection: ${this.state.connectionState}`,
+      `Frames: ${this.state.frameCount}`,
+      `FPS: ${fps.toFixed(1)}`,
+      `Persons: ${persons}`,
+      `Zones: ${zones}`,
+      `Uptime: ${uptime}s`
+    ];
+    lines.forEach((line, index) => {
+      if (index > 0) {
+        statsEl.appendChild(document.createElement('br'));
+      }
+      const textNode = document.createTextNode(line);
+      statsEl.appendChild(textNode);
+    });
   }
 
   showError(message) {
@@ -633,6 +704,104 @@ export class PoseDetectionCanvas {
       this.renderer.setMode(mode);
       this.logger.info('Render mode changed', { mode });
     }
+  }
+
+  // --- Pose Trail Methods ---
+
+  toggleTrail() {
+    this.showTrail = !this.showTrail;
+    const trailBtn = document.getElementById(`trail-btn-${this.containerId}`);
+    if (trailBtn) {
+      trailBtn.classList.toggle('active', this.showTrail);
+      trailBtn.textContent = this.showTrail ? '\u25CB Trail On' : '\u25CB Trail';
+    }
+    if (!this.showTrail) {
+      this.poseTrail = [];
+    }
+    this.logger.info('Trail toggled', { showTrail: this.showTrail });
+  }
+
+  updateTrail(poseData) {
+    if (!this.showTrail) return;
+    if (!poseData || !poseData.persons || poseData.persons.length === 0) return;
+
+    // Deep clone the keypoints from all persons for this frame
+    const frameKeypoints = poseData.persons.map(person => {
+      if (!person.keypoints) return null;
+      return person.keypoints.map(kp => ({
+        x: kp.x,
+        y: kp.y,
+        confidence: kp.confidence
+      }));
+    }).filter(Boolean);
+
+    if (frameKeypoints.length > 0) {
+      this.poseTrail.push(frameKeypoints);
+      if (this.poseTrail.length > this.maxTrailLength) {
+        this.poseTrail.shift();
+      }
+    }
+  }
+
+  renderTrail(ctx) {
+    if (!this.poseTrail || this.poseTrail.length < 2) return;
+
+    const totalFrames = this.poseTrail.length;
+
+    // Keypoint color palette (same as renderer's body part colors)
+    const kpColors = [
+      '#ff0000', '#ff4500', '#ffa500', '#ffff00', '#adff2f',
+      '#00ff00', '#00ff7f', '#00ffff', '#0080ff', '#0000ff',
+      '#4000ff', '#8000ff', '#ff00ff', '#ff0080', '#ff0040',
+      '#ff8080', '#ffb380'
+    ];
+
+    // Render ghosted keypoints and trajectory lines for each frame in the trail
+    // (skip the last frame since it's the current one rendered by the normal pipeline)
+    for (let frameIdx = 0; frameIdx < totalFrames - 1; frameIdx++) {
+      const alpha = 0.1 + (frameIdx / totalFrames) * 0.7;
+      const framePersons = this.poseTrail[frameIdx];
+      const nextFramePersons = this.poseTrail[frameIdx + 1];
+
+      framePersons.forEach((personKeypoints, personIdx) => {
+        if (!personKeypoints) return;
+
+        personKeypoints.forEach((kp, kpIdx) => {
+          if (kp.confidence <= 0.1) return;
+
+          const x = this.renderer.scaleX(kp.x);
+          const y = this.renderer.scaleY(kp.y);
+          const color = kpColors[kpIdx % kpColors.length];
+
+          // Draw ghosted keypoint dot
+          ctx.globalAlpha = alpha * 0.6;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Draw trajectory line to same keypoint in next frame
+          if (nextFramePersons && nextFramePersons[personIdx]) {
+            const nextKp = nextFramePersons[personIdx][kpIdx];
+            if (nextKp && nextKp.confidence > 0.1) {
+              const nx = this.renderer.scaleX(nextKp.x);
+              const ny = this.renderer.scaleY(nextKp.y);
+
+              ctx.globalAlpha = alpha * 0.4;
+              ctx.strokeStyle = color;
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(x, y);
+              ctx.lineTo(nx, ny);
+              ctx.stroke();
+            }
+          }
+        });
+      });
+    }
+
+    // Reset alpha
+    ctx.globalAlpha = 1.0;
   }
 
   // Toggle demo mode

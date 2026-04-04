@@ -5,9 +5,11 @@ import { DashboardTab } from './components/DashboardTab.js?v=20260330-fp2dash-01
 import { FP2Tab } from './components/FP2Tab.js?v=20260301-fix5';
 import { HardwareTab } from './components/HardwareTab.js';
 import { LiveDemoTab } from './components/LiveDemoTab.js';
+import { SensingTab } from './components/SensingTab.js';
 import { apiService } from './services/api.service.js';
 import { wsService } from './services/websocket.service.js';
 import { healthService } from './services/health.service.js';
+import { sensingService } from './services/sensing.service.js';
 import { backendDetector } from './utils/backend-detector.js';
 
 class WiFiDensePoseApp {
@@ -74,18 +76,20 @@ class WiFiDensePoseApp {
       // Show notification to user
       this.showBackendStatus('Mock server active - testing mode', 'warning');
     } else {
-      console.log('🔌 Initializing with real backend');
-      
-      // Verify backend is actually working
+      console.log('🔌 Connecting to backend...');
+
       try {
         const health = await healthService.checkLiveness();
-        console.log('✅ Backend is available and responding:', health);
-        this.showBackendStatus('Connected to real backend', 'success');
+        console.log('✅ Backend responding:', health);
+        this.showBackendStatus('Connected to Rust sensing server', 'success');
       } catch (error) {
-        console.error('❌ Backend check failed:', error);
-        this.showBackendStatus('Backend connection failed', 'error');
-        // Don't throw - let the app continue and retry later
+        console.warn('⚠️ Backend not available:', error.message);
+        this.showBackendStatus('Backend unavailable — start sensing-server', 'warning');
       }
+
+      // Start the sensing WebSocket service early so the dashboard and
+      // live-demo tabs can show the correct data-source status immediately.
+      sensingService.start();
     }
   }
 
@@ -107,6 +111,7 @@ class WiFiDensePoseApp {
     this.components.tabManager.onTabChange((newTab, oldTab) => {
       this.handleTabChange(newTab, oldTab);
     });
+
   }
 
   // Initialize individual tab components
@@ -143,11 +148,42 @@ class WiFiDensePoseApp {
       this.components.demo.init();
     }
 
+    // Sensing tab
+    const sensingContainer = document.getElementById('sensing');
+    if (sensingContainer) {
+      this.components.sensing = new SensingTab(sensingContainer);
+    }
+
+    // Training tab - lazy load to avoid breaking other tabs if import fails
+    this.initTrainingTab();
+
     // Architecture tab - static content, no component needed
-    
+
     // Performance tab - static content, no component needed
-    
+
     // Applications tab - static content, no component needed
+  }
+
+  // Lazy-load Training tab panels (dynamic import so failures don't break other tabs)
+  async initTrainingTab() {
+    try {
+      const [{ default: TrainingPanel }, { default: ModelPanel }] = await Promise.all([
+        import('./components/TrainingPanel.js'),
+        import('./components/ModelPanel.js')
+      ]);
+
+      const trainingContainer = document.getElementById('training-panel-container');
+      if (trainingContainer) {
+        this.components.trainingPanel = new TrainingPanel(trainingContainer);
+      }
+
+      const modelContainer = document.getElementById('model-panel-container');
+      if (modelContainer) {
+        this.components.modelPanel = new ModelPanel(modelContainer);
+      }
+    } catch (error) {
+      console.error('Failed to load Training tab components:', error);
+    }
   }
 
   // Handle tab changes
@@ -171,6 +207,25 @@ class WiFiDensePoseApp {
         
       case 'demo':
         // Demo starts manually
+        break;
+
+      case 'sensing':
+        // Lazy-init sensing tab on first visit
+        if (this.components.sensing && !this.components.sensing.splatRenderer) {
+          this.components.sensing.init().catch(error => {
+            console.error('Failed to initialize sensing tab:', error);
+          });
+        }
+        break;
+
+      case 'training':
+        // Refresh panels when training tab becomes visible
+        if (this.components.trainingPanel && typeof this.components.trainingPanel.refresh === 'function') {
+          this.components.trainingPanel.refresh();
+        }
+        if (this.components.modelPanel && typeof this.components.modelPanel.refresh === 'function') {
+          this.components.modelPanel.refresh();
+        }
         break;
     }
   }

@@ -31,10 +31,18 @@
 //! let processor = CsiProcessor::new(config);
 //! ```
 
+pub mod bvp;
 pub mod csi_processor;
+pub mod csi_ratio;
 pub mod features;
+pub mod fresnel;
+pub mod hampel;
+pub mod hardware_norm;
 pub mod motion;
 pub mod phase_sanitizer;
+pub mod ruvsense;
+pub mod spectrogram;
+pub mod subcarrier_selection;
 
 // Re-export main types for convenience
 pub use csi_processor::{
@@ -47,6 +55,9 @@ pub use features::{
 };
 pub use motion::{
     HumanDetectionResult, MotionAnalysis, MotionDetector, MotionDetectorConfig, MotionScore,
+};
+pub use hardware_norm::{
+    AmplitudeStats, CanonicalCsiFrame, HardwareNormError, HardwareNormalizer, HardwareType,
 };
 pub use phase_sanitizer::{
     PhaseSanitizationError, PhaseSanitizer, PhaseSanitizerConfig, UnwrappingMethod,

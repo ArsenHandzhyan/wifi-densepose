@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-MODULE_PATH = ROOT / "v1" / "src" / "services" / "csi_recording_service.py"
-MODULE_SPEC = importlib.util.spec_from_file_location("recording_contract_smoke_service", MODULE_PATH)
-if MODULE_SPEC is None or MODULE_SPEC.loader is None:
-    raise RuntimeError(f"Unable to load recording service module from {MODULE_PATH}")
-MODULE = importlib.util.module_from_spec(MODULE_SPEC)
-MODULE_SPEC.loader.exec_module(MODULE)
-CsiRecordingService = MODULE.CsiRecordingService
+V1_ROOT = ROOT / "v1"
+for candidate in (ROOT, V1_ROOT):
+    text = str(candidate)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+from src.services.csi_recording_service import CsiRecordingService
 
 
 class RecordingContractSmokeTest(unittest.TestCase):

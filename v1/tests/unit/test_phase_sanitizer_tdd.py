@@ -1,20 +1,21 @@
 """TDD tests for phase sanitizer following London School approach."""
 
+import importlib
 import pytest
 import numpy as np
 import sys
-import os
 from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime, timezone
-import importlib.util
+from pathlib import Path
 
-# Import the phase sanitizer module directly
-spec = importlib.util.spec_from_file_location(
-    'phase_sanitizer', 
-    '/workspaces/wifi-densepose/src/core/phase_sanitizer.py'
-)
-phase_sanitizer_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(phase_sanitizer_module)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+V1_ROOT = REPO_ROOT / "v1"
+for candidate in (REPO_ROOT, V1_ROOT):
+    text = str(candidate)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+phase_sanitizer_module = importlib.import_module("src.core.phase_sanitizer")
 
 # Get classes from the module
 PhaseSanitizer = phase_sanitizer_module.PhaseSanitizer

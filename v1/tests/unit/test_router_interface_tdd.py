@@ -1,35 +1,22 @@
 """TDD tests for router interface following London School approach."""
 
+import importlib
 import pytest
 import asyncio
 import sys
-import os
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime, timezone
-import importlib.util
+from pathlib import Path
 
-# Import the router interface module directly
-import unittest.mock
+REPO_ROOT = Path(__file__).resolve().parents[3]
+V1_ROOT = REPO_ROOT / "v1"
+for candidate in (REPO_ROOT, V1_ROOT):
+    text = str(candidate)
+    if text not in sys.path:
+        sys.path.insert(0, text)
 
-# Mock asyncssh before importing
-with unittest.mock.patch.dict('sys.modules', {'asyncssh': unittest.mock.MagicMock()}):
-    spec = importlib.util.spec_from_file_location(
-        'router_interface', 
-        '/workspaces/wifi-densepose/src/hardware/router_interface.py'
-    )
-    router_module = importlib.util.module_from_spec(spec)
-
-    # Import CSI extractor for dependency
-    csi_spec = importlib.util.spec_from_file_location(
-        'csi_extractor', 
-        '/workspaces/wifi-densepose/src/hardware/csi_extractor.py'
-    )
-    csi_module = importlib.util.module_from_spec(csi_spec)
-    csi_spec.loader.exec_module(csi_module)
-
-    # Now load the router interface
-    router_module.CSIData = csi_module.CSIData  # Make CSIData available
-    spec.loader.exec_module(router_module)
+router_module = importlib.import_module("src.hardware.router_interface")
+csi_module = importlib.import_module("src.hardware.csi_extractor")
 
 # Get classes from modules
 RouterInterface = router_module.RouterInterface

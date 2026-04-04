@@ -1,21 +1,22 @@
 """Standalone tests for CSI extractor module."""
 
+import importlib
 import pytest
 import numpy as np
 import sys
-import os
 from unittest.mock import Mock, patch, AsyncMock
 import asyncio
 from datetime import datetime, timezone
-import importlib.util
+from pathlib import Path
 
-# Import the module directly to avoid circular imports
-spec = importlib.util.spec_from_file_location(
-    'csi_extractor', 
-    '/workspaces/wifi-densepose/src/hardware/csi_extractor.py'
-)
-csi_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(csi_module)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+V1_ROOT = REPO_ROOT / "v1"
+for candidate in (REPO_ROOT, V1_ROOT):
+    text = str(candidate)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+csi_module = importlib.import_module("src.hardware.csi_extractor")
 
 # Get classes from the module
 CSIExtractor = csi_module.CSIExtractor

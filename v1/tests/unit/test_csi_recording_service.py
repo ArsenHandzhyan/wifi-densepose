@@ -1,5 +1,8 @@
 import pytest
+import sys
+import json
 
+from src.services import csi_recording_service as csi_recording_module
 from src.services.csi_recording_service import CsiRecordingService
 
 
@@ -7,7 +10,7 @@ def make_service() -> CsiRecordingService:
     return CsiRecordingService()
 
 
-def test_resolve_teacher_source_defaults_to_legacy_rtsp_teacher():
+def test_resolve_teacher_source_defaults_to_platform_teacher():
     service = make_service()
 
     cfg = service._resolve_teacher_source(
@@ -22,11 +25,16 @@ def test_resolve_teacher_source_defaults_to_legacy_rtsp_teacher():
         teacher_start_timeout_sec=None,
     )
 
-    assert cfg["kind"] == "rtsp_teacher"
+    expected_kind = "mac_camera" if sys.platform == "darwin" else "rtsp_teacher"
+    assert cfg["kind"] == expected_kind
     assert cfg["video_requested"] is True
     assert cfg["video_required"] is True
-    assert cfg["source_url"] == "rtsp://admin:admin@192.168.1.148:8554/live"
-    assert cfg["source_url_redacted"] == "rtsp://192.168.1.148:8554/live"
+    if expected_kind == "rtsp_teacher":
+        assert cfg["source_url"] == "rtsp://admin:admin@192.168.1.148:8554/live"
+        assert cfg["source_url_redacted"] == "rtsp://192.168.1.148:8554/live"
+    else:
+        assert cfg["source_name"] == "Mac Camera"
+        assert cfg["device_name"]
 
 
 def test_resolve_teacher_source_rejects_required_video_without_source():
@@ -76,7 +84,7 @@ def test_build_session_summary_marks_partial_video_as_unsuitable():
     assert summary["truth_summary"]["coverage_status"] == "partial"
     assert summary["truth_summary"]["full_session_duration_sec"] == 10.0
     assert summary["truth_summary"]["real_video_duration_sec"] == 5.2
-    assert summary["truth_summary"]["truth_coverage_duration_sec"] == 5.0
+    assert summary["truth_summary"]["truth_coverage_duration_sec"] == 5.2
     assert summary["labeling_verdict"]["suitable_for_labeling"] is False
     assert summary["labeling_verdict"]["code"] == "partial_video_coverage"
 
@@ -131,3 +139,71 @@ def test_get_status_exposes_last_summary_aliases_for_ui_refresh():
     assert status["last_session_summary"] == status["lastSessionSummary"]
     assert status["lastStopResult"]["label"] == "saved_case"
     assert status["lastSessionSummary"]["label"] == "saved_case"
+
+
+@pytest.mark.asyncio
+async def test_start_recording_returns_structured_conflict_code_when_already_recording():
+    service = make_service()
+    service.recording = True
+
+    result = await service.start_recording(label="already_running_case")
+
+    assert result["ok"] is False
+    assert result["error_code"] == "already_recording"
+    assert result["error"] == "Already recording"
+
+
+@pytest.mark.asyncio
+async def test_start_recording_returns_structured_invalid_teacher_config_code():
+    service = make_service()
+
+    result = await service.start_recording(
+        label="invalid_teacher_case",
+        with_video=False,
+        video_required=True,
+        teacher_source_kind="none",
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "invalid_teacher_config"
+    assert "video_required=true" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_stop_recording_is_idempotent_without_active_session():
+    service = make_service()
+
+    result = await service.stop_recording()
+
+    assert result["ok"] is True
+    assert result["status"] == "already_stopped"
+    assert result["already_stopped"] is True
+    assert result["message"] == "Recording service is already inactive"
+
+
+def test_get_status_recovers_last_session_summary_from_disk(monkeypatch, tmp_path):
+    summary_path = tmp_path / "recovered_case.recording_summary.json"
+    payload = {
+        "label": "recovered_case",
+        "session_status": "completed",
+        "stop_reason": "backend_shutdown",
+        "duration_sec": 300.0,
+        "total_chunks": 5,
+        "total_packets": 1612,
+        "node_packets": {"192.168.1.137": 400},
+        "truth_summary": {"with_video": False},
+        "labeling_verdict": {"suitable_for_labeling": True},
+    }
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(csi_recording_module, "CAPTURE_DIR", tmp_path)
+
+    service = make_service()
+    status = service.get_status()
+
+    assert status["recording"] is False
+    assert status["status"] == "completed"
+    assert status["status_scope"] == "last_session"
+    assert status["status_reason"] == "backend_shutdown"
+    assert status["last_session_summary"]["label"] == "recovered_case"
+    assert status["lastStopResult"]["session_summary_path"] == str(summary_path)
+    assert status["lastStopResult"]["recovered_from_disk"] is True

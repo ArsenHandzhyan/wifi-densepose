@@ -1,34 +1,23 @@
 """TDD tests for CSI processor following London School approach."""
 
+import importlib
 import pytest
 import numpy as np
 import sys
-import os
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime, timezone
-import importlib.util
 from typing import Dict, List, Any
+from pathlib import Path
 
-# Import the CSI processor module directly
-spec = importlib.util.spec_from_file_location(
-    'csi_processor', 
-    '/workspaces/wifi-densepose/src/core/csi_processor.py'
-)
-csi_processor_module = importlib.util.module_from_spec(spec)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+V1_ROOT = REPO_ROOT / "v1"
+for candidate in (REPO_ROOT, V1_ROOT):
+    text = str(candidate)
+    if text not in sys.path:
+        sys.path.insert(0, text)
 
-# Import CSI extractor for dependencies
-csi_spec = importlib.util.spec_from_file_location(
-    'csi_extractor', 
-    '/workspaces/wifi-densepose/src/hardware/csi_extractor.py'
-)
-csi_module = importlib.util.module_from_spec(csi_spec)
-csi_spec.loader.exec_module(csi_module)
-
-# Make dependencies available and load the processor
-csi_processor_module.CSIData = csi_module.CSIData
-spec.loader.exec_module(csi_processor_module)
-
-# Get classes from modules
+csi_processor_module = importlib.import_module("src.core.csi_processor")
+csi_module = importlib.import_module("src.hardware.csi_extractor")
 CSIProcessor = csi_processor_module.CSIProcessor
 CSIProcessingError = csi_processor_module.CSIProcessingError
 HumanDetectionResult = csi_processor_module.HumanDetectionResult

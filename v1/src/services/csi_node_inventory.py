@@ -97,6 +97,11 @@ MAC_TO_NODE_ID: Final[dict[str, str]] = {
     str(item["mac"]).lower(): str(item["node_id"])
     for item in CSI_NODE_INVENTORY if "mac" in item
 }
+NODE_ID_TO_MAC: Final[dict[str, str]] = {
+    str(item["node_id"]): str(item["mac"]).lower()
+    for item in CSI_NODE_INVENTORY
+    if item.get("node_id") and item.get("mac")
+}
 NODE_ID_TO_DEFAULT_IP: Final[dict[str, str]] = {
     str(item["node_id"]): str(item["ip"]) for item in CSI_NODE_INVENTORY
 }

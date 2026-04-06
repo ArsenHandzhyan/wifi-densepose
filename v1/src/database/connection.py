@@ -4,9 +4,11 @@ Database connection management for WiFi-DensePose API
 
 import asyncio
 import logging
+import ssl
 from typing import Optional, Dict, Any, AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import create_engine, event, pool, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -105,6 +107,8 @@ class DatabaseManager:
         else:
             raise ValueError("PostgreSQL connection parameters not configured")
         
+        async_db_url, async_connect_args = self._normalize_asyncpg_url(async_db_url)
+
         # Create async engine (don't specify poolclass for async engines)
         self._async_engine = create_async_engine(
             async_db_url,
@@ -114,6 +118,7 @@ class DatabaseManager:
             pool_recycle=self._pool_recycle,
             pool_pre_ping=True,
             echo=self.settings.db_echo,
+            connect_args=async_connect_args,
             future=True,
         )
         
@@ -147,6 +152,43 @@ class DatabaseManager:
         
         # Test connections
         await self._test_postgresql_connection()
+
+    def _normalize_asyncpg_url(self, async_db_url: str) -> tuple[str, dict[str, Any]]:
+        """Convert libpq-style SSL query params into asyncpg-compatible connect args."""
+        split_result = urlsplit(async_db_url)
+        query_pairs = dict(parse_qsl(split_result.query, keep_blank_values=True))
+        sslmode = query_pairs.pop("sslmode", None)
+        sslrootcert = query_pairs.pop("sslrootcert", None)
+        query_pairs.pop("target_session_attrs", None)
+
+        connect_args: dict[str, Any] = {}
+        if sslmode:
+            ssl_context = ssl.create_default_context(cafile=sslrootcert or None)
+            normalized_sslmode = sslmode.strip().lower()
+            if normalized_sslmode in {"disable", "allow", "prefer"}:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            elif normalized_sslmode == "require":
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_REQUIRED if sslrootcert else ssl.CERT_NONE
+            elif normalized_sslmode == "verify-ca":
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+            else:
+                ssl_context.check_hostname = True
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+            connect_args["ssl"] = ssl_context
+
+        normalized_url = urlunsplit(
+            (
+                split_result.scheme,
+                split_result.netloc,
+                split_result.path,
+                urlencode(query_pairs),
+                split_result.fragment,
+            )
+        )
+        return normalized_url, connect_args
     
     async def _initialize_sqlite_fallback(self):
         """Initialize SQLite fallback database."""

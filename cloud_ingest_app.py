@@ -97,6 +97,7 @@ def _extract_request_ip(request: Request) -> tuple[str | None, str | None]:
     return client_ip, forwarded_for
 
 
+@app.get("/")
 @app.get("/health")
 @app.get("/health/live")
 async def health() -> dict[str, object]:
